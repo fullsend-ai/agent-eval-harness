@@ -13,8 +13,9 @@ hide:
 # Make agent performance measurable — and improvable
 
 Evaluate skills and agent capabilities with one declarative
-`eval.yaml`: analyze, generate cases, run, judge, compare, trace in MLflow,
-then optimize. Same config on your laptop, Harbor containers, or EvalHub.
+`eval.yaml`: analyze, generate cases, run, judge, trace in MLflow, then
+optimize; compare runs to keep only real gains. Same config on your laptop,
+Harbor containers, or EvalHub.
 
 <p class="aeh-cta" markdown>
 [Get started :material-arrow-right:](get-started/index.md){ .md-button .md-button--primary }
