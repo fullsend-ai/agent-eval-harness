@@ -18,7 +18,7 @@ matrix:
       - <level_b>
   replications: <int>  # default: 1
   analysis:            # optional
-    correction: holm   # holm (default) | fdr_bh | none
+    correction: holm   # holm (default) | bh | none
     per_judge: false   # opt-in per-judge ANOVA fan-out (default: false)
 ```
 
@@ -73,7 +73,7 @@ The multiple-comparison correction applied across the ANOVA's family of term
 tests (all main effects plus interactions from the one fitted model):
 
 - `holm` (default) — Holm step-down; controls the family-wise error rate.
-- `fdr_bh` (alias `bh`) — Benjamini–Hochberg; controls the false discovery
+- `bh` (alias `fdr_bh`) — Benjamini–Hochberg; controls the false discovery
   rate. Less conservative, appropriate for screening many factors.
 - `none` — no correction; significance is judged on raw p-values.
 

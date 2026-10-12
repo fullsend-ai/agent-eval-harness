@@ -58,7 +58,7 @@ git repo (a per-user temp dir is used as a fallback when unset).
    `anova.json` (`--analyze-only` runs just this over existing runs). Multi-factor designs get
    one joint Wald test per model term — main effects *and* interactions — and the whole term
    family is then corrected for multiplicity: Holm by default, Benjamini-Hochberg via
-   `--correction fdr_bh` (or `matrix.analysis.correction`), or `none` to skip. Raw and adjusted
+   `--correction bh` (alias `fdr_bh`; or `matrix.analysis.correction`), or `none` to skip. Raw and adjusted
    p-values are both reported; `significant` is judged on the adjusted value. Degenerate terms
    (no finite p) are excluded from the family and listed, never given a fabricated p-value.
    Optionally fan the same ANOVA out **per judge** (`--per-judge` or
