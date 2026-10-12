@@ -13,4 +13,4 @@ Be aware that outputs are presented in arbitrary order. Do not let presentation 
 
 ## Output
 
-Write your reasoning before the verdict. Structure the reasoning as one short labeled paragraph per dimension (Completeness, Quality, Accuracy, Relevance), each naming the stronger output and citing specific content from both A and B, followed by a closing sentence that states the overall verdict and why. Then name the overall winner: `A`, `B`, or `tie`.
+Write your reasoning before the verdict. Structure the reasoning as one short labeled paragraph per dimension (Completeness, Quality, Accuracy, Relevance), naming the stronger output or stating that the dimension is tied, and cite specific content from both A and B. Then state the overall verdict and why, and name the overall winner: `A`, `B`, or `tie`.
