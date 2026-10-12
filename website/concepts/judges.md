@@ -222,11 +222,11 @@ text), `{{ conversation }}`, `{{ reasoning }}`, `{{ inputs }}`, `{{ evidence }}`
 `{{ tool_trace }}`, and both sides of a pairwise comparison. `{{ … | tojson }}` re-fences
 its result when the serialized value carries file content.
 
-Three things stay **unfenced**: author-side variables (`{{ arguments }}`,
-`{{ annotations }}`), non-file reads such as `{{ outputs.cost_usd }}`, and — a gap to
-know about — the bare `{{ outputs.files }}` dict repr, so prefer bare `{{ outputs }}` or
-per-file access. Other string filters (`| upper`, `| replace`) return plain strings and
-can strip or alter the markers; don't pipe a fenced variable through them.
+Two things stay **unfenced**: author-side variables (`{{ arguments }}`,
+`{{ annotations }}`) and non-file reads such as `{{ outputs.cost_usd }}`. Bare
+`{{ outputs.files }}` renders the same fenced listing as bare `{{ outputs }}`. Other
+string filters (`| upper`, `| replace`) return plain strings and can strip or alter the
+markers; don't pipe a fenced variable through them.
 
 After the template, `context:` files are appended under a `## Context: <file>` heading,
 and a judge that declares

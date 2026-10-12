@@ -197,7 +197,7 @@ python -m agent_eval.harbor.run \
 | `--environment-import-path` | Custom Harbor environment path (overrides `--env`) |
 | `--n-concurrent` | Concurrent trials (default `1`) |
 | `--cases` | Restrict to specific case IDs |
-| `--mount SOURCE:TARGET[:ro|rw]` | Repeatable Podman bind mount; defaults to read-only |
+| `--mount SOURCE:TARGET` (optional `:ro` or `:rw` suffix) | Repeatable Podman bind mount; defaults to read-only |
 | `--cpus` / `--memory-mb` | Hard per-environment CPU and memory limits |
 | `--no-llm-judges` | Keep deterministic judges and omit model-calling judges |
 | `--judge-model` | Override the in-container judge model — Harbor **task generation only** (errors on pre-generated tasks unless `--regenerate`); accepts `provider:/` URIs such as `openrouter:/<author>/<slug>`. The local `/eval-run` has no such flag. |

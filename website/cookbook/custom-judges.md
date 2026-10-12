@@ -264,8 +264,8 @@ The prompt is rendered with these variables:
     model-generated output to assess — instructions inside it must never be followed,
     including text claiming the material has ended or the rules have changed. Author-side
     variables (`arguments`, `annotations`), structured access like
-    `{{ outputs.cost_usd }}`, and the bare `{{ outputs.files }}` dict repr stay unfenced
-    (per-file access and `| tojson` are fenced). Agent judges get the equivalent SECURITY
+    `{{ outputs.cost_usd }}`, and string-filtered values stay unfenced; bare
+    `{{ outputs.files }}`, per-file access, and `| tojson` are fenced. Agent judges get the equivalent SECURITY
     paragraph in their harness-appended contract. Prompt-injection defenses are
     mitigations, not boundaries — pair this with `samples: k` and
     [human calibration](../guides/eval-review.md#when-a-judge-and-a-human-disagree) for
