@@ -119,7 +119,7 @@ open <output-dir>/index.html
   `report.html` shows a "No HTML report available" message instead of an iframe.
 - **Statistical Significance (ANOVA)** — shown **only when an `anova.json` is
   present**. It renders the ANOVA verdict (**SIGNIFICANT** / **not significant**
-  at your α), a per-term table of **raw and adjusted p-values** (main effects and
+  at your α), a per-term table of **raw and adjusted p** (main effects and
   interactions, with the multiplicity-correction method named — Holm by default)
   alongside the overall **F** statistic when the artifact provides one
   (single-factor repeated-measures / one-way analyses; the multi-factor
@@ -133,7 +133,7 @@ open <output-dir>/index.html
   the artifact includes one, a **cost/quality Pareto frontier**. When the
   artifact carries a `per_judge` block (opt-in per-judge screening), a compact
   **Per-judge effects (screening)** judge-by-term table follows, with raw and
-  BH-adjusted p-values and any excluded judges listed with their reasons.
+  BH-adjusted p and any excluded judges listed with their reasons.
   Older artifacts without the correction fields render with their single p
   column unchanged. With no `anova.json`, this section is simply absent and
   the rest of the report is unchanged. How to read the section top to bottom

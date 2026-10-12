@@ -128,7 +128,7 @@ reward composition, and `/eval-anova` all work per judge.
 LLM prompts follow the harness's
 [judge-prompt template](https://github.com/opendatahub-io/agent-eval-harness/blob/main/skills/eval-analyze/references/judge-prompt-template.md)
 — task context, the one artifact variable the criterion grades, PASS/FAIL blocks, and
-example slots — with no response-format boilerplate: the harness forces a tool call and
+in-prompt example slots — with no response-format boilerplate: the harness forces a tool call and
 fences the artifact itself. The same rules, with the skeleton, are in
 [Authoring an LLM judge prompt](../cookbook/custom-judges.md#authoring-an-llm-judge-prompt).
 

@@ -32,7 +32,7 @@ A judge's type is inferred from which field is populated. There is no `type:` ke
 | Type | Set this field | Returns | Runs where |
 | --- | --- | --- | --- |
 | **builtin** | `builtin:` | bool or score | reusable judge from the harness library |
-| **check** | `check:` | `(bool\|number, str)` | inline Python, in-process |
+| **check** | `check:` | `(bool or number, str)` | inline Python, in-process |
 | **agent** | `agent:` (+ `prompt`/`prompt_file`/`llm_rubric`) | bool or score | tool-using judge run through the runner abstraction against a staged workspace |
 | **LLM** | `prompt:` / `prompt_file:` / `llm_rubric:` | bool or score | Anthropic or OpenAI API call (chosen by the judge model), or the configured runner for `runner:/` models |
 | **code** | `module:` + `function:` | judge's return | your Python module |
@@ -143,7 +143,7 @@ means the value is agent-produced and renders between
 
 | Variable | Contents | Fenced? |
 | --- | --- | --- |
-| `{{ outputs }}` | File artifacts and modified files rendered as markdown. Also supports structured access: `{{ outputs.files }}`, `{{ outputs.events }}`. | **Yes** (bare). `{{ outputs.files['x'] }}`, an `outputs.files.items()` loop and `{{ outputs.files \| tojson }}` fence each file; bare `{{ outputs.files }}`, `{{ outputs \| tojson }}` and non-file keys (`{{ outputs.cost_usd }}`, `{{ outputs.artifacts_content }}`) are **not** fenced. |
+| `{{ outputs }}` | File artifacts and modified files rendered as markdown. Also supports structured access: `{{ outputs.files }}`, `{{ outputs.events }}`. | **Yes** (bare). `{{ outputs.files['x'] }}`, an `outputs.files.items()` loop and `{{ outputs.files | tojson }}` fence each file; bare `{{ outputs.files }}`, `{{ outputs | tojson }}` and non-file keys (`{{ outputs.cost_usd }}`, `{{ outputs.artifacts_content }}`) are **not** fenced. |
 | `{{ conversation }}` | Root-level assistant **visible** text only (excludes subagent text, tool calls, and extended-thinking). | **Yes** |
 | `{{ reasoning }}` | Like `{{ conversation }}` but also includes the model's extended-thinking (chain-of-thought) — for reasoning-quality judges. Needs `traces.events: true`. | **Yes** |
 | `{{ tool_trace }}` | Chronological trace of tool calls (Read, Bash, Agent, …). | **Yes** |
@@ -505,7 +505,7 @@ Per case, the harness:
   untrusted material starts and stops whatever it contains.
 
 With no `review.yaml`, or no labels matching the judge and `mix`, the judge
-runs without examples and a warning prints once per judge — never an error at
+runs without harvested examples and a warning prints once per judge — never an error at
 scoring time.
 
 ## The reserved `pairwise` judge

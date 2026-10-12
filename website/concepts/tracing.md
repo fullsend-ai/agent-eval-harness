@@ -3,7 +3,7 @@
 The harness turns Claude Code's raw `stream-json` output into rich, **hierarchical MLflow traces** — an agent/tool/subagent span tree with timing, cost, and token usage. The same builder powers the eval pipeline and the standalone `claude-trace` CLI, so eval traces and production traces are structurally identical and directly comparable in the MLflow UI.
 
 !!! info "Two independent tracing paths"
-    This page is mostly about the **stream-json path** the harness builds post-hoc. Claude Code also has a separate **native OTel/OTLP path** that emits spans live over the wire. They are distinct — see [Native OTel/OTLP](#native-otelotlp-a-separate-path) at the end.
+    This page is mostly about the **stream-json path** the harness reconstructs after the run. Claude Code also has a separate **native OTel/OTLP path** that emits spans live over the wire. They are distinct — see [Native OTel/OTLP](#native-otelotlp-a-separate-path) at the end.
 
 ## MLflow is opt-in
 
@@ -60,7 +60,7 @@ traces:
 !!! warning "The trace builder needs the raw stream-json"
     Hierarchical traces are reconstructed from `stdout.log`. If `stdout` capture is off (or the log is missing), `build_trace()` returns `None` and no trace is pushed. See the [traces config reference](../reference/config/traces.md).
 
-## Post-hoc hierarchical trace building
+## Hierarchical trace building after the run
 
 Rather than instrumenting the agent live, the harness reads the completed `stream-json` log and reconstructs the span tree after the run — `build_trace()` in [`agent_eval/mlflow/trace_builder.py`](https://github.com/opendatahub-io/agent-eval-harness/blob/main/agent_eval/mlflow/trace_builder.py). This yields one consolidated trace per invocation, even when the skill spawns background agents.
 
@@ -99,7 +99,7 @@ graph TD
 - **Timestamps** — the runner injects wall-clock timestamps onto assistant events (`claude --print` doesn't emit them) and a synthetic user event for the prompt (it isn't recorded either).
 
 !!! warning "Why not the native MLflow Stop hook?"
-    Claude Code ships a `Stop`-hook autologger (`mlflow autolog claude`). The harness deliberately avoids it during evals: the Stop hook fires once **per session**, so a skill using background agents produces N+1 fragmented traces instead of one. During eval runs the harness injects **env vars only** (via `inject_tracing_env()`) and builds the consolidated trace post-hoc.
+    Claude Code ships a `Stop`-hook autologger (`mlflow autolog claude`). The harness deliberately avoids it during evals: the Stop hook fires once **per session**, so a skill using background agents produces N+1 fragmented traces instead of one. During eval runs the harness injects **env vars only** (via `inject_tracing_env()`) and builds the consolidated trace after the run.
 
 ## Cost and token conventions
 
@@ -152,7 +152,7 @@ Each run writes `stdout.log`, `run_result.json`, and `subagents/*.jsonl` to the 
 
 ## Native OTel/OTLP: a separate path
 
-Independent of the stream-json builder, Claude Code can emit **OpenTelemetry spans live** to an OTLP endpoint (MLflow exposes `/v1/traces`). This is the path the batch-agent CI pipelines use — no post-hoc reconstruction, spans are exported during the run and forwarded to MLflow after the job.
+Independent of the stream-json builder, Claude Code can emit **OpenTelemetry spans live** to an OTLP endpoint (MLflow exposes `/v1/traces`). This is the path the batch-agent CI pipelines use — nothing is reconstructed afterwards; spans are exported during the run and forwarded to MLflow after the job.
 
 Enable it with Claude Code's own env vars:
 

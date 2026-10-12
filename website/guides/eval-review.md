@@ -152,7 +152,7 @@ IDs and feedback that motivate it — and asks for approval.
     boolean LLM judge → numeric LLM judge — one failure mode per judge, and writes LLM
     prompts from the
     [judge-prompt template](../cookbook/custom-judges.md#authoring-an-llm-judge-prompt),
-    using the run you just reviewed to fill its PASS/FAIL/borderline example slots.
+    using the run you just reviewed to fill its in-prompt PASS/FAIL/borderline example slots.
 
 ### Prompt-mode targets the docs, not a skill
 

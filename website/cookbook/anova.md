@@ -168,7 +168,7 @@ That's `2 × 2 = 4` conditions; with 3 replications over 4 cases → `4 × 4 × 
 
 With multiple factors, `anova.json` reports one joint Wald test per term —
 `model`, `context`, and the `model:context` interaction (the row that answers
-"only some models") — with raw and adjusted (Holm by default) p-values side by
+"only some models") — with raw and adjusted p (Holm by default) side by
 side (switch methods with `--correction bh` or `none`; see
 [the statistics](../concepts/anova.md#per-term-wald-tests-and-multiplicity-correction)).
 There is no overall F in this design: the mixed model answers per term.

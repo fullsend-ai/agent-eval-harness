@@ -18,7 +18,7 @@ matrix:
   replications: 3         # optional, default 1
   analysis:               # optional
     correction: holm      # holm (default) | bh (alias fdr_bh) | none
-    per_judge: false      # opt-in per-judge ANOVA fan-out
+    per_judge: false      # opt-in per-judge screening
 ```
 
 The block is parsed by `MatrixBuilder.from_yaml` through the same raw loader as the
@@ -82,11 +82,11 @@ tests** — every main effect plus every interaction from the one fitted model:
 | `none` | nothing — significance on raw p-values | |
 
 Spelling is case-insensitive; `anova.json` always records the canonical short name
-(`fdr_bh` is written as `bh`). Both raw and adjusted p-values are reported;
+(`fdr_bh` is written as `bh`). Both raw and adjusted p are reported;
 `significant` is computed on the adjusted value (on raw under `none`). Degenerate
 terms (no finite p) are listed under `excluded_terms` and never counted in the family.
 
-The same method also corrects the **post-hoc pairwise level contrasts** written under
+The same method also corrects the **post-hoc level contrasts** written under
 `anova.json`'s `contrasts` key, where the family is the pairs *within one factor* —
 never pooled across factors.
 
@@ -95,7 +95,7 @@ never pooled across factors.
 
 ## `analysis.per_judge` (optional, default `false`)
 
-Opt-in **per-judge fan-out**: the same single/multi-factor ANOVA the composite gets is
+Opt-in **per-judge screening**: the same single/multi-factor ANOVA the composite gets is
 run once per judge over that judge's own per-case values (numeric as-is, booleans as
 0/1; pairwise verdicts and error samples contribute nothing). All resulting
 (judge, term) raw p-values are corrected as **one Benjamini–Hochberg family**,

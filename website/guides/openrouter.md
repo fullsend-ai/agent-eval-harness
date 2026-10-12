@@ -70,7 +70,7 @@ about pins is enforced around the request, by the two levels below.
    and [eval-anova → Rules at a glance](eval-anova.md#rules-at-a-glance).
 
 The agent holds the **operator key** (`provider.key_exposed_to_agent: true`,
-`key_scope: operator`; the startup line says so). `budget.run_usd` is enforced post hoc.
+`key_scope: operator`; the startup line says so). `budget.run_usd` is enforced after the run.
 
 ### `key-guardrail` (opt-in)
 
@@ -144,7 +144,7 @@ fields are listed in [runs directory → cost provenance](../reference/runs-dire
 `execution.max_budget_usd` keeps its **per-invocation** meaning; the CLI receives
 `× cli_budget_inflation` (default 50) because it enforces the cap on its inflated
 estimate, and a cap of 0 omits the flag. `models.providers.openrouter.budget.run_usd` is
-the **whole-run** pool: post hoc at `audit` (`budget.exceeded: run`, `--strict-cost`),
+the **whole-run** pool: after the run at `audit` (`budget.exceeded: run`, `--strict-cost`),
 server-side and in flight at `key-guardrail`. Judge spend is outside both — it lands in
 `summary.yaml` (`judge_usage`, `total_cost_usd`), never in `run_result.cost_usd`.
 

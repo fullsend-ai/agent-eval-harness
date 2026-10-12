@@ -85,7 +85,7 @@ call `harbor run`, parse the job dir, generate the report, and check regressions
 | `--env <name>` | Execution environment: `kubernetes` (default), `podman`, `openshift`, `k8s` |
 | `--model <name>` | Model passed to the Harbor agent (`harbor run -m`) |
 | `-n <n>` | Parallelism — concurrent trial pods/containers |
-| `--mount <source:target[:ro\|rw]>` | Repeatable Podman bind mount; read-only by default |
+| `--mount <source:target[:ro|rw]>` | Repeatable Podman bind mount; read-only by default |
 | `--cpus <n>` / `--memory-mb <MiB>` | Hard per-environment resource limits |
 | `--no-llm-judges` | Generate and run deterministic judges only; requires `--image` and an empty tasks directory or `--regenerate` |
 

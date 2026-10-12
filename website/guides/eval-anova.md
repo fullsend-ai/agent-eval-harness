@@ -3,8 +3,8 @@
 `/eval-anova` runs a Design-of-Experiments (DoE) sweep over a **matrix** of
 configurations — models, thinking-effort levels, prompts, tools — and tells you
 whether the score differences between them are *statistically real* or just
-run-to-run noise. It reports an ANOVA (raw and adjusted p-values per term —
-plus F and effect size for a single-factor design), the **level contrasts**
+run-to-run noise. It reports an ANOVA (raw and adjusted p per term, Holm by
+default — plus F and effect size for a single-factor design), the **level contrasts**
 that say which levels differ and by how much, and a cost-vs-quality Pareto
 frontier.
 
@@ -175,8 +175,9 @@ Pareto frontier. `--analyze-only` runs *just* this step.
 Multi-factor designs report one **joint Wald test per model term** — every
 main effect and every interaction — and correct the resulting p-value family
 for multiple comparisons (**Holm** by default; `bh` or `none` via
-`--correction` / `matrix.analysis.correction`). Raw and adjusted p-values are
-both written to `anova.json`; significance is judged on the adjusted value.
+`--correction` / `matrix.analysis.correction`). Raw and adjusted p are both
+written to `anova.json` (`p_values` / `p_adjusted`); significance is judged on
+the adjusted value.
 Single-factor designs get a repeated-measures F with its effect size instead
 (a family of one, so the correction is moot). See
 [Analysis of variance](../concepts/anova.md#per-term-wald-tests-and-multiplicity-correction)

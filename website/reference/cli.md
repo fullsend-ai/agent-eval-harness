@@ -93,7 +93,7 @@ python3 ${CLAUDE_SKILL_DIR}/scripts/orchestrate.py --config eval.yaml --analyze-
 | `--avg-cost-per-run <float>` | unset | Per-run USD cost for the `--dry-run` estimate (else `execution.max_budget_usd` as an upper bound, else "unknown") |
 | `--output <path>` | `<runs>/comparison-report` | Output dir for the `/eval-compare` report |
 | `--no-report` | off | Write `anova.json` but skip the report render |
-| `--correction <method>` | unset | `holm` \| `bh` \| `fdr_bh` \| `none` across the ANOVA term family; overrides `matrix.analysis.correction` (then `holm`) |
+| `--correction <method>` | unset | `holm`, `bh` (alias `fdr_bh`), or `none` across the ANOVA term family; overrides `matrix.analysis.correction` (then `holm`) |
 | `--per-judge` | off | Also run the ANOVA once per judge, one Benjamini–Hochberg family across judges × terms; enables `matrix.analysis.per_judge` |
 
 The process exits non-zero when the config has no `matrix:` (outside
@@ -193,11 +193,11 @@ python -m agent_eval.harbor.run \
 | `--jobs-dir` | Where Harbor writes its job output (required) |
 | `--image` | Task image — required **only** when generating tasks |
 | `--agent` | Harbor agent name (default: derived from `runner.type`) |
-| `--env` | `podman` \| `kubernetes` \| `k8s` \| `openshift` (default `kubernetes`) |
+| `--env` | `podman`, `kubernetes`, `k8s`, or `openshift` (default `kubernetes`) |
 | `--environment-import-path` | Custom Harbor environment path (overrides `--env`) |
 | `--n-concurrent` | Concurrent trials (default `1`) |
 | `--cases` | Restrict to specific case IDs |
-| `--mount SOURCE:TARGET[:ro\|rw]` | Repeatable Podman bind mount; defaults to read-only |
+| `--mount SOURCE:TARGET[:ro|rw]` | Repeatable Podman bind mount; defaults to read-only |
 | `--cpus` / `--memory-mb` | Hard per-environment CPU and memory limits |
 | `--no-llm-judges` | Keep deterministic judges and omit model-calling judges |
 | `--judge-model` | Override the in-container judge model — Harbor **task generation only** (errors on pre-generated tasks unless `--regenerate`); accepts `provider:/` URIs such as `openrouter:/<author>/<slug>`. The local `/eval-run` has no such flag. |

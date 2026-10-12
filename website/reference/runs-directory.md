@@ -134,7 +134,7 @@ unchanged, so a run without OpenRouter reads exactly as before.
 | `per_model_usage[m].cost_usd` / `.cost_usd_estimate` / `.providers` | Per-model cost from the ledger join (bare-slug echo, permaslug via the catalog, single-model fallback); the estimate is preserved next to it. A key with no match keeps `null` and a warning. |
 | `routing` | The audit of served providers against the declared pins: `enforcement`, `policy`, `sha`, `declared`, `served`, `audited`, `compliant`, `violations`, `unattributed`, `degraded`, `audit_complete`, `snapshot`. A violation is a billed, kept generation whose provider was outside the declared set; it is reported, never repaired. |
 | `provider` | `{name, kind, transport: direct, runner, base_url, key_scope, key_hash, key_exposed_to_agent, background_model}`. `key_scope` is `operator` at `enforcement: audit` and `per-run` at `key-guardrail` — on a per-run key the key-usage delta is the run's own spend by construction. |
-| `budget` | `{invocation_usd, cli_cap_usd, run_usd, enforcement: cli-estimate \| key-guardrail, exceeded, exceeded_reason, overshoot_usd}`; `exceeded: run` with `post-hoc` is set when the reconciled sum passes `budget.run_usd`. |
+| `budget` | `{invocation_usd, cli_cap_usd, run_usd, enforcement, exceeded, exceeded_reason, overshoot_usd}` (`enforcement` is `cli-estimate` or `key-guardrail`); `exceeded: run` with `exceeded_reason: post-hoc` is set after the run, when the reconciled sum passes `budget.run_usd`. |
 
 Under a plan the case aggregate follows the same arithmetic: one unpriced case makes
 the run's `cost_usd` `null` (`cases_priced` says how many were priced); a partial sum is
@@ -364,7 +364,7 @@ and `report.py` render from it without recomputing anything.
 | Key | Contents |
 | --- | --- |
 | `anova` | The omnibus test — shape below. |
-| `contrasts` | Post-hoc pairwise level contrasts, one block per factor — shape below. |
+| `contrasts` | Post-hoc level contrasts, one block per factor — shape below. |
 | `condition_summaries` | One entry per condition: `condition_id`, `levels`, each factor also flattened to the top level (`model: …`), and the composite's `mean` / `std` / `min` / `max` / `n` over its rows (cases × replications); `cost` — the mean run `cost_usd` — only when every run of the condition reported one. |
 | `pareto_frontier` | The non-dominated subset of `condition_summaries` (minimize `cost`, maximize `mean`). Equals the full list when any condition lacks a `cost`. |
 | `design` | `{factors: {<name>: [<levels>]}, n_cases, replications}`, plus `excluded_cases` when any. |
@@ -375,7 +375,7 @@ and `report.py` render from it without recomputing anything.
 | `per_judge` | Only with `analysis.per_judge` / `--per-judge` — shape below. |
 | `generated_at` | UTC ISO-8601 timestamp. |
 
-**`anova`** — common fields: `method`, `alpha`, `correction` (`holm` \| `bh` \|
+**`anova`** — common fields: `method`, `alpha`, `correction` (`holm`, `bh`, or
 `none`), `family_size` (real tests only), `significant`, and, when a term's test was
 degenerate, `excluded_terms` plus a `note`. The rest depends on the design:
 

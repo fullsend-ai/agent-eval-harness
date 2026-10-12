@@ -195,7 +195,7 @@ knowledge) is injected into every prompt.
 | --- | --- |
 | `builtin: docs/navigation` | A [builtin prompt](../reference/builtin-prompts.md) from `agent_eval/prompts/` |
 | `prompt_file: ./path.md` | A project-specific prompt file |
-| `prompt: \| ...` | An inline prompt |
+| `prompt: | ...` | An inline prompt |
 
 List the available builtin prompts, and preview what would be generated without
 spending API calls:

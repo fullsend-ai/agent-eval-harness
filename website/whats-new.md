@@ -19,7 +19,7 @@ has the same entries with downloadable tags.
 
 ### [1.56.0](https://github.com/opendatahub-io/agent-eval-harness/releases/tag/v1.56.0) — Post-hoc level contrasts
 
-The omnibus test says *a factor matters*; the new pairwise **level contrasts**
+The omnibus test says *a factor matters*; the new post-hoc **level contrasts**
 ("opus vs sonnet: estimate +0.06, adjusted p = .02") say *which* levels differ and by
 how much, corrected within each factor (Holm by default, following
 `matrix.analysis.correction`). They land in `anova.json` under `contrasts` and
@@ -93,7 +93,7 @@ and [Turn labels into calibration](guides/eval-review.md#turn-labels-into-calibr
 ### [1.45.0](https://github.com/opendatahub-io/agent-eval-harness/releases/tag/v1.45.0) — Binary-first judge authoring
 
 `/eval-analyze` and `/eval-review` now author judges down a selection ladder —
-builtin → inline `check` → boolean LLM → numeric LLM — with exactly one failure mode
+builtin → inline `check` → boolean (pass/fail) LLM → numeric LLM — with exactly one failure mode
 per judge, following the rules in
 [Authoring an LLM judge prompt](cookbook/custom-judges.md#authoring-an-llm-judge-prompt)
 (the shipped [judge-prompt template](https://github.com/opendatahub-io/agent-eval-harness/blob/main/skills/eval-analyze/references/judge-prompt-template.md)).

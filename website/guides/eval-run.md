@@ -200,7 +200,7 @@ exposed to LLM judges as Jinja2 template variables.
 
 Aggregation is by value type: **boolean** judges become a `pass_rate` (fraction True),
 **numeric** judges become a `mean`. Results land in `summary.yaml` under `aggregated` and
-`per_case`. LLM judges can be sampled `N` times (`samples:`) — bool judges reduce by
+`per_case`. LLM judges can be sampled `N` times (`samples:`) — boolean judges reduce by
 majority vote, numeric by median. See [pairwise & sampling](../concepts/pairwise-and-sampling.md).
 
 !!! tip "Baseline → pairwise comparison"

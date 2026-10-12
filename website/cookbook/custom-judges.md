@@ -334,7 +334,7 @@ judges:
 ```
 
 Ordinal scales are hard to calibrate — raters disagree about a 3 vs a 4, and the judge
-inherits that noise. A binary boundary keeps every failure actionable: a failed
+inherits that noise. A pass/fail boundary keeps every failure actionable: a failed
 `dangerously_wrong` means one specific thing.
 
 ### Minimal context
