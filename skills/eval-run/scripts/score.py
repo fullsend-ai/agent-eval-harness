@@ -1054,6 +1054,12 @@ def _fence_untrusted(text, label):
     """
     if not text:
         return text
+    # Content can carry the markers themselves (an artifact that says
+    # "[END EVALUATED MATERIAL]" and then issues instructions would close the
+    # fence early). Neutralize both markers inside the material so the only
+    # live boundary is the one written here.
+    text = (text.replace(_UNTRUSTED_CLOSE, "[END EVALUATED MATERIAL (escaped)]")
+                .replace(_UNTRUSTED_OPEN, _UNTRUSTED_OPEN + " (escaped)"))
     return f"{_UNTRUSTED_OPEN}: {label}]\n{text}\n{_UNTRUSTED_CLOSE}"
 
 

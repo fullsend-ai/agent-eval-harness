@@ -62,6 +62,14 @@ _EXCERPT_OPEN = "[BEGIN EXCERPT]"
 _EXCERPT_CLOSE = "[END EXCERPT]"
 
 
+def _neutralize_markers(text):
+    """An excerpt that contains the markers could close its own fence early
+    and place text outside the boundary; escape them so only the real ones
+    delimit the excerpt."""
+    return (text.replace(_EXCERPT_CLOSE, "[END EXCERPT (escaped)]")
+                .replace(_EXCERPT_OPEN, "[BEGIN EXCERPT (escaped)]"))
+
+
 @dataclass
 class Exemplar:
     """One human-labeled case usable as a few-shot anchor."""
@@ -285,10 +293,10 @@ def format_examples(exemplars):
         ]
         if ex.input_excerpt:
             lines.append(f"\nInput:\n{_EXCERPT_OPEN}\n"
-                         f"{ex.input_excerpt}\n{_EXCERPT_CLOSE}")
+                         f"{_neutralize_markers(ex.input_excerpt)}\n{_EXCERPT_CLOSE}")
         if ex.output_excerpt:
             lines.append(f"\nOutput:\n{_EXCERPT_OPEN}\n"
-                         f"{ex.output_excerpt}\n{_EXCERPT_CLOSE}")
+                         f"{_neutralize_markers(ex.output_excerpt)}\n{_EXCERPT_CLOSE}")
         lines.append(f"\nHuman verdict: {ex.verdict}")
         if ex.comment:
             lines.append(f"Human comment: {_truncate(ex.comment)}")
