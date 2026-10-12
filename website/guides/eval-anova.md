@@ -60,7 +60,7 @@ pip install -e ".[anova]"        # or: uv pip install -e ".[anova]"
 
 ## Design the matrix
 
-The `matrix:` block is the one piece of config `/eval-anova` adds on top of a
+The [`matrix:`](../reference/config/matrix.md) block is the one piece of config `/eval-anova` adds on top of a
 normal `eval.yaml`. It lists the **factors** you want to vary and their
 **levels**; the full-factorial expansion is the Cartesian product of every
 factor's levels.
@@ -127,8 +127,8 @@ python3 ${CLAUDE_SKILL_DIR}/scripts/orchestrate.py --config eval.yaml --analyze-
 | `--avg-cost-per-run <float>` | unset | Per-run cost used by `--dry-run` for a point estimate. |
 | `--output <path>` | default compare dir | Output dir for the `/eval-compare` report. |
 | `--no-report` | off | Compute `anova.json` but skip rendering the report. |
-| `--correction <method>` | unset | Multiple-comparison correction across the ANOVA term family (and within each factor's contrasts): `holm`, `bh` (alias `fdr_bh`), or `none`. Precedence: `--correction` > `matrix.analysis.correction` > `holm`. |
-| `--per-judge` | off | Also run the ANOVA once per judge (screening), Benjamini–Hochberg-corrected across the whole judges×terms family. Same as `matrix.analysis.per_judge: true` — either one enables it; the flag cannot turn a config-enabled screen off. |
+| `--correction <method>` | unset | Multiple-comparison correction across the ANOVA term family (and within each factor's contrasts): `holm`, `bh` (alias `fdr_bh`), or `none`. Precedence: `--correction` > [`matrix.analysis.correction`](../reference/config/matrix.md#analysiscorrection-optional-default-holm) > `holm`. |
+| `--per-judge` | off | Also run the ANOVA once per judge (screening), Benjamini–Hochberg-corrected across the whole judges×terms family. Same as [`matrix.analysis.per_judge: true`](../reference/config/matrix.md#analysisper_judge-optional-default-false) — either one enables it; the flag cannot turn a config-enabled screen off. |
 
 !!! tip "Estimate cost before you commit"
     `--dry-run` prints the design and a cost line. It uses `--avg-cost-per-run`

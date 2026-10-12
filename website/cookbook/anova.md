@@ -19,7 +19,7 @@ The complete, runnable example lives at
 
 ## Recipe 1 — a context A/B on one model
 
-The `matrix:` block varies one non-model factor (`context`) on a single model:
+The [`matrix:`](../reference/config/matrix.md) block varies one non-model factor (`context`) on a single model:
 
 ```yaml title="eval.yaml (excerpt)"
 matrix:

@@ -37,7 +37,7 @@ order — [When is a difference real?](#when-is-a-difference-real) walks through
 ## Factorial design: factors, levels, conditions, replications
 
 - **Factor** — a knob you vary in the experiment (model, effort, prompt, a tool
-  toggle). Factors are the keys under `matrix.factors`.
+  toggle). Factors are the keys under [`matrix.factors`](../reference/config/matrix.md#factors-required).
 - **Level** — one discrete value of a factor. Levels must be a **non-empty YAML
   list**; a bare scalar is rejected, because `itertools.product` would otherwise
   iterate the string character-by-character and silently build a garbage design.
@@ -132,7 +132,8 @@ are corrected for multiple comparisons before any significance call:
 (no finite p — e.g. a zero-variance response) is reported as `null`, listed in
 `excluded_terms` with a `note`, and never inflates the other terms' adjusted
 values — a p-value is never fabricated for a degenerate design. Configure the
-method with `matrix.analysis.correction` or the `--correction` flag; precedence
+method with [`matrix.analysis.correction`](../reference/config/matrix.md#analysiscorrection-optional-default-holm)
+or the `--correction` flag; precedence
 is `--correction` > `matrix.analysis.correction` > `holm`.
 
 The single-factor variants are a family of one, so they carry the same schema
@@ -218,7 +219,8 @@ test.
 
 The composite collapses every judge into one number — which answers "did the
 configuration matter overall?" but not "*which* judge moved?". With
-`matrix.analysis.per_judge: true` or `--per-judge` (either one enables it; the
+[`matrix.analysis.per_judge: true`](../reference/config/matrix.md#analysisper_judge-optional-default-false)
+or `--per-judge` (either one enables it; the
 flag cannot switch a config-enabled screen off), the harness additionally runs
 the **same** single/multi-factor ANOVA once per judge, over that judge's own
 per-case values: numeric judges as-is, boolean judges coerced to 0/1 so a

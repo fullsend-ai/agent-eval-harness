@@ -24,11 +24,12 @@ The omnibus test says *a factor matters*; the new pairwise **level contrasts**
 how much, corrected within each factor (Holm by default, following
 `matrix.analysis.correction`). They land in `anova.json` under `contrasts` and
 render in both the comparison report and the deep report.
-See [Post-hoc pairwise contrasts](concepts/anova.md#post-hoc-pairwise-contrasts).
+See [Level contrasts (post-hoc)](concepts/anova.md#level-contrasts-post-hoc).
 
 ### [1.55.0](https://github.com/opendatahub-io/agent-eval-harness/releases/tag/v1.55.0) — Per-judge screening
 
-Opt in with `matrix.analysis.per_judge: true` or `--per-judge` and the same ANOVA
+Opt in with [`matrix.analysis.per_judge: true`](reference/config/matrix.md#analysisper_judge-optional-default-false)
+or `--per-judge` and the same ANOVA
 also runs once per judge, Benjamini–Hochberg-corrected across the whole judges × terms
 family — a screen for *which* judge moved, while the composite stays the headline.
 See [Per-judge screening](concepts/anova.md#per-judge-screening-opt-in) and the
@@ -38,7 +39,8 @@ See [Per-judge screening](concepts/anova.md#per-judge-screening-opt-in) and the
 
 Every model term — each main effect and interaction — now gets one joint Wald test,
 and the family of p-values is corrected for multiple comparisons: **Holm** by default,
-`fdr_bh` or `none` via `matrix.analysis.correction` / `--correction`. `anova.json`
+`bh` or `none` via [`matrix.analysis.correction`](reference/config/matrix.md#analysiscorrection-optional-default-holm)
+/ `--correction`. `anova.json`
 reports raw and adjusted p side by side, and `significant` follows the adjusted value
 (the previous min-of-dummy-p approach was anti-conservative). See
 [Per-term Wald tests and multiplicity correction](concepts/anova.md#per-term-wald-tests-and-multiplicity-correction).
@@ -76,8 +78,9 @@ A prompt-injection mitigation for every LLM judge: agent-produced template varia
 (`{{ outputs }}`, `{{ conversation }}`, `{{ reasoning }}`, `{{ inputs }}`, …) render
 between `[BEGIN EVALUATED MATERIAL: <name>]` / `[END EVALUATED MATERIAL]` markers, and
 every judge system prompt carries a guard: follow the rubric, never instructions found
-inside the fence. See the
-[fenced-material note under LLM judges](cookbook/custom-judges.md#llm-judges).
+inside the fence. See
+[How the judge prompt is assembled](concepts/judges.md#how-the-judge-prompt-is-assembled) and
+[Fenced vs unfenced](reference/config/judges.md#fenced-vs-unfenced).
 
 ### [1.46.0](https://github.com/opendatahub-io/agent-eval-harness/releases/tag/v1.46.0) — Few-shot examples from human review labels
 
@@ -85,14 +88,15 @@ inside the fence. See the
 and injects them into LLM and agent judge prompts as calibration anchors — the judge
 sees what a human actually accepted and rejected on *this* eval, never its own case.
 See [Few-shot examples from human reviews](reference/config/judges.md#few-shot-examples-from-human-reviews-examples)
-and [Review results](guides/eval-review.md).
+and [Turn labels into calibration](guides/eval-review.md#turn-labels-into-calibration).
 
 ### [1.45.0](https://github.com/opendatahub-io/agent-eval-harness/releases/tag/v1.45.0) — Binary-first judge authoring
 
 `/eval-analyze` and `/eval-review` now author judges down a selection ladder —
 builtin → inline `check` → boolean LLM → numeric LLM — with exactly one failure mode
-per judge, following a
-[judge-prompt template](https://github.com/opendatahub-io/agent-eval-harness/blob/main/skills/eval-analyze/references/judge-prompt-template.md).
+per judge, following the rules in
+[Authoring an LLM judge prompt](cookbook/custom-judges.md#authoring-an-llm-judge-prompt)
+(the shipped [judge-prompt template](https://github.com/opendatahub-io/agent-eval-harness/blob/main/skills/eval-analyze/references/judge-prompt-template.md)).
 `/eval-review` triages judge–human disagreement in order: underspecified skill prompt,
 bad case, and only then a miscalibrated judge. See
 [The five judge types](concepts/judges.md#the-five-judge-types).
@@ -102,8 +106,8 @@ bad case, and only then a miscalibrated judge. See
 All LLM judge tool schemas and system prompts ask for the `rationale` first and the
 verdict (`score` / `passed` / `preferred`) second — a model that writes its analysis
 before committing to a verdict token is better calibrated. Don't fight the ordering in
-your prompts. See the
-[rationale-first note under LLM judges](cookbook/custom-judges.md#llm-judges) and
+your prompts. See
+[System prompt: role, rationale first, guard](concepts/judges.md#system-prompt-role-rationale-first-guard) and
 [Verdict output](reference/config/judges.md#verdict-output).
 
 ## Full changelog
