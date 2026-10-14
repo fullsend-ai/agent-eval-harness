@@ -587,12 +587,26 @@ def main():
                     print(f"TRACE: {main_trace_id} ({num_spans} spans, {duration_s:.0f}s)")
 
     # Flush async queue so traces are committed before linking/feedback.
+    # The class was renamed between MLflow versions:
+    #   <=3.12: AsyncExportQueue   >=3.13: AsyncTraceExportQueue
     if trace_ids:
-        try:
-            from mlflow.tracing.export.async_export_queue import AsyncExportQueue
-            AsyncExportQueue.get_instance().flush(timeout_sec=30)
-        except Exception as e:
-            print(f"WARNING: trace export flush failed: {e}", file=sys.stderr)
+        flushed = False
+        for _cls_name in ("AsyncTraceExportQueue", "AsyncExportQueue"):
+            try:
+                import importlib
+                _mod = importlib.import_module(
+                    "mlflow.tracing.export.async_export_queue"
+                )
+                _cls = getattr(_mod, _cls_name, None)
+                if _cls and hasattr(_cls, "get_instance"):
+                    _cls.get_instance().flush(timeout_sec=30)
+                    flushed = True
+                    break
+            except Exception:
+                pass
+        if not flushed:
+            import time
+            time.sleep(3)  # last-resort: give the async export time to finish
 
     if not main_trace_id and case_trace_map:
         main_trace_id = next(iter(case_trace_map.values()))
