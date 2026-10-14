@@ -1518,3 +1518,26 @@ def test_background_model_accepts_variants_and_a_uri_form(tmp_path):
                       f"    openrouter: {{background_model: '{written}'}}\n"))
         assert cfg.models.providers.openrouter.background_model == stored
 
+
+
+@pytest.mark.parametrize("key", ["allowed_tools", "denied_tools"])
+def test_path_scoped_write_rule_warns(tmp_path, key):
+    """`Write(<path>)` matches nothing on the Claude Code runner, as an allow
+    or as a deny — the Write tool is governed by `Edit(<path>)`. An author who
+    writes a scoped Write deny believes they confined the judge and did not,
+    and nothing below this layer says a word."""
+    with pytest.warns(UserWarning, match="governed by 'Edit"):
+        EvalConfig.from_yaml(
+            _tool_list_config(tmp_path, key, "['Write(/etc/**)']"))
+
+
+@pytest.mark.parametrize("key", ["allowed_tools", "denied_tools"])
+def test_bare_write_and_scoped_edit_do_not_warn(tmp_path, key):
+    """Only the parenthesised `Write(...)` form is dead; bare `Write` works,
+    and `Edit(<path>)` is the recommended replacement."""
+    import warnings
+    for value in ("[Write]", "['Edit(output/**)']"):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            EvalConfig.from_yaml(_tool_list_config(tmp_path, key, value))
+        assert not [w for w in caught if "Edit(" in str(w.message)], value

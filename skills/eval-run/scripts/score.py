@@ -2258,12 +2258,15 @@ def _call_structured_judge_via_runner(prompt, model, feedback_type, config, jc,
         # Cursor CLI has no budget option, so for a Cursor-backed judge this is a
         # best-effort ceiling only and `timeout_s` is the effective bound.
         max_budget_usd=2.0,
-        # Allow only pre-approves; deny is what actually confines a headless
-        # Claude Code judge. Neither list is configurable on this path — it has
-        # no `agent:` block — so the full default deny always applies. No write
-        # grant either: this contract takes the verdict from stdout, so the
-        # judge has nothing legitimate to write.
+        # Same deny-by-default posture as an agent judge: the mode is what
+        # makes the allow list authoritative, the deny list is defence in
+        # depth on runners without one. Neither is configurable on this path —
+        # it has no `agent:` block — so the full default deny always applies.
+        # No write grant either: this contract takes the verdict from stdout,
+        # so the judge has nothing legitimate to write.
         permissions=_judge_tool_policy(["Read(**)"]),
+        permission_mode=_JUDGE_PERMISSION_MODE,
+        permission_prompts=_JUDGE_PERMISSION_PROMPTS,
         staged_files=staged_images,
     )
     try:

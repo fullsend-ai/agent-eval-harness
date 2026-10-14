@@ -1043,6 +1043,18 @@ def _warn_unknown_tool_names(rules, context):
         if not isinstance(rule, str):
             continue
         name = rule.split("(", 1)[0].strip()
+        if name == "Write" and "(" in rule:
+            # The one rule the harness KNOWS the runner drops on the floor:
+            # on Claude Code a path-scoped `Write(...)` matches nothing, as an
+            # allow or as a deny — the Write tool is governed by `Edit(path)`.
+            # An author writing `denied_tools: ["Write(/etc/**)"]` believes
+            # they confined the judge and did not (CWE-1188). A warning, not
+            # an error: Cursor does map the rule.
+            _warn(f"{context} entry {rule!r}: on the Claude Code runner a "
+                  "path-scoped 'Write(...)' rule matches nothing, as an allow "
+                  "or as a deny — the Write tool is governed by 'Edit(<path>)' "
+                  "rules. Use 'Edit(...)' unless this judge runs on Cursor.")
+            continue
         if not name or name.startswith("mcp__") or name in _KNOWN_TOOL_NAMES:
             continue
         near = next((k for k in sorted(_KNOWN_TOOL_NAMES)

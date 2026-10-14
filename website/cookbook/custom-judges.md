@@ -427,9 +427,10 @@ reuses `model`, `feedback_type`, `score_range`, `samples`, `if`, and thresholds 
 like an LLM judge — the `agent:` block is the only thing that changes how it runs. Its
 inputs are the case's collected output files (filtered by `agent.inputs`, default all)
 plus each `agent.context` dir copied under `./.context/`; the spot it is meant to write
-is `./output/`, for the verdict file. What it *can* reach is set by `agent.denied_tools`
-(default `[Bash, WebFetch, WebSearch, Agent, Edit, MultiEdit, NotebookEdit]`) — the allow
-list only pre-approves tools, it does not confine them.
+is `./output/`, for the verdict file. What it *can* reach is set by `agent.allowed_tools`
+(default `[Read(**), Edit(output/**)]`), which is authoritative because the judge runs
+deny-by-default on the Claude Code runner, backed by `agent.denied_tools` for runners
+without an equivalent mode.
 
 Say you grade whether a strategy's architecture claims are real. A text-only LLM judge
 has no way to check component names, CRDs, or API fields against the platform docs, so it
@@ -447,7 +448,7 @@ judges:
     samples: 3
     agent:
       runner: { type: claude-code }             # per-judge runner (default claude-code)
-      allowed_tools: [Read, Grep, Glob]         # read-only default
+      allowed_tools: [Read(**), Edit(output/**)]  # the default
       context: [.context/architecture-context]  # copied under ./.context/
       inputs: [strat-tasks]                      # which output dirs to stage (default: all)
       # timeout: 420        # default: execution.timeout or 600s
@@ -478,7 +479,7 @@ The agent ends by writing its verdict to `./output/score.json` — numeric here 
     silently passes.
 
 !!! warning "`Bash` needs a sandboxed runner"
-    The default `allowed_tools` is read-only (`[Read, Grep, Glob]`). Only add `Bash`
+    The default `allowed_tools` is `[Read(**), Edit(output/**)]`. Only add `Bash`
     (e.g. to run the tests a change touched) on a runner with OS-level sandboxing — no
     network, cleaned credentials, path confinement — because the judge reads untrusted
     case artifacts. `..`-bearing artifact paths are containment-checked, and

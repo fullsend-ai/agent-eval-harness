@@ -304,7 +304,7 @@ Every sub-key is optional.
 | --- | --- | --- | --- |
 | `runner` | mapping | `{type: claude-code}` | Per-judge runner block, parsed exactly like the top-level [`runner`](runner.md) (`type`, `effort`, `command`, `env`, …). Lets the judge use a different runner/model stack than the skill-under-test. |
 | `allowed_tools` | list | `[Read(**), Edit(output/**)]` | Tool allowlist for the judge: read anywhere in the staged workspace, write nothing but the verdict file. Authoritative on the Claude Code runner, which runs judges deny-by-default. Use `Read(**)` not bare `Read` (bare *widens* past the working directory) and `Edit(<path>)` not `Write(<path>)` (the latter matches nothing). Add `Bash` only under sandboxing (see below). `[]` is treated as unset. |
-| `denied_tools` | list | `[Bash, WebFetch, WebSearch, Agent, Edit, MultiEdit, NotebookEdit]` | Tools the judge may never use. Needed because an allow list only pre-approves tools on the Claude Code runner; unlisted ones stay callable. **The default** has anything `allowed_tools` names subtracted from it — along with the rest of that tool's capability group (`Write`/`Edit`/`MultiEdit`/`NotebookEdit`, and `Agent`/`Task`) — since a deny beats an allow and `Bash` left denied would take away the tool `allowed_tools: [Bash(pytest:*)]` asks for; **a list you write** replaces the default outright, with no subtraction. `[]` disables it entirely. `Write` is absent on purpose — see the note below. |
+| `denied_tools` | list | `[Bash, WebFetch, WebSearch, Agent, Edit, MultiEdit, NotebookEdit]` | Tools the judge may never use: defence in depth behind the deny-by-default mode, and the only control on runners with no equivalent of it. Keep `Bash` denied — merely unlisted it is weaker, since a built-in classifier still auto-approves `cat`/`grep`/`echo`, while a deny de-registers the tool. **The default** has anything `allowed_tools` names subtracted from it — along with the rest of that tool's capability group (`Write`/`Edit`/`MultiEdit`/`NotebookEdit`, and `Agent`/`Task`) — since a deny beats an allow and `Bash` left denied would take away the tool `allowed_tools: [Bash(pytest:*)]` asks for; **a list you write** replaces the default outright, with no subtraction. `[]` disables it entirely. `Write` is absent on purpose — see the note below. |
 | `context` | list of paths | `[]` | Dirs/files copied under `./.context/<name>` for the agent to consult (a copy, so nothing the judge writes reaches the originals). Distinct from the top-level `context:`, which is appended to the prompt text. |
 | `inputs` | list | all output dirs | Which collected output dirs (by `outputs[].path` name) to stage as files. Use `[.]` to stage everything. |
 | `timeout` | int | `execution.timeout` or `600` | Per-run wall-clock budget in seconds. |
@@ -410,7 +410,7 @@ automatically, so rubric authors write only the criteria.
 The judge reads model-generated, **untrusted** case artifacts, so isolation is enforced:
 
 !!! warning "Enable `Bash` only on a sandboxed runner"
-    The default `allowed_tools` is read-only (`[Read, Grep, Glob]`). Add `Bash` **only**
+    The default `allowed_tools` is `[Read(**), Edit(output/**)]`. Add `Bash` **only**
     on a runner with OS-level sandboxing — no network, cleaned host credentials, path
     confinement — because the judge executes against untrusted material (CWE-78/CWE-200).
 
@@ -431,7 +431,7 @@ judges:
     samples: 3
     agent:
       runner: { type: claude-code }              # optional; defaults to claude-code
-      allowed_tools: [Read, Grep, Glob]          # read-only default
+      allowed_tools: [Read(**), Edit(output/**)] # the default; see above
       context: [.context/architecture-context]   # copied under ./.context/
       inputs: [strat-tasks]                       # which output dirs to stage (default: all)
 ```

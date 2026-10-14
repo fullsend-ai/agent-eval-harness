@@ -108,7 +108,7 @@ than one could apply, the harness resolves in this priority order (see
         samples: 3
         agent:
           runner: {type: claude-code}               # optional; defaults to claude-code
-          allowed_tools: [Read, Grep, Glob]         # read-only default
+          allowed_tools: [Read(**), Edit(output/**)]  # the default
           context: [.context/architecture-context]  # copied under ./.context/
           inputs: [strat-tasks]                      # output dirs to stage (default: all)
     ```
@@ -130,14 +130,18 @@ than one could apply, the harness resolves in this priority order (see
     touched tests (add `Bash` to `allowed_tools`). See the [judges config
     reference](../reference/config/judges.md) for every `agent:` field.
 
-    !!! warning "The allow list does not confine the judge"
-        The default `allowed_tools` is read-only (`[Read, Grep, Glob]`), but an allow rule
-        only pre-approves a tool — on a headless Claude Code runner a call with no matching
-        rule still goes through. `agent.denied_tools` is what confines a judge; it defaults
-        to `[Bash, WebFetch, WebSearch, Agent, Edit, MultiEdit, NotebookEdit]`. Enable `Bash`
+    !!! warning "The judge runs deny-by-default — mind the rule syntax"
+        On the Claude Code runner a judge runs under `--permission-mode manual
+        --permission-prompts none`, so `allowed_tools` is **authoritative**: a tool it does
+        not name cannot be called. The default is `[Read(**), Edit(output/**)]` — read
+        anywhere in the staged workspace, write nothing but the verdict file — with an
+        effective deny of `[Bash, WebFetch, WebSearch, Agent]`.
+
+        Two traps when writing your own list: a **bare** `Read`/`Grep`/`Glob` *widens* the
+        judge (it removes the working-directory confinement the CLI applies by default), and
+        `Write(<path>)` matches nothing — scope writes with `Edit(<path>)`. Enable `Bash`
         only on a runner with OS-level sandboxing (no network, clean credentials, path
-        confinement) — the judge reads untrusted case artifacts — and sandbox the runner too
-        when the judge's `Read`/`Write` reach matters, since neither is scoped by default.
+        confinement), since the judge reads untrusted case artifacts.
         `runner.workspace_mode: repo` is rejected for agent judges.
 
 ## What judges receive: the `outputs` record
