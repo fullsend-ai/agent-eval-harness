@@ -31,7 +31,7 @@ SCHEMA_KEYS = (
     "ts", "run_id", "case_id", "step_id", "judge", "provider_kind", "role", "source",
     "gen_id", "message_index", "model_requested", "model", "model_echo", "model_served",
     "provider", "provider_name", "endpoint_tag", "quantization", "audit", "status",
-    "stop_reason", "native_finish_reason", "tool_choice_mode",
+    "stop_reason", "native_finish_reason", "tool_choice_mode", "verdict_transport",
     "error_type", "error_class", "error_message",
     "cost_usd", "cost_details", "is_byok", "tokens", "streamed", "latency_ms",
     "generation_time_ms", "backfill_lag_s", "routing_sha",

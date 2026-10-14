@@ -912,14 +912,16 @@ def _start_provider_session(plan, config, output_dir, parallelism):
     session is attached to the plan so ``plan.close()`` reaches it."""
     from agent_eval.config import OpenRouterConfig
     from agent_eval.providers.base import ConfigError
-    from agent_eval.providers.openrouter.plan import judge_routing_keys
+    from agent_eval.providers.openrouter.plan import judge_routing_keys, judge_verdict_policies
     from agent_eval.providers.openrouter.preflight import run_preflight
     from agent_eval.providers.openrouter.session import ProviderSession
 
     orc = getattr(getattr(config.models, "providers", None), "openrouter", None) or OpenRouterConfig()
     try:
         pre = run_preflight(plan, level=orc.preflight, run_dir=output_dir,
-                            judges=judge_routing_keys(config))
+                            judges=judge_routing_keys(config),
+                            verdict=getattr(config.models, "judge_verdict", "auto"),
+                            judge_verdicts=judge_verdict_policies(config))
     except ConfigError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         sys.exit(2)

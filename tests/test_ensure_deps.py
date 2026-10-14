@@ -83,12 +83,12 @@ class TestDepsForSingleConfig:
         specs = _specs(ensure_deps._deps_for_config(
             _write(tmp_path / "eval.yaml", MLFLOW_EVAL)))
         assert "mlflow[genai]>=3.5" in specs
-        assert "anthropic[vertex]>=0.40" not in specs
+        assert "anthropic[vertex]>=0.77" not in specs
 
     def test_llm_judge_pulls_anthropic_and_jinja2(self, tmp_path):
         specs = _specs(ensure_deps._deps_for_config(
             _write(tmp_path / "eval.yaml", JUDGE_EVAL)))
-        assert "anthropic[vertex]>=0.40" in specs
+        assert "anthropic[vertex]>=0.77" in specs
         assert "jinja2>=3.0" in specs
         assert "mlflow[genai]>=3.5" not in specs
 
@@ -118,7 +118,7 @@ class TestUnionAcrossConfigs:
 
     def test_deps_are_the_union_not_the_first_config(self, multi_config_project):
         specs = _specs(ensure_deps._resolve_deps(multi_config_project))
-        assert "anthropic[vertex]>=0.40" in specs, "LLM-judge config's deps missing"
+        assert "anthropic[vertex]>=0.77" in specs, "LLM-judge config's deps missing"
         assert "jinja2>=3.0" in specs
         assert "mlflow[genai]>=3.5" in specs, (
             "mlflow config was ignored — deps resolved from one config only")

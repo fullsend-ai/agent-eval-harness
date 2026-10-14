@@ -13,6 +13,7 @@ models:
   skill: claude-opus-4-6      # the skill/prompt under test
   subagent: claude-sonnet-4-5 # subagents the skill spawns (optional)
   judge: claude-opus-4-6      # LLM and pairwise judges
+  judge_verdict: auto         # verdict transport: structured output first, forced tool second
   hook: claude-haiku-4-5      # AskUserQuestion auto-answering (optional)
 ```
 
@@ -143,6 +144,27 @@ export EVAL_JUDGE_MODEL=claude-opus-4-6   # last-resort default across runs
     for a statically-set judge model; an env-only `EVAL_JUDGE_MODEL` is checked
     when the judge is built, and `agent:` judge models route through the runner.
     See [judges → Model providers](../../reference/config/judges.md#model-providers-judge-backend).
+
+
+## judge_verdict
+
+How SDK-backed LLM judges (Anthropic, OpenAI, OpenRouter) carry their verdict —
+the [verdict transport](judges.md#verdict-transport):
+
+| Value | Meaning |
+| --- | --- |
+| `auto` (default) | The provider's structured output first (`output_config.format` on Anthropic, `response_format` JSON schema on OpenAI-shaped providers), the forced tool call as the fallback; a Claude id older than 4.5 starts on the forced tool. The rung that worked is remembered per model for the run. |
+| `json_schema` | Structured output only. A model or endpoint that rejects it is a config error. |
+| `tool` | The forced tool call only (the pre-015 contract). Cannot serve Claude Opus 5.5, Sonnet 5.5, Fable 5.1 or Mythos 5.1, which reject forced tool use. |
+
+A judge overrides it with its own `verdict:` field. Runner and `agent:` judges are
+prompt-driven and ignore it.
+
+```yaml
+models:
+  judge: openrouter:/anthropic/claude-opus-5.5
+  judge_verdict: auto
+```
 
 ## providers (openrouter)
 

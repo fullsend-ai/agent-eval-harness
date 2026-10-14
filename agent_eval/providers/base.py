@@ -226,7 +226,8 @@ class JudgeProviderError(RuntimeError):
     def __init__(self, message: str, *, error_type: str = "provider_error",
                  error_class: str = "provider", retryable: bool = False,
                  provider: Optional[str] = None,
-                 tool_choice_mode: Optional[str] = None):
+                 tool_choice_mode: Optional[str] = None,
+                 verdict_transport: Optional[str] = None):
         if error_class not in ERROR_CLASSES:
             raise ValueError(f"unknown error_class {error_class!r}")
         super().__init__(message)
@@ -235,3 +236,5 @@ class JudgeProviderError(RuntimeError):
         self.retryable = retryable
         self.provider = provider
         self.tool_choice_mode = tool_choice_mode
+        # Spec 015: the transport the failed call ran on (`json_schema` / `tool`).
+        self.verdict_transport = verdict_transport

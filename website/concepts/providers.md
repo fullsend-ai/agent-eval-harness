@@ -165,7 +165,7 @@ skill's provider kind under a plan, and why an unset hook then follows the plan'
 **judge model id**, never by the runner: a Claude id or `anthropic:/` → the Anthropic
 SDK; `openai:/` or another bare id → the OpenAI SDK; `openrouter:/` → a dedicated
 OpenRouter client; `runner:/` and `agent:` judges → the configured runner. The full
-table, with the `tool_choice` rule and what each backend returns, is at
+table, with the verdict transport each backend uses and what it returns, is at
 [judges → Model providers (judge backend)](../reference/config/judges.md#model-providers-judge-backend).
 
 **Where the judge engine runs** decides where judge credentials must exist. On the

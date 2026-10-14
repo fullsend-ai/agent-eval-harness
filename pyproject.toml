@@ -20,7 +20,7 @@ dependencies = [
 
 [project.optional-dependencies]
 mlflow = ["mlflow[genai]>=3.5"]
-anthropic = ["anthropic[vertex]>=0.40"]
+anthropic = ["anthropic[vertex]>=0.77"]
 evalhub = [
     "eval-hub-sdk[adapter]>=0.1.7,<1.0",
     "boto3>=1.34,<2.0",
@@ -41,7 +41,7 @@ anova = [
 ]
 all = [
     "mlflow[genai]>=3.5",
-    "anthropic[vertex]>=0.40",
+    "anthropic[vertex]>=0.77",
     "eval-hub-sdk[adapter]>=0.1.7,<1.0",
     "boto3>=1.34,<2.0",
     "harbor>=0.21.0; python_version >= '3.12'",
