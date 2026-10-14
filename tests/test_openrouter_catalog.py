@@ -13,7 +13,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from agent_eval.providers.base import ErrorClass  # noqa: E402
 from agent_eval.providers.openrouter import http as http_mod  # noqa: E402
 from agent_eval.providers.openrouter.catalog import ModelCatalog  # noqa: E402
-from agent_eval.providers.openrouter.errors import classify, describe, is_routing_404  # noqa: E402
+from agent_eval.providers.openrouter.errors import (  # noqa: E402
+    classify, describe, is_routing_404, is_tool_choice_400,
+)
 from agent_eval.providers.openrouter.http import OpenRouterHTTPError, get_json  # noqa: E402
 
 SNAPSHOT = {
@@ -87,6 +89,15 @@ def test_routing_404_is_recognised_and_prefixed():
     assert not is_routing_404(404, "model not found") and not is_routing_404(500, "No endpoints found")
     assert describe(404, "No endpoints found for x").startswith("routing: ")
     assert len(describe(500, "x" * 500)) == 200
+
+
+def test_tool_choice_400_is_recognised_by_status_and_text():
+    assert is_tool_choice_400(400, 'tool_choice: type "tool" is not supported for this model')
+    assert is_tool_choice_400(400, "Thinking may not be enabled when tool_choice forces tool use.")
+    assert is_tool_choice_400(400, 'Provider returned error {"raw": "invalid tool choice"}')
+    assert not is_tool_choice_400(400, "messages: at least one message is required")
+    assert not is_tool_choice_400(404, "tool_choice is not supported")
+    assert not is_tool_choice_400(None, "tool_choice")
 
 
 # --- http ---------------------------------------------------------------------------------

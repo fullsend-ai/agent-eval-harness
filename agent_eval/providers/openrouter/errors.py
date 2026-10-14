@@ -25,6 +25,7 @@ AGENT_TYPES = frozenset({
     "invalid_image", "unsupported_image",
 })
 ROUTING_404_MARKER = "no endpoints found"
+TOOL_CHOICE_400_MARKERS = ("tool_choice", "tool choice")
 
 
 def is_routing_404(status: Optional[int], message: Optional[str]) -> bool:
@@ -32,6 +33,18 @@ def is_routing_404(status: Optional[int], message: Optional[str]) -> bool:
     message reads "No endpoints found …" (pins + an unsupported request shape,
     e.g. a forced ``tool_choice``)."""
     return status == 404 and ROUTING_404_MARKER in (message or "").lower()
+
+
+def is_tool_choice_400(status: Optional[int], message: Optional[str]) -> bool:
+    """A provider refusing the request's ``tool_choice`` itself: a 400 whose
+    text names ``tool_choice`` (Anthropic, relayed by OpenRouter, rejects the
+    forcing modes ``tool``/``any`` for Claude Opus 5.5). The model is served —
+    only the forcing mode is wrong — so the judge ladder steps down instead of
+    failing. ``message`` should include the relayed upstream text
+    (``error.metadata.raw``) when the top-level message is only
+    "Provider returned error"."""
+    text = (message or "").lower()
+    return status == 400 and any(marker in text for marker in TOOL_CHOICE_400_MARKERS)
 
 
 def classify(error_type: Optional[str] = None, status: Optional[int] = None,

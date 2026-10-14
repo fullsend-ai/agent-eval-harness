@@ -232,11 +232,21 @@ and a routing table. Provider pins are **opt-in for judges**: OpenRouter
 answers `404 "No endpoints found"` when a forced tool call meets a pinned
 endpoint that cannot force a named function, so a judge sends the table's
 `order`/`only`/`quantizations` only when `judge.inherit_pins: true` or the
-judge declares its own routing. When a pinned judge still hits that 404 the
-harness retries with `tool_choice: required`, then `auto`, strict-parses the
-first tool call (a non-verdict answer is an error, never a prose fallback),
-records the mode as `tool_choice_mode` on the per-case record and counts it in
-`summary.yaml` under `judge_usage.tool_choice_fallbacks`.
+judge declares its own routing.
+
+The judge asks for its verdict tool with `tool_choice: function` first and
+steps down a ladder — `required`, then `auto` — when the provider refuses the
+forcing mode rather than the request. Two answers count as a refusal: the
+routing 404 above, and a `400` whose message names `tool_choice` (Anthropic,
+reached through OpenRouter, rejects the forcing modes `tool` and `any` for
+Claude Opus 5.5, so such a judge lands on `auto` on its third request; a 400
+about anything else propagates from the first rung). Neither refusal is backed
+off or retried. On a degraded rung the harness strict-parses the first tool
+call (a non-verdict answer is an error, never a prose fallback), records the
+mode as `tool_choice_mode` on the per-case record and counts it in
+`summary.yaml` under `judge_usage.tool_choice_fallbacks`. A refusal that
+survives all three rungs is a config error (`no_endpoints` for the 404,
+`tool_choice_rejected` for the 400), not a judge failure.
 
 Every LLM judge call (Anthropic, OpenAI, OpenRouter, runner) also records what it
 consumed: tokens for all of them, and the billed `cost_usd` when the provider

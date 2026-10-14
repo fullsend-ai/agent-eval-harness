@@ -46,6 +46,7 @@ from agent_eval.prompt_backends import (
     split_model_uri,
 )
 from agent_eval.providers import JudgeProviderError
+from agent_eval.providers.openrouter.errors import is_tool_choice_400
 
 # Log (don't silently blank) any undefined variable a judge template references.
 _TEMPLATE_LOGGER = logging.getLogger("agent_eval.judge_template")
@@ -1747,11 +1748,14 @@ def _raise_if_committed_error(response, provider_name="provider"):
         return
     if isinstance(err, dict):
         code, message = err.get("code"), str(err.get("message") or "")
-        upstream = (err.get("metadata") or {}).get("provider_name")
+        metadata = err.get("metadata")
+        if not isinstance(metadata, dict):
+            metadata = {}
+        upstream, raw = metadata.get("provider_name"), metadata.get("raw")
     else:
         code = getattr(err, "code", None)
         message = str(getattr(err, "message", "") or err or "")
-        upstream = None
+        upstream = raw = None
     upstream = upstream or getattr(response, "provider", None)
     text = message.lower()
     overloaded = "overload" in text
@@ -1760,11 +1764,29 @@ def _raise_if_committed_error(response, provider_name="provider"):
                                             "timed out", "timeout")))
     error_type = ("provider_overloaded" if overloaded
                   else "provider_unavailable" if retryable else "provider_error")
+    # OpenRouter relays an upstream refusal as "Provider returned error" and
+    # keeps the upstream text under `metadata.raw`; a refused `tool_choice`
+    # must keep its identity so the ladder can step down on it. `raw` is
+    # untrusted upstream text: it is classified in full and never quoted —
+    # the error message (persisted per case in summary.yaml) carries a fixed
+    # note instead.
+    raw_text = " ".join(str(raw).split()) if raw else ""
+    note = ""
+    if is_tool_choice_400(_int_or_none(code), f"{message} {raw_text}"):
+        error_type, retryable = "tool_choice_rejected", False
+        note = " — the upstream provider rejected the forced tool_choice"
     raise JudgeProviderError(
         f"{upstream or provider_name} failed the judge request inside a 200 "
         f"response (finish_reason={finish}, code={code}): "
-        f"{message or 'no message'}",
+        f"{message or 'no message'}{note}",
         error_type=error_type, retryable=retryable, provider=upstream)
+
+
+def _int_or_none(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _is_routing_404(exc):
@@ -1774,6 +1796,40 @@ def _is_routing_404(exc):
         return False
     text = str(getattr(exc, "message", None) or exc).lower()
     return "no endpoints found" in text
+
+
+def _http_error_text(exc):
+    """Everything the SDK kept of an HTTP error, lower-cased: its message and
+    the parsed error body. OpenRouter relays an upstream refusal as
+    `"Provider returned error"` and keeps the upstream text in the body under
+    `error.metadata.raw`, so the message alone can hide the reason."""
+    parts = [str(getattr(exc, "message", None) or exc)]
+    body = getattr(exc, "body", None)
+    if body:
+        try:
+            parts.append(json.dumps(body, default=str))
+        except (TypeError, ValueError):
+            parts.append(str(body))
+    return " ".join(parts).lower()
+
+
+def _is_tool_choice_rejection(exc):
+    """The provider refused the `tool_choice` itself — an HTTP 400 naming
+    `tool_choice` (Anthropic, through OpenRouter, rejects the forcing modes
+    `tool`/`any` for Claude Opus 5.5), or the committed-200 relay of one.
+    Unlike the routing 404 the model is served; only the forcing mode is
+    wrong, so the ladder steps down to one the endpoint accepts."""
+    if isinstance(exc, JudgeProviderError):
+        return exc.error_type == "tool_choice_rejected"
+    if getattr(exc, "status_code", None) != 400:
+        return False
+    return is_tool_choice_400(400, _http_error_text(exc))
+
+
+def _steps_down_ladder(exc):
+    """Whether a failed rung means "try a weaker `tool_choice`" rather than
+    "the judge call failed"."""
+    return _is_routing_404(exc) or _is_tool_choice_rejection(exc)
 
 
 def _tool_choice_for(mode, tool_name):
@@ -1796,12 +1852,16 @@ def _openai_judge_request(client, cfg, *, model, messages, tool, max_tokens,
     """One forced-tool judge request. Returns `(response, tool_choice_mode)`.
 
     Walks the Decision 25 ladder `function → required → auto` when the
-    provider answers a routing 404 ("No endpoints found"): a pinned endpoint
-    that cannot force a named function is retried with a weaker forcing mode
-    and the caller strict-parses the result. (The preflight that picks the
-    rung from the endpoint catalog lands in a later PR; until then both rungs
-    are tried.) A 404 that survives the ladder is a *config* error — the pinned
-    endpoints, or the model, cannot serve tool calling — not a judge failure.
+    provider refuses the rung's forcing mode: a routing 404 ("No endpoints
+    found" — a pinned endpoint that cannot force a named function) or a 400
+    that names `tool_choice` (the endpoint serves the model but rejects the
+    forcing mode, as Anthropic does for Claude Opus 5.5 through OpenRouter).
+    The next rung sends a weaker forcing mode and the caller strict-parses the
+    result. (The preflight that picks the rung from the endpoint catalog lands
+    in a later PR; until then the rungs are tried in order.) A refusal that
+    survives the ladder is a *config* error — the pinned endpoints, or the
+    model, cannot serve tool calling the way the judge asks — not a judge
+    failure. Neither refusal is backed off: a 400 and a 404 do not heal.
     Committed-200 upstream errors are raised inside the retry wrapper so the
     retryable ones get another attempt.
     """
@@ -1812,7 +1872,7 @@ def _openai_judge_request(client, cfg, *, model, messages, tool, max_tokens,
         kwargs["extra_body"] = extra_body
     provider_name = cfg.name if cfg is not None else "provider"
     semaphore = _judge_semaphore(cfg)
-    last_404 = None
+    last_error = None
     for mode in _TOOL_CHOICE_LADDER:
         choice = _tool_choice_for(mode, tool_name)
 
@@ -1828,9 +1888,9 @@ def _openai_judge_request(client, cfg, *, model, messages, tool, max_tokens,
         try:
             response = _with_judge_retries(_once, cfg)
         except Exception as exc:
-            if not _is_routing_404(exc):
+            if not _steps_down_ladder(exc):
                 raise
-            last_404 = exc
+            last_error = exc
             continue
         _record_tool_choice_mode(mode)
         _record_judge_usage(_usage_from_openai_response(response, model))
@@ -1838,11 +1898,17 @@ def _openai_judge_request(client, cfg, *, model, messages, tool, max_tokens,
     pins = (extra_body or {}).get("provider") or {}
     pinned = list(pins.get("order") or pins.get("only") or [])
     where = f"the pinned providers {pinned}" if pinned else "any endpoint"
+    if _is_routing_404(last_error):
+        raise JudgeProviderError(
+            f"{provider_name} has no endpoint serving '{model}' with tool calling "
+            f"through {where} (tool_choice function/required/auto all returned 404 "
+            f"\"No endpoints found\"): {last_error}",
+            error_type="no_endpoints", error_class="config", retryable=False)
     raise JudgeProviderError(
-        f"{provider_name} has no endpoint serving '{model}' with tool calling "
-        f"through {where} (tool_choice function/required/auto all returned 404 "
-        f"\"No endpoints found\"): {last_404}",
-        error_type="no_endpoints", error_class="config", retryable=False)
+        f"{provider_name} rejected every tool_choice mode for '{model}' through "
+        f"{where} (function/required/auto all refused with a tool_choice error, "
+        f"so the judge cannot force or even offer its verdict tool): {last_error}",
+        error_type="tool_choice_rejected", error_class="config", retryable=False)
 
 
 def _tool_call_arguments(call):

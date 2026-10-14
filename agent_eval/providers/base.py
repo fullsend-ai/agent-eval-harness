@@ -215,8 +215,9 @@ class JudgeProviderError(RuntimeError):
     Raised instead of feeding a degraded response to the text parser: a
     committed-200 upstream error (OpenRouter reports provider failures inside a
     200 body), a degraded ``tool_choice`` mode that did not yield the requested
-    tool call (Decision 25 strict parse), or a routing 404 that survived the
-    ``tool_choice`` ladder. ``error_class`` follows ``ERROR_CLASSES``;
+    tool call (Decision 25 strict parse), or a routing 404 / ``tool_choice``
+    400 that survived the ``tool_choice`` ladder. ``error_class`` follows
+    ``ERROR_CLASSES``;
     ``retryable`` tells ``_with_judge_retries`` whether another attempt can heal
     it (``provider_unavailable``/``provider_overloaded`` can, a config error
     cannot).

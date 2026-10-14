@@ -1549,16 +1549,33 @@ def _or_client(*script):
 
 
 class _HttpError(Exception):
-    def __init__(self, status_code, message, retry_after=None):
+    def __init__(self, status_code, message, retry_after=None, body=None):
         super().__init__(message)
         self.status_code = status_code
         self.message = message
+        self.body = body
         headers = {"retry-after": retry_after} if retry_after is not None else {}
         self.response = SimpleNamespace(headers=headers)
 
 
 def _routing_404():
     return _HttpError(404, "No endpoints found for z-ai/glm-5.2 that support tool use.")
+
+
+_ANTHROPIC_TOOL_CHOICE_REFUSAL = ('{"type":"error","error":{"type":"invalid_request_error",'
+                                  '"message":"tool_choice: type \\"tool\\" is not supported '
+                                  'for this model"}}')
+
+
+def _tool_choice_400(relayed=False):
+    """Anthropic refusing a forced `tool_choice` for Opus 5.5. `relayed=True`
+    is the shape OpenRouter actually sends: a bare "Provider returned error"
+    message with the upstream text only in the body's `metadata.raw`."""
+    if not relayed:
+        return _HttpError(400, 'tool_choice: type "any" is not supported for this model')
+    return _HttpError(400, "Provider returned error", body={
+        "message": "Provider returned error", "code": 400,
+        "metadata": {"provider_name": "Anthropic", "raw": _ANTHROPIC_TOOL_CHOICE_REFUSAL}})
 
 
 @pytest.fixture
@@ -1770,6 +1787,89 @@ class TestOpenRouterJudge:
         assert exc.value.error_class == "config" and exc.value.retryable is False
         assert "z-ai" in str(exc.value) and "novita" in str(exc.value)
         assert len(client.calls) == 3 and or_env == []
+
+    def test_ladder_steps_down_on_a_tool_choice_400_without_pins(
+            self, or_env, monkeypatch):
+        """Anthropic (through OpenRouter) rejects `tool_choice` `tool` and `any`
+        for Opus 5.5 with a 400, not a routing 404: the ladder must still reach
+        `auto` — and a 400 is never backed off, even with retries configured."""
+        import score
+
+        client = _or_client(_tool_choice_400(), _tool_choice_400(), _or_ok())
+        result, _ = self._score(_or_config(max_retries=3), client, monkeypatch)
+        assert result == (True, "solid")
+        assert [c["tool_choice"] for c in client.calls] == [
+            {"type": "function", "function": {"name": "submit_evaluation"}},
+            "required", "auto"]
+        assert score._tool_choice_fallback_count() == 1
+        assert or_env == []
+
+    def test_ladder_reads_a_relayed_tool_choice_400_from_the_error_body(
+            self, or_env, monkeypatch):
+        """OpenRouter's real shape: "Provider returned error" on top, the
+        upstream `tool_choice` text only under `metadata.raw` in the body."""
+        client = _or_client(_tool_choice_400(relayed=True), _or_ok())
+        result, _ = self._score(_or_config(), client, monkeypatch)
+        assert result == (True, "solid")
+        assert client.calls[1]["tool_choice"] == "required" and or_env == []
+
+    def test_ladder_steps_down_on_a_committed_200_tool_choice_refusal(
+            self, or_env, monkeypatch):
+        err = {"code": 400, "message": "Provider returned error",
+               "metadata": {"provider_name": "Anthropic",
+                            "raw": _ANTHROPIC_TOOL_CHOICE_REFUSAL}}
+        client = _or_client(
+            _or_response(tool_name=None, finish_reason="error", error=err), _or_ok())
+        result, _ = self._score(_or_config(max_retries=3), client, monkeypatch)
+        assert result == (True, "solid")
+        assert client.calls[1]["tool_choice"] == "required"
+        assert len(client.calls) == 2 and or_env == []
+
+    def test_committed_200_relay_classifies_the_full_reason_and_quotes_none_of_it(self):
+        """The relayed `metadata.raw` is untrusted text: the whole of it is
+        classified (a marker past any length limit still counts), none of it
+        is quoted in the error that summary.yaml persists, and a malformed
+        `metadata` (not a mapping) is ignored rather than crashing the handler."""
+        import score
+
+        padding = "x" * 400
+        err = {"code": 400, "message": "Provider returned error",
+               "metadata": {"provider_name": "Anthropic",
+                            "raw": padding + ' tool_choice: type "any"\n\tis not\r\nsupported'}}
+        with pytest.raises(JudgeProviderError) as exc:
+            score._raise_if_committed_error(
+                _or_response(tool_name=None, finish_reason="error", error=err))
+        text = str(exc.value)
+        assert exc.value.error_type == "tool_choice_rejected"
+        assert "rejected the forced tool_choice" in text
+        assert padding not in text and "is not" not in text and "\n" not in text
+
+        err = {"code": 400, "message": "Provider returned error", "metadata": "oops"}
+        with pytest.raises(JudgeProviderError) as exc:
+            score._raise_if_committed_error(
+                _or_response(tool_name=None, finish_reason="error", error=err))
+        assert exc.value.error_type == "provider_error" and exc.value.provider is None
+
+    def test_persistent_tool_choice_400_is_a_config_error_not_retried(
+            self, or_env, monkeypatch):
+        client = _or_client(_tool_choice_400())
+        with pytest.raises(JudgeProviderError) as exc:
+            self._score(_or_config(max_retries=3), client, monkeypatch)
+        assert exc.value.error_type == "tool_choice_rejected"
+        assert exc.value.error_class == "config" and exc.value.retryable is False
+        assert "function/required/auto" in str(exc.value) and "any" in str(exc.value)
+        assert len(client.calls) == 3 and or_env == []
+
+    def test_an_unrelated_400_does_not_walk_the_ladder(self, or_env, monkeypatch):
+        """Only a refusal that names `tool_choice` steps down; a 400 about
+        anything else is the caller's bug and propagates from the first rung."""
+        client = _or_client(_HttpError(400, "Provider returned error", body={
+            "message": "Provider returned error", "code": 400,
+            "metadata": {"provider_name": "Anthropic",
+                         "raw": "messages: at least one message is required"}}))
+        with pytest.raises(_HttpError):
+            self._score(_or_config(max_retries=3), client, monkeypatch)
+        assert len(client.calls) == 1 and or_env == []
 
     def test_per_case_record_carries_tool_choice_mode_and_summary_counter(
             self, or_env, monkeypatch, tmp_path):
