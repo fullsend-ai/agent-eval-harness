@@ -17,7 +17,12 @@ jobs:
     # push-to-main (e.g. updating a PR branch) would otherwise run the release
     # and commit a version bump onto the PR head — regressing the version and
     # re-introducing merge conflicts against upstream.
-    if: github.repository == 'opendatahub-io/agent-eval-harness'
+    #
+    # Keyed on the fork flag rather than a hardcoded owner/name, so a transfer
+    # or rename cannot silently turn this job into a no-op. A skipped job does
+    # not fail its run, so a stale slug here stops every release while the
+    # workflow keeps reporting success — there is no signal anywhere.
+    if: ${{ !github.event.repository.fork }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
