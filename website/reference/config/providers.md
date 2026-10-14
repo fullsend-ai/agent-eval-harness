@@ -87,7 +87,8 @@ by the preflight and audited after the run, and the `:variant` on the model id
 `require_parameters`, `sort`, `data_collection`, `zdr` and `max_price` on a routing key an
 agent role uses raise a load-time warning and are ignored there. Judges that inherit pins
 receive the full declaration. See [judges → OpenRouter judges](judges.md#openrouter-judges)
-for what a judge sends and the `tool_choice` fallback rule.
+for what a judge sends: the verdict transport (structured output with
+`require_parameters`, then the `tool_choice` ladder).
 
 ### Validation
 

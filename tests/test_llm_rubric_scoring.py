@@ -473,7 +473,7 @@ def test_anthropic_judge_returns_usage_side_channel():
     client = Mock()
     client.messages.create.return_value = response
     config = EvalConfig(name="t", skill="s")
-    config.models = ModelsConfig(judge="claude-opus-4-8")
+    config.models = ModelsConfig(judge="claude-opus-4-8", judge_verdict="tool")
     jc = JudgeConfig(name="j", llm_rubric="Response is helpful")
     config.judges = [jc]
 

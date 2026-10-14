@@ -17,6 +17,17 @@ has the same entries with downloadable tags.
 
 ## Highlights
 
+### [1.57.0](https://github.com/opendatahub-io/agent-eval-harness/releases/tag/v1.57.0) — Judges return their verdict as a structured output — **scores move**
+
+LLM judges on Anthropic, OpenAI and OpenRouter now ask the provider for the verdict
+schema itself (`output_config.format` / `response_format`, strict) and keep the forced
+tool call as the fallback. Claude Opus 5.5 and Sonnet 5.5 reject forced tool use, so
+this is what makes them usable as judges — directly and through OpenRouter — and it
+lets every judge think before it writes its rationale. Pin `models.judge_verdict: tool`
+to keep the previous contract on a judge model that still accepts it, and re-judge a
+baseline before comparing across the boundary.
+See [Verdict transport](reference/config/judges.md#verdict-transport).
+
 ### [1.56.0](https://github.com/opendatahub-io/agent-eval-harness/releases/tag/v1.56.0) — Post-hoc level contrasts
 
 The omnibus test says *a factor matters*; the new post-hoc **level contrasts**

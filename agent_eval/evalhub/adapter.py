@@ -173,7 +173,7 @@ def _start_provider_plan(eval_config, model_name, runner_type, *, run_id, run_di
                          f"runner; runner.type {runner_type!r} cannot run {roles['skill']!r}")
     from agent_eval.config import OpenRouterConfig
     from agent_eval.providers.base import ConfigError
-    from agent_eval.providers.openrouter.plan import judge_routing_keys
+    from agent_eval.providers.openrouter.plan import judge_routing_keys, judge_verdict_policies
     from agent_eval.providers.openrouter.preflight import run_preflight
     from agent_eval.providers.openrouter.session import ProviderSession
 
@@ -186,7 +186,9 @@ def _start_provider_plan(eval_config, model_name, runner_type, *, run_id, run_di
     run_dir.mkdir(parents=True, exist_ok=True)
     try:
         pre = run_preflight(plan, level=orc.preflight, run_dir=run_dir,
-                            judges=judge_routing_keys(eval_config))
+                            judges=judge_routing_keys(eval_config),
+                            verdict=getattr(eval_config.models, "judge_verdict", "auto"),
+                            judge_verdicts=judge_verdict_policies(eval_config))
         for warning in pre.warnings:
             log.warning("preflight: %s", warning)
         factory = SESSION_FACTORY or ProviderSession

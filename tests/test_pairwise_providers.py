@@ -19,6 +19,16 @@ import score  # noqa: E402
 from agent_eval.config import EvalConfig  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _fresh_verdict_memory():
+    """Spec 015 keeps a per-run memory of the verdict transport that worked for
+    a (backend, model); one test must never inherit another's."""
+    import score as _score
+    _score._reset_verdict_state()
+    yield
+    _score._reset_verdict_state()
+
+
 def _openai_client(*, arguments=None, content=None, finish_reason="stop"):
     def create(**kwargs):
         create.captured = kwargs
@@ -37,7 +47,8 @@ def _openai_client(*, arguments=None, content=None, finish_reason="stop"):
 
 def test_call_pairwise_openai_reads_tool_call():
     client = _openai_client(arguments={"reasoning": "A wins", "preferred": "A"})
-    verdict, err = score._call_pairwise_openai(client, "compare", "A vs B", "gpt-4o")
+    verdict, err = score._call_pairwise_openai(client, "compare", "A vs B", "gpt-4o",
+                                               verdict="tool")
     assert err is None and verdict["preferred"] == "A"
 
 
@@ -69,7 +80,7 @@ def _run_one_comparison(model, *, openai_raises=False, anthropic_raises=False):
     captured = {}
 
     def fake_call_judge(backend, client, system_prompt, user_message, m,
-                        max_tokens=16384):
+                        max_tokens=16384, **kw):
         captured["backend"] = backend
         captured["model"] = m
         return {"reasoning": "r", "preferred": "A"}, None
@@ -207,12 +218,13 @@ def test_compare_runs_plain_openai_model_passes_no_binding():
             patch("score._client_for", side_effect=AssertionError("no cfg expected")):
         score.compare_runs(Path("a"), Path("b"), EvalConfig(name="t", skill="s"),
                            ["case-1"], model="openai:/gpt-4o")
-    assert captured == {}
+    assert captured == {"verdict": "auto"}
 
 
 def test_call_pairwise_openai_accepts_dict_arguments():
     client = _raw_client(_pw_response(arguments={"reasoning": "A wins", "preferred": "A"}))
-    verdict, err = score._call_pairwise_openai(client, "compare", "A vs B", "z-ai/glm-5.2")
+    verdict, err = score._call_pairwise_openai(client, "compare", "A vs B", "z-ai/glm-5.2",
+                                               verdict="tool")
     assert err is None and verdict["preferred"] == "A"
 
 
@@ -228,7 +240,8 @@ def test_call_pairwise_openai_reports_a_committed_200_error():
 def test_call_pairwise_openai_ladder_strict_parses_the_fallback():
     client = _raw_client(_NotFound(), _pw_response(
         tool_name="other", arguments="{}", content='{"preferred": "A"}'))
-    verdict, err = score._call_pairwise_openai(client, "compare", "A vs B", "z-ai/glm-5.2")
+    verdict, err = score._call_pairwise_openai(client, "compare", "A vs B", "z-ai/glm-5.2",
+                                               verdict="tool")
     assert verdict is None and "instead of" in err
     assert client.calls[1]["tool_choice"] == "required"
 
@@ -236,7 +249,7 @@ def test_call_pairwise_openai_ladder_strict_parses_the_fallback():
 def test_call_pairwise_openai_passes_extra_body_and_token_param():
     client = _raw_client(_pw_response(arguments={"reasoning": "r", "preferred": "tie"}))
     verdict, err = score._call_pairwise_openai(
-        client, "compare", "A vs B", "openai/gpt-5.2",
+        client, "compare", "A vs B", "openai/gpt-5.2", verdict="tool",
         extra_body={"provider": {"sort": "price"}}, token_param="max_tokens")
     assert err is None and verdict["preferred"] == "tie"
     sent = client.calls[0]
@@ -257,7 +270,8 @@ def _priced_pw_response(arguments, cost=None, model="z-ai/glm-5.2"):
 
 def test_call_pairwise_openai_attaches_the_usage_record():
     client = _raw_client(_priced_pw_response({"reasoning": "r", "preferred": "A"}, cost=0.002))
-    verdict, err = score._call_pairwise_openai(client, "compare", "A vs B", "z-ai/glm-5.2")
+    verdict, err = score._call_pairwise_openai(client, "compare", "A vs B", "z-ai/glm-5.2",
+                                               verdict="tool")
     assert err is None and verdict["preferred"] == "A"
     assert verdict["_usage"]["cost_usd"] == 0.002
     assert verdict["_usage"]["cost_source"] == "provider-inline"
@@ -271,7 +285,8 @@ def test_call_judge_anthropic_attaches_the_usage_record():
                                stop_reason="tool_use",
                                usage=SimpleNamespace(input_tokens=30, output_tokens=3))
     client = SimpleNamespace(messages=SimpleNamespace(create=lambda **kw: response))
-    verdict, err = score._call_judge("anthropic", client, "sys", "msg", "claude-opus-4-8")
+    verdict, err = score._call_judge("anthropic", client, "sys", "msg", "claude-opus-4-8",
+                                     verdict="tool")
     assert err is None and verdict["preferred"] == "B"
     assert verdict["_usage"]["provider"] == "anthropic"
     assert verdict["_usage"]["prompt_tokens"] == 30 and verdict["_usage"]["cost_usd"] is None
@@ -325,3 +340,96 @@ def test_compare_runs_without_usage_has_no_judge_usage_block():
         result = score.compare_runs(Path("a"), Path("b"), EvalConfig(name="t", skill="s"),
                                     ["case-1"], model="openai:/gpt-4o")
     assert "judge_usage" not in result
+
+
+# --- verdict transport (spec 015) --------------------------------------------
+
+def test_pairwise_openai_structured_output_is_the_default_first_rung():
+    client = _raw_client(_pw_response(tool_name=None,
+                                      content='{"reasoning": "A is tighter", "preferred": "A"}'))
+    verdict, err = score._call_pairwise_openai(client, "compare", "A vs B", "openai/gpt-5.2")
+    assert err is None and verdict["preferred"] == "A" and verdict["reasoning"] == "A is tighter"
+    sent = client.calls[0]
+    assert sent["response_format"]["json_schema"]["name"] == "submit_comparison"
+    assert "tools" not in sent and "JSON object" in sent["messages"][0]["content"]
+
+
+def test_pairwise_openai_falls_back_to_the_tool_ladder_on_a_response_format_refusal():
+    class _Unsupported(Exception):
+        status_code = 400
+        message = "response_format is not supported by this endpoint"
+
+    client = _raw_client(_Unsupported(), _pw_response(arguments={"reasoning": "r", "preferred": "B"}))
+    verdict, err = score._call_pairwise_openai(client, "compare", "A vs B", "z-ai/glm-5.2")
+    assert err is None and verdict["preferred"] == "B"
+    assert client.calls[1]["tool_choice"]["type"] == "function"
+
+
+def test_pairwise_openai_doubles_the_budget_when_structured_output_is_cut_off():
+    client = _raw_client(
+        _pw_response(tool_name=None, content='{"reasoning": "long', finish_reason="length"),
+        _pw_response(tool_name=None, content='{"reasoning": "r", "preferred": "tie"}'))
+    verdict, err = score._call_pairwise_openai(client, "compare", "A vs B", "gpt-4o",
+                                               max_tokens=1024)
+    assert err is None and verdict["preferred"] == "tie"
+    assert client.calls[1]["max_tokens"] == 2048 and "response_format" in client.calls[1]
+
+
+def test_pairwise_anthropic_structured_output_and_fallback():
+    calls = []
+    text_block = SimpleNamespace(type="text", text='{"reasoning": "r", "preferred": "B"}')
+    reply = SimpleNamespace(id="m", model="claude-opus-5-5", content=[text_block],
+                            stop_reason="end_turn",
+                            usage=SimpleNamespace(input_tokens=30, output_tokens=3))
+
+    def create(**kw):
+        calls.append(kw)
+        return reply
+
+    client = SimpleNamespace(messages=SimpleNamespace(create=create))
+    verdict, err = score._call_judge("anthropic", client, "sys", "msg", "claude-opus-5-5")
+    assert err is None and verdict["preferred"] == "B"
+    assert verdict["_usage"]["prompt_tokens"] == 30
+    assert "output_config" in calls[0] and "tools" not in calls[0]
+    assert "JSON object" in calls[0]["system"]
+    # the explicit tool policy keeps the forced tool call
+    block = SimpleNamespace(type="tool_use", name="submit_comparison",
+                            input={"reasoning": "r", "preferred": "A"})
+    reply.content = [block]
+    verdict, err = score._call_judge("anthropic", client, "sys", "msg", "claude-opus-5-5",
+                                     verdict="tool")
+    assert err is None and verdict["preferred"] == "A"
+    assert calls[1]["tool_choice"] == {"type": "tool", "name": "submit_comparison"}
+
+
+def test_cmd_pairwise_passes_the_selected_judges_verdict_policy(tmp_path, monkeypatch):
+    """`score.py pairwise --judge <name>` hands the judge's own `verdict:` to
+    compare_runs; without one, compare_runs falls back to models.judge_verdict."""
+    import yaml
+    from types import SimpleNamespace
+
+    (tmp_path / "eval.yaml").write_text(yaml.safe_dump({
+        "name": "t", "execution": {"skill": "s"},
+        "models": {"judge": "claude-opus-5-5"},
+        "judges": [{"name": "pairwise", "prompt": "compare", "verdict": "tool"},
+                   {"name": "other", "prompt": "compare too"}]}))
+    runs_dir = tmp_path / "runs"
+    for run in ("run-a", "run-b"):
+        (runs_dir / run / "cases" / "case-1").mkdir(parents=True)
+    captured = {}
+
+    def fake_compare(*args, **kw):
+        captured.update(kw)
+        return {"wins_a": 1, "wins_b": 0, "ties": 0, "errors": 0, "per_case": []}
+
+    monkeypatch.setattr(score, "_get_runs_dir", lambda name="": runs_dir)
+    monkeypatch.setattr(score, "compare_runs", fake_compare)
+    monkeypatch.setattr(score, "_merge_summary", lambda *a, **k: None)
+    args = SimpleNamespace(config=str(tmp_path / "eval.yaml"), run_id="run-a", baseline="run-b",
+                           judge="pairwise", model=None, prompt_file=None, samples=None)
+    score.cmd_pairwise(args)
+    assert captured["verdict"] == "tool"
+
+    args.judge = "other"
+    score.cmd_pairwise(args)
+    assert captured["verdict"] is None

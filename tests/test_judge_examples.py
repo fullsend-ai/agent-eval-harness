@@ -324,7 +324,7 @@ def _scoring_setup(tmp_path, monkeypatch, judges_yaml, reviews=True):
     record = {"case_dir": str(case_dir), "files": {}, "conversation": "hi"}
     captured = {}
 
-    def fake_judge(prompt, model, feedback_type, images=None, bounds=None):
+    def fake_judge(prompt, model, feedback_type, images=None, bounds=None, **_kwargs):
         captured["prompt"] = prompt
         return (True, "ok")
 

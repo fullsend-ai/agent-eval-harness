@@ -262,7 +262,7 @@ def _cost_metrics_from_summary(summary):
     """MLflow metrics/tags for judge-side spend from summary.yaml (spec 014).
 
     `judge_cost_usd`, `judge/requests`, `judge/requests_missing_cost`,
-    `judge/tool_choice_fallbacks` and `total_cost_usd` are logged only when
+    `judge/tool_choice_fallbacks`, `judge/verdict_fallbacks` and `total_cost_usd` are logged only when
     numeric — a null total is never re-derived from an estimate — and
     `total_cost_source` is tagged so a `judge-only`/`agent-only` run is not
     read as a complete cost. Judge spend stays out of `cost_usd`.
@@ -272,7 +272,8 @@ def _cost_metrics_from_summary(summary):
     judge_cost = usage.get("judge_cost_usd")
     if isinstance(judge_cost, (int, float)) and not isinstance(judge_cost, bool):
         metrics["judge_cost_usd"] = float(judge_cost)
-    for key in ("requests", "requests_missing_cost", "tool_choice_fallbacks"):
+    for key in ("requests", "requests_missing_cost", "tool_choice_fallbacks",
+                "verdict_fallbacks"):
         value = usage.get(key)
         if isinstance(value, int) and not isinstance(value, bool):
             metrics[f"judge/{key}"] = value
