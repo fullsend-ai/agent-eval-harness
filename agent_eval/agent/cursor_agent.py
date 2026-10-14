@@ -271,7 +271,14 @@ def _cursor_permission_patterns(
             # approximation; an allow is intentionally a no-op.
             if deny:
                 add(f"Read({_cursor_path_pattern(argument or '**')})")
-        elif tool in {"Edit", "Write"}:
+        elif tool in {"Edit", "Write", "MultiEdit", "NotebookEdit"}:
+            # Cursor has one `Write` permission for every file mutation, so
+            # the Claude-only editor spellings map onto it like `Edit` does.
+            # Safe because the harness lifts a default deny for the whole
+            # write capability at once (score.py::_TOOL_CAPABILITY_GROUPS):
+            # these names never reach a deny list while `Write` is allowed,
+            # so this cannot turn into a `Write(**)` deny that beats the
+            # allow and takes the judge's verdict file away.
             add(f"Write({_cursor_path_pattern(argument or '**')})")
         elif tool in {"Bash", "Shell"}:
             add(f"Shell({_cursor_shell_pattern(argument)})")
@@ -321,7 +328,8 @@ def _cursor_permission_patterns(
                 continue
             for tool in tools:
                 if isinstance(tool, str) and tool in {
-                    "Read", "Grep", "Glob", "Edit", "Write"
+                    "Read", "Grep", "Glob", "Edit", "Write",
+                    "MultiEdit", "NotebookEdit",
                 }:
                     add_tool(tool, path)
                 elif isinstance(tool, str) and tool in path_denies:
@@ -356,6 +364,7 @@ def _cursor_permission_patterns(
         if rule.strip() in {
             "Read", "Grep", "Glob", "Edit", "Write", "Bash", "Shell",
             "WebFetch", "WebSearch", "Mcp", "Agent", "Task",
+            "MultiEdit", "NotebookEdit",
         }:
             add_tool(rule.strip())
             continue

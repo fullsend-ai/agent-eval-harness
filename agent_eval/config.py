@@ -1012,6 +1012,48 @@ def _warn(message):
     warnings.warn(message, UserWarning, stacklevel=3)
 
 
+# Bare tool names the harness knows how to put in front of a runner. Not
+# exhaustive by design — a CLI release adds tools faster than a harness release
+# can list them — which is why an unknown name warns rather than raising.
+# Warning at all matters because every layer below is silent: `denied_tools` is
+# a wholesale replacement of the default, and a runner ignores a name it does
+# not recognize without a word, so `denied_tools: [bash, webfetch]` would load
+# clean, forfeit the working default, and buy nothing in exchange.
+# (A superset of `agent_eval.tools.interception._KNOWN_TOOLS`, which is a
+# narrower list used to guess tool names out of natural language.)
+_KNOWN_TOOL_NAMES = frozenset({
+    # Claude Code
+    "Agent", "Task", "AskUserQuestion", "Bash", "BashOutput", "KillShell",
+    "Edit", "MultiEdit", "NotebookEdit", "Glob", "Grep", "Read", "Write",
+    "WebFetch", "WebSearch", "TodoWrite", "SlashCommand", "ExitPlanMode",
+    "Skill", "ListMcpResources", "ReadMcpResource",
+    # Cursor's permission vocabulary (see cursor_agent.py)
+    "Shell", "Mcp",
+})
+
+
+def _warn_unknown_tool_names(rules, context):
+    """Warn for a permission rule whose tool name is not one we recognize.
+
+    Matches on the bare name, so a scoped rule like ``Bash(pytest:*)`` is
+    checked as ``Bash``. ``mcp__*`` rules name a server, not a tool, and are
+    skipped.
+    """
+    for rule in rules:
+        if not isinstance(rule, str):
+            continue
+        name = rule.split("(", 1)[0].strip()
+        if not name or name.startswith("mcp__") or name in _KNOWN_TOOL_NAMES:
+            continue
+        near = next((k for k in sorted(_KNOWN_TOOL_NAMES)
+                     if k.lower() == name.lower()), None)
+        hint = (f" — did you mean {near!r}? Tool names are case-sensitive"
+                if near else "")
+        _warn(f"{context} entry {rule!r} is not a known tool name{hint}. "
+              "A runner silently ignores a rule it cannot map, so this one "
+              "has no effect.")
+
+
 def _env_var_name(value, context):
     """A ``*_env`` setting names an environment variable — never holds a value.
     The error text never echoes the value."""
@@ -2253,13 +2295,17 @@ class EvalConfig:
             # (`denied_tools: Bash` -> deny B,a,s,h), silently denying nothing.
             for tools_key in ("allowed_tools", "denied_tools"):
                 tools_val = agent_val.get(tools_key)
-                if tools_val is not None and (
-                        not isinstance(tools_val, list)
+                if tools_val is None:
+                    continue
+                if (not isinstance(tools_val, list)
                         or any(not isinstance(t, str) for t in tools_val)):
                     raise ValueError(
                         f"Judge '{j.get('name', '')}': 'agent.{tools_key}' "
                         f"must be a list of tool names"
                     )
+                _warn_unknown_tool_names(
+                    tools_val, f"Judge '{j.get('name', '')}': "
+                               f"'agent.{tools_key}'")
             score_range_val = j.get("score_range")
             if score_range_val is not None:
                 jname = j.get("name", "")

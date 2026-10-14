@@ -273,8 +273,10 @@ The judge still takes its instructions from `prompt` / `prompt_file` / `llm_rubr
 reuses `model`, `feedback_type`, `score_range`, `samples`, `if`, and thresholds exactly
 like an LLM judge — the `agent:` block is the only thing that changes how it runs. Its
 inputs are the case's collected output files (filtered by `agent.inputs`, default all)
-plus each `agent.context` dir staged read-only under `./.context/`; its one writable spot
-is `./output/`, for the verdict file.
+plus each `agent.context` dir copied under `./.context/`; the spot it is meant to write
+is `./output/`, for the verdict file. What it *can* reach is set by `agent.denied_tools`
+(default `[Bash, WebFetch, WebSearch, Agent, Edit, MultiEdit, NotebookEdit]`) — the allow
+list only pre-approves tools, it does not confine them.
 
 Say you grade whether a strategy's architecture claims are real. A text-only LLM judge
 has no way to check component names, CRDs, or API fields against the platform docs, so it
@@ -293,7 +295,7 @@ judges:
     agent:
       runner: { type: claude-code }             # per-judge runner (default claude-code)
       allowed_tools: [Read, Grep, Glob]         # read-only default
-      context: [.context/architecture-context]  # staged read-only under ./.context/
+      context: [.context/architecture-context]  # copied under ./.context/
       inputs: [strat-tasks]                      # which output dirs to stage (default: all)
       # timeout: 420        # default: execution.timeout or 600s
       # max_budget_usd: 2.0 # per-judge-run cap (default 2.0)

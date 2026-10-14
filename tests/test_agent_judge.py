@@ -11,6 +11,7 @@ returns the parsed ``(value, rationale)``.
 """
 
 import json
+import os
 import sys
 from contextlib import contextmanager
 from pathlib import Path
@@ -24,7 +25,20 @@ from agent_eval.agent import RunResult
 from agent_eval.config import (
     EvalConfig, JudgeConfig, ModelsConfig, RunnerConfig,
 )
-from score import load_judges
+from score import _DEFAULT_JUDGE_DENIED_TOOLS, load_judges
+
+# Pinned here so a change to the harness default has to be made deliberately,
+# in one place, and shows up in the diff of a security-relevant test.
+DEFAULT_JUDGE_DENY = ["Bash", "WebFetch", "WebSearch", "Agent",
+                      "Edit", "MultiEdit", "NotebookEdit"]
+
+
+def _without(tools, name):
+    return [t for t in tools if t != name]
+
+
+def test_default_deny_list_matches_the_pinned_expectation():
+    assert list(_DEFAULT_JUDGE_DENIED_TOOLS) == DEFAULT_JUDGE_DENY
 
 
 # ---------------------------------------------------------------------------
@@ -283,8 +297,11 @@ class TestRunnerIsolation:
         # Permissions passed to from_config AND set on the copied config.
         # An allow list alone does not confine a headless Claude Code judge
         # (unlisted tools stay callable), so the escape hatches are denied.
+        # `Write` is absent on purpose: the verdict contract asks every judge
+        # to write ./output/score.json and a bare deny would beat any allow.
         expected = {"allow": ["Read", "Grep", "Glob"],
-                    "deny": ["Bash", "WebFetch", "WebSearch", "Agent"]}
+                    "deny": DEFAULT_JUDGE_DENY}
+        assert "Write" not in DEFAULT_JUDGE_DENY
         perms = cap["from_config_overrides"].get("permissions")
         assert perms == expected
         assert cap["config_permissions"] == expected
@@ -297,7 +314,7 @@ class TestRunnerIsolation:
         perms = cap["from_config_overrides"].get("permissions")
         # An explicitly allowed tool drops out of the default deny list.
         assert perms == {"allow": ["Read", "Grep", "Glob", "Bash"],
-                         "deny": ["WebFetch", "WebSearch", "Agent"]}
+                         "deny": _without(DEFAULT_JUDGE_DENY, "Bash")}
 
     def test_scoped_allow_lifts_the_bare_default_deny(self):
         """A deny beats an allow, so `Bash` left in the deny list would take
@@ -308,7 +325,41 @@ class TestRunnerIsolation:
         self._load_and_run(judge, {"passed": True, "rationale": "x"}, cap)
         perms = cap["from_config_overrides"].get("permissions")
         assert perms == {"allow": ["Read", "Bash(pytest:*)"],
-                         "deny": ["WebFetch", "WebSearch", "Agent"]}
+                         "deny": _without(DEFAULT_JUDGE_DENY, "Bash")}
+
+    @pytest.mark.parametrize("allowed,lifted", [
+        # `Task` and `Agent` are two names for one tool: comparing them
+        # literally would leave the default `Agent` deny in place for
+        # `allowed_tools: [Task]`, and a deny beats an allow, so the judge
+        # would end up with no sub-agent tool at all.
+        (["Read", "Task"], ["Agent"]),   # the CLI's own system/init spelling
+        (["Read", "Agent"], ["Agent"]),  # the permission-rule spelling
+        # The editors are interchangeable with `Write` on Claude Code and
+        # collapse into Cursor's single `Write` permission, so allowing any
+        # member must lift the whole family — otherwise `Edit` in the deny
+        # list becomes a `Write(**)` deny on Cursor and takes the verdict
+        # file away from a judge that explicitly asked to write.
+        (["Read", "Write"], ["Edit", "MultiEdit", "NotebookEdit"]),
+        (["Read", "Write(./output/**)"], ["Edit", "MultiEdit", "NotebookEdit"]),
+        (["Read", "Edit"], ["Edit", "MultiEdit", "NotebookEdit"]),
+    ])
+    def test_an_allow_lifts_its_whole_capability_group(self, allowed, lifted):
+        cap = {}
+        judge = _agent_judge(feedback_type="bool", allowed_tools=allowed)
+        self._load_and_run(judge, {"passed": True, "rationale": "x"}, cap)
+        perms = cap["from_config_overrides"].get("permissions")
+        expected = [t for t in DEFAULT_JUDGE_DENY if t not in lifted]
+        assert perms == {"allow": allowed, "deny": expected}
+
+    def test_empty_allowed_tools_is_treated_as_unset(self):
+        """Documented in README/judges.md as the read-only default, unlike
+        `denied_tools: []` which disables the deny list."""
+        cap = {}
+        judge = _agent_judge(feedback_type="bool", allowed_tools=[])
+        self._load_and_run(judge, {"passed": True, "rationale": "x"}, cap)
+        perms = cap["from_config_overrides"].get("permissions")
+        assert perms == {"allow": ["Read", "Grep", "Glob"],
+                         "deny": DEFAULT_JUDGE_DENY}
 
     def test_denied_tools_override(self):
         cap = {}
@@ -318,6 +369,29 @@ class TestRunnerIsolation:
         self._load_and_run(judge, {"passed": True, "rationale": "x"}, cap)
         perms = cap["from_config_overrides"].get("permissions")
         assert perms == {"allow": ["Read"], "deny": ["Bash", "Write"]}
+
+    def test_written_deny_survives_a_matching_allow(self):
+        """The allow-side subtraction scopes to the DEFAULT deny list only.
+        Dropping a rule the author wrote on purpose because some allow rule
+        names the same tool inverts Claude Code's deny-beats-allow (CWE-863)."""
+        cap = {}
+        judge = _agent_judge(feedback_type="bool",
+                             allowed_tools=["Read", "Grep", "Glob", "Write"],
+                             denied_tools=["Write"])
+        self._load_and_run(judge, {"passed": True, "rationale": "x"}, cap)
+        perms = cap["from_config_overrides"].get("permissions")
+        assert perms == {"allow": ["Read", "Grep", "Glob", "Write"],
+                         "deny": ["Write"]}
+
+    def test_written_deny_survives_a_scoped_matching_allow(self):
+        cap = {}
+        judge = _agent_judge(feedback_type="bool",
+                             allowed_tools=["Read", "Bash(pytest:*)"],
+                             denied_tools=["Bash"])
+        self._load_and_run(judge, {"passed": True, "rationale": "x"}, cap)
+        perms = cap["from_config_overrides"].get("permissions")
+        assert perms == {"allow": ["Read", "Bash(pytest:*)"],
+                         "deny": ["Bash"]}
 
     def test_denied_tools_empty_list_disables_default_deny(self):
         cap = {}
@@ -345,7 +419,7 @@ class TestRunnerIsolation:
         assert cap["config_runner"].type == "claude-code"
         assert cap["config_permissions"] == {
             "allow": ["Read", "Grep", "Glob"],
-            "deny": ["Bash", "WebFetch", "WebSearch", "Agent"]}
+            "deny": DEFAULT_JUDGE_DENY}
         # And the original skill config was not mutated by the shallow copy.
         assert config.runner.type == "cli"
         assert config.permissions == {"allow": ["Read", "Write", "Bash", "Edit"]}
@@ -382,6 +456,71 @@ class TestRunnerIsolation:
         assert "Grade the architecture claims." in call["args"]
         assert "output/score.json" in call["args"]  # contract appended
         assert call["model"] == "claude-sonnet-4-6"
+
+
+# ---------------------------------------------------------------------------
+# Runner boundary (the deny list has to reach the CLI to confine anything)
+# ---------------------------------------------------------------------------
+
+class TestRunnerBoundary:
+    """Everything above asserts the permissions dict the scorer builds. The
+    deny list only confines anything if it reaches the CLI, so drive a real
+    ``ClaudeCodeRunner`` against a stub ``claude`` on PATH and read its argv.
+    """
+
+    RESULT_JSON = ('{"type":"result","subtype":"success","is_error":false,'
+                   '"num_turns":1,"total_cost_usd":0.01,"result":"done"}')
+
+    def _stub_claude(self, tmp_path, monkeypatch, argv_out):
+        bindir = tmp_path / "bin"
+        bindir.mkdir()
+        stub = bindir / "claude"
+        # NUL-separated: an argument may legitimately contain a newline
+        # (--append-system-prompt), which would split one argv entry in two
+        # and shift every flag/value pair after it.
+        stub.write_text(
+            "#!/bin/sh\n"
+            f"printf '%s\\0' \"$@\" > '{argv_out}'\n"
+            "cat > /dev/null\n"
+            "mkdir -p output\n"
+            "printf '{\"rationale\":\"ok\",\"score\":4}' > output/score.json\n"
+            f"cat <<'JSON_EOF'\n{self.RESULT_JSON}\nJSON_EOF\n"
+        )
+        stub.chmod(0o755)
+        monkeypatch.setenv("PATH", f"{bindir}:{os.environ['PATH']}")
+
+    @staticmethod
+    def _flag(argv, name):
+        return [argv[i + 1] for i, a in enumerate(argv) if a == name]
+
+    def _run(self, tmp_path, monkeypatch, judge):
+        argv_out = tmp_path / "argv.txt"
+        self._stub_claude(tmp_path, monkeypatch, argv_out)
+        _, scorer, _, _, _ = load_judges(_config(judge))[0]
+        outcome = scorer(outputs={"files": {}})
+        assert outcome.value == 4, outcome
+        return argv_out.read_text().split("\0")[:-1]
+
+    def test_default_deny_list_reaches_the_cli(self, tmp_path, monkeypatch):
+        argv = self._run(tmp_path, monkeypatch,
+                         _agent_judge(feedback_type="int", score_range=[0, 5]))
+        assert self._flag(argv, "--disallowed-tools") == [
+            ",".join(DEFAULT_JUDGE_DENY)]
+        assert self._flag(argv, "--allowed-tools") == ["Read,Grep,Glob"]
+
+    def test_written_deny_list_reaches_the_cli(self, tmp_path, monkeypatch):
+        argv = self._run(tmp_path, monkeypatch,
+                         _agent_judge(feedback_type="int", score_range=[0, 5],
+                                      allowed_tools=["Read", "Write"],
+                                      denied_tools=["Bash", "Write"]))
+        assert self._flag(argv, "--disallowed-tools") == ["Bash,Write"]
+        assert self._flag(argv, "--allowed-tools") == ["Read,Write"]
+
+    def test_empty_deny_list_passes_no_flag(self, tmp_path, monkeypatch):
+        argv = self._run(tmp_path, monkeypatch,
+                         _agent_judge(feedback_type="int", score_range=[0, 5],
+                                      allowed_tools=["Read"], denied_tools=[]))
+        assert self._flag(argv, "--disallowed-tools") == []
 
 
 # ---------------------------------------------------------------------------
@@ -624,6 +763,139 @@ class TestAgentJudgeHardening:
         # A write to the staged copy must NOT reach the real source file.
         (staged / "doc.md").write_text("mutated")
         assert src_file.read_text() == "original"        # source untouched
+
+    def test_context_copy_follows_relative_symlinks(self, tmp_path,
+                                                    monkeypatch):
+        """`shutil.copytree(..., ignore_dangling_symlinks=True)` tests the RAW
+        link target against the process CWD, so a valid relative link looks
+        dangling and is dropped — the judge would then grade reference
+        material with holes in it and say nothing. Run from an unrelated CWD
+        so a regression cannot pass by accident."""
+        from score import _copy_path
+        ctx = tmp_path / "ctxdir" / "guides"
+        ctx.mkdir(parents=True)
+        (ctx / "crd.md").write_text("reference")
+        os.symlink("guides/crd.md", tmp_path / "ctxdir" / "api.md")
+        monkeypatch.chdir(tmp_path / "ctxdir" / "guides")
+        dest = tmp_path / "out"
+        assert _copy_path(tmp_path / "ctxdir", dest) == []
+        assert (dest / "api.md").read_text() == "reference"
+        assert not (dest / "api.md").is_symlink()        # dereferenced, not linked
+
+    def test_context_copy_reports_a_symlink_loop_instead_of_recursing(
+            self, tmp_path):
+        """`latest -> .` makes copytree recurse until ELOOP, leaving dozens of
+        copies of every file. Detect it, copy the rest, and report."""
+        from score import _copy_path
+        ctx = tmp_path / "ctxdir"
+        ctx.mkdir()
+        (ctx / "doc.md").write_text("reference")
+        os.symlink(".", ctx / "latest")
+        dest = tmp_path / "out"
+        errors = _copy_path(ctx, dest)
+        assert len(list(dest.rglob("doc.md"))) == 1
+        assert [Path(p).name for p, _ in errors] == ["latest"]
+        assert "loop" in errors[0][1]
+
+    def test_context_copy_does_not_follow_a_link_out_of_the_entry(
+            self, tmp_path):
+        """Dereferencing follows links, so without a containment check a
+        `docs/env-ref -> ../.env` would stage a secret the author never
+        declared, and `up -> ..` would copy the whole parent tree into the
+        judge's workspace (and can make the copy feed itself)."""
+        from score import _copy_path
+        (tmp_path / "ctxdir").mkdir()
+        (tmp_path / ".env").write_text("OPENAI_API_KEY=sk-SECRET")
+        (tmp_path / "ctxdir" / "doc.md").write_text("reference")
+        os.symlink("../.env", tmp_path / "ctxdir" / "env-ref")
+        os.symlink("..", tmp_path / "ctxdir" / "up")
+        dest = tmp_path / "out"
+        errors = _copy_path(tmp_path / "ctxdir", dest)
+        assert sorted(p.name for p in dest.rglob("*")) == ["doc.md"]
+        assert sorted(Path(p).name for p, _ in errors) == ["env-ref", "up"]
+        assert all("resolves outside" in why for _, why in errors)
+
+    def test_an_unreadable_context_file_is_reported_not_swallowed(
+            self, tmp_path, monkeypatch):
+        """The third defect in the review comment: `shutil.Error` subclasses
+        `OSError`, so the previous `except OSError: pass` discarded the whole
+        per-entry failure list. A plain I/O failure must survive it."""
+        import shutil as _shutil
+        from score import _copy_path
+        ctx = tmp_path / "ctxdir"
+        ctx.mkdir()
+        (ctx / "doc.md").write_text("reference")
+        monkeypatch.setattr(_shutil, "copy2",
+                            lambda *a, **k: (_ for _ in ()).throw(
+                                OSError("Permission denied")))
+        errors = _copy_path(ctx, tmp_path / "out")
+        assert [Path(p).name for p, _ in errors] == ["doc.md"]
+        assert "Permission denied" in errors[0][1]
+
+    def test_lost_content_fails_the_judge_by_name(self, tmp_path, monkeypatch):
+        """A hole in the material the judge was told to ground its verdict in
+        is the #239 shape; it must surface as a judge error, not a confident
+        verdict. Driven through the scorer so the error carries the name."""
+        import shutil as _shutil
+        ctx = tmp_path / "ctxdir"
+        ctx.mkdir()
+        (ctx / "doc.md").write_text("reference")
+        monkeypatch.setattr(_shutil, "copy2",
+                            lambda *a, **k: (_ for _ in ()).throw(
+                                OSError("Permission denied")))
+        monkeypatch.chdir(tmp_path)
+        # Built directly: `_agent_judge`'s `context=` is the top-level judge
+        # context (prompt text), not the `agent.context` staged workspace.
+        judge = JudgeConfig(name="arch_score", prompt="Grade it.",
+                            feedback_type="bool",
+                            agent={"context": ["ctxdir"]})
+        _, scorer, _, _, _ = load_judges(_config(judge),
+                                         project_root=str(tmp_path))[0]
+        fake = _make_fake_runner({"passed": True, "rationale": "x"})
+        with _patched_runners(fake):
+            with pytest.raises(RuntimeError,
+                               match="arch_score.*staging agent.context failed"):
+                scorer(outputs={"files": {}})
+
+    def test_contentless_entries_are_reported_but_do_not_fail_the_judge(
+            self, tmp_path, capsys):
+        """A stale `.venv/bin/python -> /moved/away` or the `latest -> .`
+        idiom inside a snapshotted repo carries nothing gradeable. Taking
+        every case of every judge down for it would be worse than the hole."""
+        from score import _stage_agent_workspace
+        ctx = tmp_path / "ctxdir"
+        ctx.mkdir()
+        (ctx / "doc.md").write_text("reference")
+        os.symlink("nowhere.md", ctx / "broken.md")
+        os.symlink(".", ctx / "latest")
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        _stage_agent_workspace(ws, {"files": {}}, None, ["ctxdir"], tmp_path)
+        staged = ws / ".context" / "ctxdir"
+        assert (staged / "doc.md").read_text() == "reference"
+        err = capsys.readouterr().err
+        assert "agent.context skipped 2 entries" in err
+        assert "broken.md" in err and "latest" in err
+
+    def test_duplicate_context_basenames_do_not_silently_merge(self, tmp_path):
+        from score import _stage_agent_workspace
+        for parent in ("a", "b"):
+            (tmp_path / parent / "docs").mkdir(parents=True)
+            (tmp_path / parent / "docs" / f"{parent}.md").write_text(parent)
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        _stage_agent_workspace(ws, {"files": {}}, None,
+                               ["a/docs", "b/docs"], tmp_path)
+        staged = ws / ".context" / "docs"
+        assert (staged / "a.md").exists()
+        assert not (staged / "b.md").exists()   # reported, not merged in
+
+    def test_staging_problem_report_is_bounded(self):
+        from score import _format_staging_problems
+        msg = _format_staging_problems([(f"p{i}", "x" * 500) for i in range(15)])
+        assert msg.startswith("15 entries:")
+        assert msg.endswith("(+5 more)")
+        assert "x" * 201 not in msg
 
     def test_no_llm_judges_fail_closed_on_unclassifiable_builtin(self):
         """An unclassifiable builtin is dropped (fail closed), not retained (CWE-754)."""

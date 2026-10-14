@@ -363,7 +363,8 @@ class TestLLMRubricJudgeLoading:
         # itself does not stop a headless Claude Code judge calling Bash.
         assert captured["kwargs"]["permissions"] == {
             "allow": ["Read", "Grep", "Glob"],
-            "deny": ["Bash", "WebFetch", "WebSearch", "Agent"],
+            "deny": ["Bash", "WebFetch", "WebSearch", "Agent",
+                     "Edit", "MultiEdit", "NotebookEdit"],
         }
 
 

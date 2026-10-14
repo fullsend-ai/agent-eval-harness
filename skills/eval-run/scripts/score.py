@@ -2000,9 +2000,73 @@ def _call_structured_judge_openai(prompt, model, feedback_type, images=None,
     return JudgeOutcome(verdict[0], verdict[1], usage=usage)
 
 
-# Tools an agent judge must never have, whatever its allow list says: shell,
-# network, and sub-agents (which would carry their own tool set).
-_DEFAULT_JUDGE_DENIED_TOOLS = ("Bash", "WebFetch", "WebSearch", "Agent")
+# Tools denied to an agent judge by default. The four reasons are different in
+# kind: `Bash` is host compromise (the judge reads untrusted artifacts and the
+# local path has no container); `WebFetch`/`WebSearch` are measurement validity
+# — a verdict that depends on what the internet said that day stops being a
+# function of the staged artifact, which is the actual #239 failure; `Agent`
+# is policy containment, since a sub-agent carries its own tool set around
+# whatever policy the judge got; and the in-place editors have nothing
+# legitimate to edit in a workspace staged fresh for every run.
+#
+# `Write` is deliberately NOT here: the default allow list below names no write
+# tool, so a default `Write` deny would leave every default-configured judge
+# unable to deliver the ./output/score.json the verdict contract asks for.
+#
+# A judge that genuinely needs one of these (e.g. a tests-pass judge that wants
+# Bash) asks for it in `allowed_tools`, which lifts the matching default deny —
+# see `_judge_tool_policy`. On the `_call_structured_judge_via_runner` path the
+# allow list is fixed, so all of them always apply there.
+_DEFAULT_JUDGE_DENIED_TOOLS = ("Bash", "WebFetch", "WebSearch", "Agent",
+                               "Edit", "MultiEdit", "NotebookEdit")
+
+# Tools that are one capability for the purpose of lifting a default deny: an
+# allow for any member lifts the default deny on every member. Two reasons.
+# `Task` and `Agent` are two names for the one sub-agent tool, so comparing
+# them literally would leave `allowed_tools: [Task]` with the default `Agent`
+# deny, and since a deny beats an allow the judge would end up with no
+# sub-agent tool at all. The editors are interchangeable with `Write` on Claude
+# Code, and on Cursor they collapse into its single `Write` permission — so
+# denying a sibling of a tool the author allowed revokes the allow outright
+# (for a Cursor judge, `Edit` in the deny list is `Write(**)`, which would take
+# away the verdict file).
+_TOOL_CAPABILITY_GROUPS = (
+    frozenset({"Write", "Edit", "MultiEdit", "NotebookEdit"}),
+    frozenset({"Agent", "Task"}),
+)
+
+
+def _bare_tool_name(rule):
+    """The tool a permission rule applies to: ``Bash(pytest:*)`` -> ``Bash``."""
+    return str(rule).split("(", 1)[0].strip()
+
+
+def _judge_tool_policy(allowed=None, denied=None):
+    """Resolve a judge's ``{"allow": [...], "deny": [...]}`` permission policy.
+
+    An allow list only pre-approves tools; on a headless Claude Code runner the
+    unlisted ones stay callable, so the deny list is what actually confines a
+    judge (#239). Two rules govern how they interact:
+
+    - With no ``denied`` list, the default applies, minus any tool the author
+      explicitly allowed — and minus the rest of that tool's capability group
+      (see ``_TOOL_CAPABILITY_GROUPS``). A deny beats an allow, so leaving
+      `Bash` denied would take away the very tool an
+      ``allowed_tools: [Bash(pytest:*)]`` asks for.
+    - An explicitly WRITTEN ``denied`` list is used verbatim. Dropping a rule
+      the author wrote on purpose because some allow rule happens to name the
+      same tool inverts deny-beats-allow for that rule (CWE-863); whichever way
+      they meant it, the written rule is the one that wins.
+    """
+    allow = list(allowed) if allowed else ["Read", "Grep", "Glob"]
+    if denied is not None:
+        return {"allow": allow, "deny": list(denied)}
+    lifted = {_bare_tool_name(t) for t in allow}
+    for group in _TOOL_CAPABILITY_GROUPS:
+        if group & lifted:
+            lifted |= group
+    deny = [t for t in _DEFAULT_JUDGE_DENIED_TOOLS if t not in lifted]
+    return {"allow": allow, "deny": deny}
 
 
 def _call_structured_judge_via_runner(prompt, model, feedback_type, config, jc,
@@ -2050,9 +2114,9 @@ def _call_structured_judge_via_runner(prompt, model, feedback_type, config, jc,
         # best-effort ceiling only and `timeout_s` is the effective bound.
         max_budget_usd=2.0,
         # Allow only pre-approves; deny is what actually confines a headless
-        # Claude Code judge (see _load_agent_judge for the full note).
-        permissions={"allow": ["Read", "Grep", "Glob"],
-                     "deny": list(_DEFAULT_JUDGE_DENIED_TOOLS)},
+        # Claude Code judge. Neither list is configurable on this path — it has
+        # no `agent:` block — so the full default deny always applies.
+        permissions=_judge_tool_policy(),
         staged_files=staged_images,
     )
     try:
@@ -3001,13 +3065,127 @@ def _interpret_agent_verdict(obj, is_bool, jc):
     return value, rationale or "agent judge verdict"
 
 
+# A staged entry that carries no content to copy by nature: skipping it loses
+# the judge nothing, so it is reported but does not fail the staging. Anything
+# else (an unreadable file, a tree that could not be listed, a failed copy) is
+# content the judge was told to ground its verdict in, and a hole there is the
+# #239 shape — those fail loudly. See `_stage_agent_workspace`.
+_STAGING_SKIP_REASONS = (
+    "dangling symlink or special file",
+    "symlink loop",
+    "resolves outside",
+    "name already staged",
+)
+
+# `_copy_tree_dereferenced` recurses once per directory level. Real context
+# trees are shallow; a pathological one must not take the interpreter's
+# recursion limit with it and surface as something unrelated.
+_MAX_CONTEXT_DEPTH = 64
+
+
 def _copy_path(src, dest):
     """Copy a file or directory tree into the staged workspace, dereferencing
-    nested symlinks so no link remains through which a write could escape."""
+    nested symlinks so no link remains through which a write could escape.
+
+    Returns a list of ``(path, reason)`` for entries that could not be copied;
+    an empty list means the tree was staged whole.
+
+    ``shutil.copytree`` cannot do this job. With ``symlinks=False`` CPython
+    tests the RAW ``os.readlink`` target with ``os.path.exists`` — against the
+    process CWD, not the link's own directory — so under
+    ``ignore_dangling_symlinks=True`` a perfectly valid relative link is
+    silently skipped, and it recurses into a directory symlink such as
+    ``latest -> .`` until ELOOP. Both surface as ``shutil.Error``, an
+    ``OSError`` subclass, so a caller's ``except OSError`` swallows the whole
+    per-entry failure list and the judge grades material that is missing files
+    or duplicated dozens of times, with nothing anywhere saying so.
+    """
     if src.is_dir():
-        shutil.copytree(src, dest, ignore_dangling_symlinks=True)
-    else:
-        shutil.copy2(src, dest)
+        return _copy_tree_dereferenced(src, dest, os.path.realpath(src), ())
+    shutil.copy2(src, dest)
+    return []
+
+
+def _copy_tree_dereferenced(src, dest, confine_root, ancestors):
+    """Recursive worker for :func:`_copy_path`.
+
+    ``confine_root`` is the real path of the declared ``agent.context`` entry.
+    Dereferencing follows links, so without it a link inside the tree
+    (``docs/env-ref -> ../.env``, or just ``latest -> ..``) would pull material
+    the author never declared into the judge's workspace — and an upward link
+    can make the copy feed itself. Every resolved target must stay under it.
+
+    ``ancestors`` holds the real paths of the directories above ``src`` in this
+    walk, so a link back into one of them is reported as a loop instead of
+    being followed.
+    """
+    if len(ancestors) >= _MAX_CONTEXT_DEPTH:
+        return [(str(src), f"deeper than {_MAX_CONTEXT_DEPTH} levels; not copied")]
+    try:
+        dest.mkdir(parents=True, exist_ok=True)
+        with os.scandir(src) as it:
+            entries = sorted(it, key=lambda e: e.name)
+    except OSError as exc:
+        return [(str(src), str(exc))]
+    ancestors = ancestors + (os.path.realpath(src),)
+    errors = []
+    for entry in entries:
+        child, target = Path(entry.path), dest / entry.name
+        try:
+            real = os.path.realpath(child)
+            if real != confine_root and not real.startswith(
+                    confine_root.rstrip(os.sep) + os.sep):
+                errors.append(
+                    (str(child), "resolves outside the context entry; not copied"))
+                continue
+            # follow_symlinks resolves a relative link against its OWN
+            # directory — the part copytree gets wrong. A dangling link is
+            # neither a dir nor a file here, and raises nothing.
+            if entry.is_dir(follow_symlinks=True):
+                if real in ancestors:
+                    errors.append((str(child), "symlink loop; not copied"))
+                    continue
+                errors.extend(_copy_tree_dereferenced(child, target,
+                                                      confine_root, ancestors))
+            elif entry.is_file(follow_symlinks=True):
+                shutil.copy2(child, target)
+            else:
+                errors.append(
+                    (str(child), "dangling symlink or special file; not copied"))
+        except OSError as exc:
+            errors.append((str(child), str(exc)))
+    return errors
+
+
+def _format_staging_problems(problems, limit=10):
+    detail = "; ".join(f"{p}: {why[:200]}" for p, why in problems[:limit])
+    more = "" if len(problems) <= limit else f" (+{len(problems) - limit} more)"
+    noun = "entry" if len(problems) == 1 else "entries"
+    return f"{len(problems)} {noun}: {detail}{more}"
+
+
+def _report_staging_problems(problems):
+    """Split context-staging problems into "lost content" and "nothing to lose".
+
+    Raises for the first — an unreadable file or an unlistable directory means
+    the judge would grade a tree with holes in it and say nothing, which is
+    #239 arriving through the fix for it. The second kind (a dangling link, a
+    socket, a self-referential ``latest -> .``, a link out of the declared
+    entry) carries no gradeable content, so it is reported on stderr and the
+    staging stands: a stale link in a snapshotted repo must not take every
+    case of every judge down with it.
+    """
+    if not problems:
+        return
+    skipped = [p for p in problems
+               if any(p[1].startswith(r) for r in _STAGING_SKIP_REASONS)]
+    lost = [p for p in problems if p not in skipped]
+    if skipped:
+        print(f"  WARNING: agent.context skipped "
+              f"{_format_staging_problems(skipped)}", file=sys.stderr)
+    if lost:
+        raise RuntimeError(
+            f"staging agent.context failed for {_format_staging_problems(lost)}")
 
 
 def _stage_agent_workspace(workspace, record, stage_inputs, context_dirs, root):
@@ -3020,6 +3198,12 @@ def _stage_agent_workspace(workspace, record, stage_inputs, context_dirs, root):
       a link would let a prompt-injected judge write through to real project
       files (CWE-59/829).
     - A pre-created ./output/ dir for the verdict file.
+
+    Raises ``RuntimeError`` when gradeable content under an ``agent.context``
+    entry could not be copied: the judge is told to ground its verdict in that
+    material, so a silent hole in it is the #239 defect arriving by another
+    route. Entries with no content to copy by nature are reported on stderr
+    instead — see :func:`_report_staging_problems`.
     """
     # 1. Output files from the case record.
     selected = None
@@ -3055,6 +3239,7 @@ def _stage_agent_workspace(workspace, record, stage_inputs, context_dirs, root):
     if context_dirs:
         ctx_root = workspace / ".context"
         ctx_root.mkdir(parents=True, exist_ok=True)
+        problems = []
         for entry in context_dirs:
             src = Path(entry)
             if not src.is_absolute():
@@ -3063,23 +3248,34 @@ def _stage_agent_workspace(workspace, record, stage_inputs, context_dirs, root):
             if not src.exists():
                 continue
             dest = ctx_root / src.name
+            if dest.exists():
+                # Two entries with the same basename would otherwise merge
+                # into one ./.context/<name>, the later silently overwriting
+                # the earlier — a judge grading a tree nobody declared.
+                problems.append((str(src), "name already staged by an earlier "
+                                           "agent.context entry; not copied"))
+                continue
             try:
-                _copy_path(src, dest)
-            except OSError:
-                pass
+                problems.extend(_copy_path(src, dest))
+            except OSError as exc:
+                problems.append((str(src), str(exc)))
+        _report_staging_problems(problems)
     # 3. Verdict output dir.
     (workspace / "output").mkdir(parents=True, exist_ok=True)
 
 
 def _load_agent_judge(jc, config, project_root=None):
     """Load an agent judge: runs the judge as a tool-using agent through the
-    runner abstraction against a staged, read-only workspace, then reads a
-    structured verdict from output/score.json.
+    runner abstraction against a staged, isolated workspace under its own tool
+    policy, then reads a structured verdict from output/score.json.
 
     Returns scorer(outputs=record) -> (value, rationale). The judge gets its
     OWN runner + tool policy (independent of the skill-under-test): a shallow
-    EvalConfig copy carries the judge's RunnerConfig and read-only permissions
-    into RUNNERS[type].from_config. Additive to the other judge types.
+    EvalConfig copy carries the judge's RunnerConfig and tool policy into
+    RUNNERS[type].from_config. Additive to the other judge types.
+
+    "Its own tool policy" is not a synonym for read-only — see
+    `_judge_tool_policy` for what the allow and deny lists each actually do.
     """
     import copy
 
@@ -3111,22 +3307,15 @@ def _load_agent_judge(jc, config, project_root=None):
             prompt += f"\n\n## Context: {path.name}\n\n{path.read_text()}"
 
     # --- Agent-judge knobs (with defaults) ---
-    allowed_tools = agent.get("allowed_tools") or ["Read", "Grep", "Glob"]
     # An allow list only pre-approves tools; in headless mode Claude Code still
-    # lets the judge call the others (Bash, WebFetch, WebSearch, Agent) with
-    # no prompt, so a "read-only" judge could shell out or read live GitHub
-    # (observed 2026-10-07: a judge quoted an upstream issue title that was
-    # not in its staged inputs). Deny the escape hatches explicitly; the
-    # Claude Code runner turns this into --disallowed-tools. `denied_tools:`
-    # in the agent block overrides the default. A scoped allow such as
-    # `Bash(pytest:*)` lifts the bare `Bash` deny too: a deny beats an allow,
-    # so leaving it would take the tool away altogether.
-    denied_tools = agent.get("denied_tools")
-    if denied_tools is None:
-        denied_tools = list(_DEFAULT_JUDGE_DENIED_TOOLS)
-    allowed_names = {t.split("(", 1)[0] for t in allowed_tools}
-    denied_tools = [t for t in denied_tools
-                    if t not in allowed_tools and t not in allowed_names]
+    # lets the judge call the others (Bash, WebFetch, WebSearch, Agent, the
+    # editors) with no prompt, so a "read-only" judge could shell out or read
+    # live GitHub (observed 2026-10-07: a judge quoted an upstream issue title
+    # that was not in its staged inputs). The deny list is what confines it;
+    # the Claude Code runner turns it into --disallowed-tools. See
+    # `_judge_tool_policy` for how `allowed_tools` and `denied_tools` interact.
+    judge_permissions = _judge_tool_policy(agent.get("allowed_tools"),
+                                           agent.get("denied_tools"))
     stage_inputs = agent.get("inputs")  # None/[] => all files
     context_dirs = agent.get("context") or []
     is_bool = (jc.feedback_type == "bool")
@@ -3179,15 +3368,18 @@ def _load_agent_judge(jc, config, project_root=None):
                 f"'{judge_runner.type}'. Available: {list(RUNNERS)}")
         workspace = Path(tempfile.mkdtemp(prefix="agent-judge-"))
         try:
-            _stage_agent_workspace(workspace, record, stage_inputs,
-                                   context_dirs, root)
+            try:
+                _stage_agent_workspace(workspace, record, stage_inputs,
+                                       context_dirs, root)
+            except RuntimeError as exc:
+                raise RuntimeError(f"Agent judge '{jc.name}': {exc}") from exc
             rendered = _render_judge_prompt(prompt, jc, config, arguments,
                                             record)
             full_prompt = rendered + "\n" + contract
 
-            # Give the JUDGE its own runner + read-only tool policy, independent
-            # of the skill-under-test: shallow-copy the EvalConfig and swap in
-            # the judge's RunnerConfig + permissions, then from_config off that.
+            # Give the JUDGE its own runner + tool policy, independent of the
+            # skill-under-test: shallow-copy the EvalConfig and swap in the
+            # judge's RunnerConfig + permissions, then from_config off that.
             judge_config = copy.copy(config)
             judge_config.runner = judge_runner
             # Skill-level interception hooks do not apply to this independent
@@ -3196,13 +3388,13 @@ def _load_agent_judge(jc, config, project_root=None):
             if hasattr(config, "inputs"):
                 judge_config.inputs = copy.copy(config.inputs)
                 judge_config.inputs.tools = []
-            judge_permissions = {"allow": list(allowed_tools),
-                                 "deny": list(denied_tools)}
-            judge_config.permissions = dict(judge_permissions)
+            judge_config.permissions = {k: list(v)
+                                        for k, v in judge_permissions.items()}
             runner = RUNNERS[judge_runner.type].from_config(
                 judge_config,
                 log_prefix=None,
-                permissions=dict(judge_permissions),
+                permissions={k: list(v)
+                             for k, v in judge_permissions.items()},
                 effort=judge_runner.effort,
             )
             result = runner.execute(

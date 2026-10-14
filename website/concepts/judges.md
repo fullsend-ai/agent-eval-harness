@@ -109,7 +109,7 @@ than one could apply, the harness resolves in this priority order (see
         agent:
           runner: {type: claude-code}               # optional; defaults to claude-code
           allowed_tools: [Read, Grep, Glob]         # read-only default
-          context: [.context/architecture-context]  # staged read-only under ./.context/
+          context: [.context/architecture-context]  # copied under ./.context/
           inputs: [strat-tasks]                      # output dirs to stage (default: all)
     ```
 
@@ -129,11 +129,15 @@ than one could apply, the harness resolves in this priority order (see
     touched tests (add `Bash` to `allowed_tools`). See the [judges config
     reference](../reference/config/judges.md) for every `agent:` field.
 
-    !!! warning "`Bash` needs a sandboxed runner"
-        The default `allowed_tools` is read-only (`[Read, Grep, Glob]`). Enable `Bash` only
-        on a runner with OS-level sandboxing (no network, clean credentials, path
-        confinement) — the judge reads untrusted case artifacts. `runner.workspace_mode:
-        repo` is rejected for agent judges.
+    !!! warning "The allow list does not confine the judge"
+        The default `allowed_tools` is read-only (`[Read, Grep, Glob]`), but an allow rule
+        only pre-approves a tool — on a headless Claude Code runner a call with no matching
+        rule still goes through. `agent.denied_tools` is what confines a judge; it defaults
+        to `[Bash, WebFetch, WebSearch, Agent, Edit, MultiEdit, NotebookEdit]`. Enable `Bash`
+        only on a runner with OS-level sandboxing (no network, clean credentials, path
+        confinement) — the judge reads untrusted case artifacts — and sandbox the runner too
+        when the judge's `Read`/`Write` reach matters, since neither is scoped by default.
+        `runner.workspace_mode: repo` is rejected for agent judges.
 
 ## What judges receive: the `outputs` record
 

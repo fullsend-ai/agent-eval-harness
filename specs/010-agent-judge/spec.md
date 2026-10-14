@@ -53,7 +53,7 @@ context, then returns a structured score.
 
 **In scope:** a new `agent` judge type, discriminated by an `agent:` block on
 `JudgeConfig`; a per-judge, pluggable `runner:` (defaulting to `claude-code`); a
-runner-agnostic `score.json` verdict-file contract; read-only workspace isolation;
+runner-agnostic `score.json` verdict-file contract; workspace isolation;
 reuse of the existing `samples`, `model`, `score_range`, `feedback_type`, `if:`, and
 `thresholds` machinery.
 
@@ -95,7 +95,7 @@ judges:
         effort: high
         # command: "..."           # for type: cli (see §5)
       allowed_tools: [Read, Grep, Glob]          # read-only default (see §4)
-      context: [.context/architecture-context]   # dirs/files staged read-only into the workspace
+      context: [.context/architecture-context]   # dirs/files copied into the workspace
       inputs: [strat-tasks]        # which collected-output dirs to stage as files (default: all)
       timeout: 420                 # seconds (default: execution.timeout or harness default)
       max_budget_usd: 2.0          # per-judge-run cap (default: 2.0)
@@ -134,16 +134,20 @@ in both the load gate (`score.py:699`) and the scoring gate (`score.py:1056`).
 
 1. **Resolves the model** via `_resolve_judge_model(jc, config)` (`score.py:1170`) —
    per-judge `model` > `models.judge` > `EVAL_JUDGE_MODEL`.
-2. **Stages an isolated, read-only judge workspace** in a temp dir:
+2. **Stages an isolated judge workspace** in a temp dir:
    - the case's relevant outputs as files — from `agent.inputs` (which
      `outputs[].path` dirs to expose; default: all of `outputs["files"]`), plus the
      `<dir>_content` convenience files;
-   - each `agent.context` entry symlinked/copied under `./.context/` (read-only);
+   - each `agent.context` entry copied under `./.context/`;
    - a pre-created `./output/` dir for the verdict file.
 3. **Instantiates the runner** from `RUNNERS[agent.runner.type]` via `from_config`,
    passing `permissions={"allow": agent.allowed_tools}` and `effort` as overrides so
    the judge's runner + tool policy are independent of the skill-under-test's. (For
    `claude-code`, `from_config` accepts a `permissions` override, `claude_code.py:47`.)
+
+   > **Superseded by #239.** An allow list does not confine a headless Claude Code
+   > judge — unlisted tools stay callable. The permissions dict now carries a `deny`
+   > key too; see `agent.denied_tools` in the judges config reference.
 4. **Runs one agent turn in prompt mode**:
    `runner.execute(target=None, args=rendered_prompt, workspace=tmp, model=judge_model,
    max_budget_usd=agent.max_budget_usd, timeout_s=agent.timeout)`. `target=None` = no

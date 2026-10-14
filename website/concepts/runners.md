@@ -18,8 +18,8 @@ runtime-agnostic.
     The same abstraction runs judges, not just cases. An
     [`agent`](../reference/config/judges.md) judge carries its own per-judge `runner:`
     block (parsed like the top-level `runner:`, default `claude-code`) and runs the judge
-    itself as a tool-using agent in an isolated, read-only staged workspace — independent
-    of the runner used for the skill under test. See
+    itself as a tool-using agent in an isolated staged workspace under its own tool
+    policy — independent of the runner used for the skill under test. See
     [judges](../reference/config/judges.md).
 
 ```mermaid

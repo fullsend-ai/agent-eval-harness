@@ -253,8 +253,8 @@ Every sub-key is optional.
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
 | `runner` | mapping | `{type: claude-code}` | Per-judge runner block, parsed exactly like the top-level [`runner`](runner.md) (`type`, `effort`, `command`, `env`, …). Lets the judge use a different runner/model stack than the skill-under-test. |
-| `allowed_tools` | list | `[Read, Grep, Glob]` | Tool allowlist for the judge. Read-only by default; add `Bash` only under sandboxing (see below). |
-| `denied_tools` | list | `[Bash, WebFetch, WebSearch, Agent]` | Tools the judge may never use, minus anything in `allowed_tools`. Needed because an allow list only pre-approves tools on the Claude Code runner; unlisted ones stay callable. `[]` disables the default. |
+| `allowed_tools` | list | `[Read, Grep, Glob]` | Tool allowlist for the judge. Read-only by default; add `Bash` only under sandboxing (see below). An allow rule pre-approves a tool, it does not confine it — see the warning below. `[]` is treated as unset. |
+| `denied_tools` | list | `[Bash, WebFetch, WebSearch, Agent, Edit, MultiEdit, NotebookEdit]` | Tools the judge may never use. Needed because an allow list only pre-approves tools on the Claude Code runner; unlisted ones stay callable. **The default** has anything `allowed_tools` names subtracted from it — along with the rest of that tool's capability group (`Write`/`Edit`/`MultiEdit`/`NotebookEdit`, and `Agent`/`Task`) — since a deny beats an allow and `Bash` left denied would take away the tool `allowed_tools: [Bash(pytest:*)]` asks for; **a list you write** replaces the default outright, with no subtraction. `[]` disables it entirely. `Write` is absent on purpose — see the note below. |
 | `context` | list of paths | `[]` | Dirs/files copied under `./.context/<name>` for the agent to consult (a copy, so nothing the judge writes reaches the originals). Distinct from the top-level `context:`, which is appended to the prompt text. |
 | `inputs` | list | all output dirs | Which collected output dirs (by `outputs[].path` name) to stage as files. Use `[.]` to stage everything. |
 | `timeout` | int | `execution.timeout` or `600` | Per-run wall-clock budget in seconds. |
@@ -270,11 +270,39 @@ Per case, the harness:
    `./output/` dir is **writable** for the verdict.
 2. **Instantiates the judge's own runner** (`RUNNERS[agent.runner.type]`, default
    `claude-code`) with `permissions={"allow": agent.allowed_tools, "deny": agent.denied_tools}`,
-   so the judge gets its own runner and read-only tool policy — independent of the skill-under-test, via a
+   so the judge gets its own runner and tool policy — independent of the skill-under-test, via a
    shallow `EvalConfig` copy carrying the judge's runner and permissions.
 3. **Runs one prompt-mode turn** with the rendered instructions (same template variables
    LLM judges get), reads the verdict, and tears the workspace down. Runner cost/tokens
    are attributed to the judge.
+
+!!! warning "What the deny list does and does not cover"
+
+    A deny rule confines a judge. An allow rule does **not**: on a headless Claude
+    Code runner a call with no matching allow rule is not refused, it simply runs
+    (that is [#239](https://github.com/opendatahub-io/agent-eval-harness/issues/239)).
+    Scoping an allow rule — `Write(./output/**)` — documents intent and is the right
+    thing to write, but do not count it as enforcement.
+
+    So two gaps remain open by design, and the judge's *file* reach is not confined:
+
+    - **`Write` is not denied by default**, because the verdict contract asks every
+      judge to write `./output/score.json` and a bare `Write` deny would beat any
+      allow. Allowing any write tool also lifts the default `Edit`/`MultiEdit`/
+      `NotebookEdit` denies, since they are one capability (and a single `Write`
+      permission on Cursor).
+    - **`Read` is not scoped**, so a bare `Read` reaches absolute paths.
+
+    A judge that grades material you do not control — an agent's diff, a scraped
+    page, a third-party repo — should therefore run on a runner that sandboxes the
+    filesystem, the same advice as for `Bash` below. The deny list buys you the
+    shell, the network and sub-agents; it does not make the judge a sealed box.
+
+    Staging `agent.context` reports what it could not copy. A **dangling link, a
+    socket, a `latest -> .` loop or a link resolving outside the entry** is skipped
+    with a line on stderr — none of it is gradeable content. Anything that *was*
+    content and could not be read **fails the judge**, rather than leaving it to
+    grade a tree with holes in it.
 
 ### Output contract
 
@@ -332,7 +360,7 @@ judges:
     agent:
       runner: { type: claude-code }              # optional; defaults to claude-code
       allowed_tools: [Read, Grep, Glob]          # read-only default
-      context: [.context/architecture-context]   # staged read-only under ./.context/
+      context: [.context/architecture-context]   # copied under ./.context/
       inputs: [strat-tasks]                       # which output dirs to stage (default: all)
 ```
 

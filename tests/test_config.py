@@ -546,6 +546,53 @@ judges:
 """))
 
 
+def _tool_list_config(tmp_path, key, value):
+    return _write(tmp_path, f"""
+name: t
+execution:
+  skill: s
+judges:
+  - name: j
+    prompt: grade
+    feedback_type: bool
+    agent:
+      {key}: {value}
+""")
+
+
+@pytest.mark.parametrize("key", ["allowed_tools", "denied_tools"])
+def test_misspelled_tool_name_warns_with_the_right_spelling(tmp_path, key):
+    """`denied_tools` replaces the default wholesale and a runner ignores a
+    name it cannot map without a word, so the YAML-natural lowercase would
+    load clean, forfeit the working default, and buy nothing in exchange."""
+    with pytest.warns(UserWarning, match="did you mean 'Bash'"):
+        EvalConfig.from_yaml(_tool_list_config(tmp_path, key, "[bash]"))
+
+
+@pytest.mark.parametrize("key", ["allowed_tools", "denied_tools"])
+def test_unknown_tool_name_warns_without_raising(tmp_path, key):
+    """A warning, not an error: a CLI release adds tools faster than a harness
+    release can list them, so an unrecognized name must stay usable."""
+    with pytest.warns(UserWarning, match="is not a known tool name"):
+        cfg = EvalConfig.from_yaml(
+            _tool_list_config(tmp_path, key, "[BrandNewTool]"))
+    assert cfg.judges[0].agent[key] == ["BrandNewTool"]
+
+
+@pytest.mark.parametrize("value", [
+    "[Read, Grep, Glob]",        # plain names
+    "[Bash(pytest:*)]",          # scoped: the bare name is what's checked
+    "[mcp__github__get_issue]",  # names a server, not a tool
+])
+def test_recognized_tool_rules_do_not_warn(tmp_path, value):
+    import warnings
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        EvalConfig.from_yaml(
+            _tool_list_config(tmp_path, "denied_tools", value))
+    assert not [w for w in caught if "tool name" in str(w.message)]
+
+
 def test_agent_nested_runner_invalid_command_raises(tmp_path):
     """The nested runner is validated by the SAME logic as the top-level
     runner (command must be str or list of str)."""

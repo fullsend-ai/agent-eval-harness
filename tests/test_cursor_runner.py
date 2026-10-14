@@ -506,13 +506,15 @@ def test_cursor_permission_translation_warns_for_unknown_tool(tmp_path, monkeypa
 
 
 def test_cursor_denied_agent_tool_is_a_quiet_no_op(tmp_path, monkeypatch):
-    """The harness's default judge deny list includes Agent, which Cursor has
-    no permission for.  Denying it must neither warn nor leak a pattern."""
+    """The harness's default judge deny list includes Agent and the Claude-only
+    editor spellings, none of which Cursor has a permission for.  Denying them
+    must neither warn nor leak a pattern."""
     import warnings
     runner = _runner(
         monkeypatch,
         permissions={"allow": ["Read"],
-                     "deny": ["Bash", "WebFetch", "WebSearch", "Agent"]},
+                     "deny": ["Bash", "WebFetch", "WebSearch", "Agent",
+                              "Edit", "MultiEdit", "NotebookEdit"]},
     )
     with warnings.catch_warnings():
         warnings.simplefilter("error")
@@ -526,10 +528,74 @@ def test_cursor_denied_agent_tool_is_a_quiet_no_op(tmp_path, monkeypatch):
         CursorAgentRunner._restore_permissions(snapshot)
 
 
+@pytest.mark.parametrize("allowed", [
+    ["Read", "Grep", "Glob", "Write"],
+    ["Read", "Grep", "Glob", "Write(./output/**)"],
+])
+def test_cursor_default_editor_denies_do_not_revoke_an_allowed_write(
+        tmp_path, monkeypatch, allowed):
+    """Cursor has one `Write` capability for every file mutation, so an `Edit`
+    deny is a `Write(**)` deny.  Left in the default judge deny list it would
+    beat the allow and take the verdict file away from a judge that asked for
+    `Write`; `_judge_tool_policy` lifts the whole write family instead.
+
+    The policy comes from the harness, not a hand-written list: a test that
+    spells the deny list out itself cannot see that regression.
+    """
+    import warnings
+
+    from score import _judge_tool_policy
+
+    runner = _runner(monkeypatch, permissions=_judge_tool_policy(allowed))
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        snapshot = runner._prepare_permissions(tmp_path)
+    try:
+        config = json.loads(snapshot.path.read_text())
+        assert "Write(**)" not in config["permissions"]["deny"]
+        assert any(p.startswith("Write(") for p in config["permissions"]["allow"])
+        assert "Shell(**)" in config["permissions"]["deny"]   # still confined
+    finally:
+        CursorAgentRunner._restore_permissions(snapshot)
+
+
+def test_cursor_default_judge_policy_still_denies_writes(tmp_path, monkeypatch):
+    """The read-only default must keep denying writes on Cursor — lifting the
+    family is conditional on the author allowing one of its members."""
+    import warnings
+
+    from score import _judge_tool_policy
+
+    runner = _runner(monkeypatch, permissions=_judge_tool_policy())
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        snapshot = runner._prepare_permissions(tmp_path)
+    try:
+        config = json.loads(snapshot.path.read_text())
+        assert "Write(**)" in config["permissions"]["deny"]
+    finally:
+        CursorAgentRunner._restore_permissions(snapshot)
+
+
 def test_cursor_allowed_agent_tool_still_rejected(tmp_path, monkeypatch):
     runner = _runner(monkeypatch, permissions={"allow": ["Read", "Agent"]})
     with pytest.raises(ValueError, match="no permission mapping for 'Agent'"):
         runner._prepare_permissions(tmp_path)
+
+
+@pytest.mark.parametrize("tool", ["MultiEdit", "NotebookEdit"])
+def test_cursor_maps_the_claude_only_editor_spellings(tmp_path, monkeypatch,
+                                                      tool):
+    """Cursor's single `Write` permission is the faithful translation, so
+    these map rather than warn — which also keeps a deliberate top-level
+    `permissions.deny: [NotebookEdit]` from being silently dropped."""
+    runner = _runner(monkeypatch, permissions={"allow": ["Read", tool]})
+    snapshot = runner._prepare_permissions(tmp_path)
+    try:
+        config = json.loads(snapshot.path.read_text())
+        assert "Write(**)" in config["permissions"]["allow"]
+    finally:
+        CursorAgentRunner._restore_permissions(snapshot)
 
 
 def test_cursor_permission_translation_keeps_mcp_wildcards(tmp_path, monkeypatch):
