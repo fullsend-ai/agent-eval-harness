@@ -719,12 +719,22 @@ h2.section-heading { margin: 1.8em 0 0.8em; }
 .section-intro code { background: var(--code-bg); padding: 1px 5px; border-radius: 4px; font-size: 0.92em; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
 a { color: var(--accent); text-decoration: none; }
 a:hover { text-decoration: underline; }
-#theme-toggle { position: fixed; top: 16px; right: 16px; z-index: 1000; background: var(--surface); color: var(--text); border: 1px solid var(--border-strong); border-radius: 999px; width: 38px; height: 38px; padding: 0; cursor: pointer; font-size: 16px; display: flex; align-items: center; justify-content: center; box-shadow: var(--shadow); transition: background-color .15s ease, transform .15s ease, border-color .15s ease; }
-#theme-toggle:hover { background: var(--surface-2); border-color: var(--accent); transform: scale(1.05); }
-#theme-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+#report-toolbar { position: fixed; top: 12px; right: 16px; z-index: 1000; display: flex; gap: 4px; align-items: center; }
+#report-toolbar button { background: transparent; color: var(--text-muted); border: none; border-radius: 6px; width: 36px; height: 36px; padding: 0; cursor: pointer; font-size: 16px; display: inline-flex; align-items: center; justify-content: center; transition: background-color .15s ease, color .15s ease; position: relative; }
+#report-toolbar button:hover { background: var(--surface-2); color: var(--text); }
+#report-toolbar button:active { background: var(--surface-3); }
+#report-toolbar button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; border-radius: 6px; }
+#report-toolbar button svg { width: 18px; height: 18px; fill: currentColor; pointer-events: none; }
+#report-toolbar .toolbar-sep { width: 1px; height: 20px; background: var(--border-strong); margin: 0 4px; }
+#report-toolbar .toolbar-tip { position: absolute; bottom: -32px; left: 50%; transform: translateX(-50%); background: var(--text); color: var(--bg); font-size: 12px; font-weight: 500; padding: 4px 10px; border-radius: 4px; white-space: nowrap; opacity: 0; pointer-events: none; transition: opacity .15s ease; z-index: 1; }
+#report-toolbar .toolbar-tip::before { content: ""; position: absolute; top: -4px; left: 50%; transform: translateX(-50%); border-left: 5px solid transparent; border-right: 5px solid transparent; border-bottom: 4px solid var(--text); }
+#report-toolbar button:hover .toolbar-tip { opacity: 1; }
+#report-toolbar .toolbar-toast { position: fixed; top: 16px; right: 16px; background: var(--surface); border: 1px solid var(--success-border); border-left: 4px solid var(--success); border-radius: 6px; padding: 10px 16px 10px 12px; font-size: 13px; font-weight: 500; color: var(--success); box-shadow: var(--shadow-strong); display: flex; align-items: center; gap: 8px; transform: translateY(-8px); opacity: 0; pointer-events: none; transition: opacity .2s ease, transform .2s ease; z-index: 1001; }
+#report-toolbar .toolbar-toast.show { opacity: 1; transform: translateY(0); pointer-events: auto; }
+#report-toolbar .toolbar-toast svg { width: 16px; height: 16px; fill: var(--success); flex-shrink: 0; }
 @media print {
   :root { color-scheme: light; --bg: #fff; --surface: #fff; --text: #000; --text-muted: #444; }
-  #theme-toggle { display: none; }
+  #report-toolbar { display: none; }
   .section, .analysis, details.case { box-shadow: none; break-inside: avoid; }
 }
 
@@ -816,11 +826,13 @@ TOGGLE_SCRIPT = """
 (function () {
   var btn = document.getElementById('theme-toggle');
   if (!btn) return;
+  var sunSvg = '<svg viewBox="0 0 16 16"><path d="M8 11a3 3 0 1 1 0-6 3 3 0 0 1 0 6z"/><path d="M8 0a.5.5 0 0 1 .5.5v2a.5.5 0 0 1-1 0v-2A.5.5 0 0 1 8 0zm0 13a.5.5 0 0 1 .5.5v2a.5.5 0 0 1-1 0v-2A.5.5 0 0 1 8 13zm8-5a.5.5 0 0 1-.5.5h-2a.5.5 0 0 1 0-1h2A.5.5 0 0 1 16 8zM3 8a.5.5 0 0 1-.5.5h-2a.5.5 0 0 1 0-1h2A.5.5 0 0 1 3 8zm10.657-5.657a.5.5 0 0 1 0 .707l-1.414 1.415a.5.5 0 1 1-.707-.708l1.414-1.414a.5.5 0 0 1 .707 0zm-9.193 9.193a.5.5 0 0 1 0 .707L3.05 13.657a.5.5 0 0 1-.707-.707l1.414-1.414a.5.5 0 0 1 .707 0zm9.193 2.121a.5.5 0 0 1-.707 0l-1.414-1.414a.5.5 0 0 1 .707-.707l1.414 1.414a.5.5 0 0 1 0 .707zM4.464 4.465a.5.5 0 0 1-.707 0L2.343 3.05a.5.5 0 1 1 .707-.707l1.414 1.414a.5.5 0 0 1 0 .708z"/></svg>';
+  var moonSvg = '<svg viewBox="0 0 16 16"><path d="M6 .278a.768.768 0 0 1 .08.858 7.208 7.208 0 0 0-.878 3.46c0 4.021 3.278 7.277 7.318 7.277.527 0 1.04-.055 1.533-.16a.787.787 0 0 1 .81.316.733.733 0 0 1-.031.893A8.349 8.349 0 0 1 8.344 16C3.734 16 0 12.286 0 7.71 0 4.266 2.114 1.312 5.124.06A.752.752 0 0 1 6 .278z"/></svg>';
   function paint() {
     var t = document.documentElement.getAttribute('data-theme') || 'light';
-    btn.textContent = t === 'dark' ? '\\u2600' : '\\u263E';
+    var svg = t === 'dark' ? sunSvg : moonSvg;
+    btn.innerHTML = svg + '<span class="toolbar-tip">' + (t === 'dark' ? 'Light theme' : 'Dark theme') + '</span>';
     btn.setAttribute('aria-label', t === 'dark' ? 'Switch to light theme' : 'Switch to dark theme');
-    btn.title = btn.getAttribute('aria-label');
   }
   btn.addEventListener('click', function () {
     var current = document.documentElement.getAttribute('data-theme') || 'light';
@@ -830,6 +842,56 @@ TOGGLE_SCRIPT = """
     paint();
   });
   paint();
+})();
+"""
+
+SHARE_SCRIPT = """
+(function () {
+  var toast = document.getElementById('toolbar-toast');
+  var toastMsg = document.getElementById('toolbar-toast-msg');
+  var toastTimer;
+  function showToast(msg) {
+    clearTimeout(toastTimer);
+    toastMsg.textContent = msg;
+    toast.classList.add('show');
+    toastTimer = setTimeout(function () { toast.classList.remove('show'); }, 2400);
+  }
+
+  var btnDownload = document.getElementById('btn-download');
+  if (btnDownload) {
+    btnDownload.addEventListener('click', function () {
+      var html = document.documentElement.outerHTML;
+      var blob = new Blob(['<!DOCTYPE html>\\n' + html], { type: 'text/html' });
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement('a');
+      a.href = url;
+      a.download = document.title.replace(/[^a-zA-Z0-9_\\-]/g, '_') + '.html';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      showToast('Report downloaded');
+    });
+  }
+
+  var btnCopy = document.getElementById('btn-copy');
+  if (btnCopy) {
+    btnCopy.addEventListener('click', function () {
+      var path = window.location.pathname || window.location.href;
+      if (path.startsWith('file://')) path = path.slice(7);
+      navigator.clipboard.writeText(path).then(function () {
+        showToast('Path copied to clipboard');
+      }).catch(function () {
+        var ta = document.createElement('textarea');
+        ta.value = path;
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+        showToast('Path copied to clipboard');
+      });
+    });
+  }
 })();
 """
 
@@ -3092,7 +3154,13 @@ def generate_report(config, summary, run_result, run_dir,
 <style>{CSS}</style>
 </head>
 <body>
-<button id="theme-toggle" type="button" aria-label="Toggle theme">\u263E</button>
+<div id="report-toolbar">
+<button id="btn-download" type="button" aria-label="Download report"><svg viewBox="0 0 16 16"><path d="M8 1a.5.5 0 0 1 .5.5v8.793l2.146-2.147a.5.5 0 0 1 .708.708l-3 3a.5.5 0 0 1-.708 0l-3-3a.5.5 0 1 1 .708-.708L7.5 10.293V1.5A.5.5 0 0 1 8 1z"/><path d="M2.5 13a.5.5 0 0 0 0 1h11a.5.5 0 0 0 0-1h-11z"/></svg><span class="toolbar-tip">Download</span></button>
+<button id="btn-copy" type="button" aria-label="Copy file path"><svg viewBox="0 0 16 16"><path d="M10.5 1h-7A1.5 1.5 0 0 0 2 2.5v9A1.5 1.5 0 0 0 3.5 13h7a1.5 1.5 0 0 0 1.5-1.5v-9A1.5 1.5 0 0 0 10.5 1zm.5 10.5a.5.5 0 0 1-.5.5h-7a.5.5 0 0 1-.5-.5v-9a.5.5 0 0 1 .5-.5h7a.5.5 0 0 1 .5.5v9z"/><path d="M12.5 4a.5.5 0 0 1 .5.5v9a1.5 1.5 0 0 1-1.5 1.5h-7a.5.5 0 0 1 0-1h7a.5.5 0 0 0 .5-.5v-9a.5.5 0 0 1 .5-.5z"/></svg><span class="toolbar-tip">Copy path</span></button>
+<div class="toolbar-sep"></div>
+<button id="theme-toggle" type="button" aria-label="Toggle theme"><svg viewBox="0 0 16 16"><path d="M8 11a3 3 0 1 1 0-6 3 3 0 0 1 0 6z"/><path d="M8 0a.5.5 0 0 1 .5.5v2a.5.5 0 0 1-1 0v-2A.5.5 0 0 1 8 0zm0 13a.5.5 0 0 1 .5.5v2a.5.5 0 0 1-1 0v-2A.5.5 0 0 1 8 13zm8-5a.5.5 0 0 1-.5.5h-2a.5.5 0 0 1 0-1h2A.5.5 0 0 1 16 8zM3 8a.5.5 0 0 1-.5.5h-2a.5.5 0 0 1 0-1h2A.5.5 0 0 1 3 8zm10.657-5.657a.5.5 0 0 1 0 .707l-1.414 1.415a.5.5 0 1 1-.707-.708l1.414-1.414a.5.5 0 0 1 .707 0zm-9.193 9.193a.5.5 0 0 1 0 .707L3.05 13.657a.5.5 0 0 1-.707-.707l1.414-1.414a.5.5 0 0 1 .707 0zm9.193 2.121a.5.5 0 0 1-.707 0l-1.414-1.414a.5.5 0 0 1 .707-.707l1.414 1.414a.5.5 0 0 1 0 .707zM4.464 4.465a.5.5 0 0 1-.707 0L2.343 3.05a.5.5 0 1 1 .707-.707l1.414 1.414a.5.5 0 0 1 0 .708z"/></svg><span class="toolbar-tip">Light theme</span></button>
+<div class="toolbar-toast" id="toolbar-toast"><svg viewBox="0 0 16 16"><path d="M8 0a8 8 0 1 0 0 16A8 8 0 0 0 8 0zm3.354 6.354-4 4a.5.5 0 0 1-.708 0l-2-2a.5.5 0 1 1 .708-.708L7 9.293l3.646-3.647a.5.5 0 0 1 .708.708z"/></svg><span id="toolbar-toast-msg"></span></div>
+</div>
 """
     baseline_id = None
     if baseline_summary:
@@ -3114,6 +3182,7 @@ def generate_report(config, summary, run_result, run_dir,
         html += _wrap_section(_render_reward_overview(summary, config, reward_cfg))
     html += _render_per_case(summary, run_dir, config, baseline_dir, review)
     html += f"\n<script>{TOGGLE_SCRIPT}</script>\n"
+    html += f"<script>{SHARE_SCRIPT}</script>\n"
     html += f"<script>{IMAGE_COMPARE_SCRIPT}</script>\n"
     html += f"<script>{SAMPLE_TABS_SCRIPT}</script>\n"
     html += "</body>\n</html>\n"
