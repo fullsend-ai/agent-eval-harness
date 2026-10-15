@@ -546,6 +546,23 @@ class TestRunnerBoundary:
         assert self._flag(argv, "--permission-mode") == ["manual"]
         assert self._flag(argv, "--permission-prompts") == ["none"]
 
+    def test_dot_slash_prefixed_rules_survive_to_argv(self, tmp_path,
+                                                      monkeypatch):
+        """The `./`-prefixed spelling is what a real consumer wrote
+        (fullsend-ai/agents#1622). Verified against claude 2.1.300 that
+        `Edit(./output/**)` permits the verdict write under the forced mode,
+        so the harness must pass it through untouched."""
+        argv = self._run(tmp_path, monkeypatch, _agent_judge(
+            feedback_type="int", score_range=[0, 5],
+            allowed_tools=["Read(./**)", "Grep(./**)", "Glob(./**)",
+                           "Edit(./output/**)"],
+            denied_tools=["Bash", "WebFetch", "WebSearch", "Agent",
+                          "MultiEdit", "NotebookEdit"]))
+        assert self._flag(argv, "--allowed-tools") == [
+            "Read(./**),Grep(./**),Glob(./**),Edit(./output/**)"]
+        assert self._flag(argv, "--disallowed-tools") == [
+            "Bash,WebFetch,WebSearch,Agent,MultiEdit,NotebookEdit"]
+
     def test_judge_runner_cannot_weaken_the_mode(self, tmp_path, monkeypatch):
         """A judge able to set `permission_mode: bypassPermissions` in its own
         `agent.runner:` block would put itself back in the posture this exists

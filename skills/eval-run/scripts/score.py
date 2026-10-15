@@ -2169,8 +2169,13 @@ def _bare_tool_name(rule):
 #
 # Measured over 6 runs at this policy: verdict written 6/6, a prompted write
 # outside ./output/ denied 6/6, a prompted read outside the workspace denied
-# 6/6. `Grep`/`Glob` are deliberately absent: bare they widen, and the tools
-# may not even exist in a given CLI/model session.
+# 6/6.
+#
+# `Grep`/`Glob` are absent and nothing is lost by it: the CLI auto-approves
+# the read-only tools INSIDE the working directory whether or not the allow
+# list names them (measured with an allow list of `Edit(output/**)` alone),
+# while a BARE `Grep`/`Glob` allow would remove the confinement that keeps
+# them out of the rest of the host. Naming them could only widen.
 _DEFAULT_JUDGE_ALLOWED_TOOLS = ("Read(**)", "Edit(output/**)")
 
 # Agent judges run deny-by-default. `manual` makes an unlisted tool prompt
@@ -2272,6 +2277,9 @@ def _call_structured_judge_via_runner(prompt, model, feedback_type, config, jc,
     try:
         usage = _usage_from_run_result(result, model)
         _record_judge_usage(usage)
+        # This path runs deny-by-default too, so its refusals are evidence on
+        # the same footing as an agent judge's.
+        _record_judge_denials(getattr(result, "permission_denials", None))
         if result.exit_code != 0:
             snippet = (result.stderr or result.stdout or extracted_text or "").strip()
             snippet = snippet.replace("\n", " ")[:200]

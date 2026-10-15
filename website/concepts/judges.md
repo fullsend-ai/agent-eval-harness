@@ -132,10 +132,12 @@ than one could apply, the harness resolves in this priority order (see
 
     !!! warning "The judge runs deny-by-default — mind the rule syntax"
         On the Claude Code runner a judge runs under `--permission-mode manual
-        --permission-prompts none`, so `allowed_tools` is **authoritative**: a tool it does
-        not name cannot be called. The default is `[Read(**), Edit(output/**)]` — read
+        --permission-prompts none`, so a call the policy does not cover is **refused**
+        rather than silently executed. The default is `[Read(**), Edit(output/**)]` — read
         anywhere in the staged workspace, write nothing but the verdict file — with an
-        effective deny of `[Bash, WebFetch, WebSearch, Agent]`.
+        effective deny of `[Bash, WebFetch, WebSearch, Agent]`. The gate is about scope, not
+        enumeration: the read-only tools work inside the working directory whether or not
+        the list names them.
 
         Two traps when writing your own list: a **bare** `Read`/`Grep`/`Glob` *widens* the
         judge (it removes the working-directory confinement the CLI applies by default), and

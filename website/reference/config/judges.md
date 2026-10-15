@@ -331,7 +331,7 @@ Per case, the harness:
     On the **Claude Code** runner an agent judge runs deny-by-default:
     `--permission-mode manual --permission-prompts none`. `manual` turns an unlisted
     tool call into a permission prompt, and `--print` has nobody to answer one, so it
-    is refused. That is what makes `allowed_tools` authoritative. Without it an
+    is refused. That is what gives `allowed_tools` teeth. Without it an
     unlisted tool simply runs
     ([#239](https://github.com/opendatahub-io/agent-eval-harness/issues/239)) — the
     harness's previous posture passed no `--permission-mode` at all, which is the
@@ -350,6 +350,10 @@ Per case, the harness:
       governed by `Edit(<path>)` rules. Scope writes with `Edit`, never `Write`.
     - `Grep` and `Glob` may not exist as tools in a given CLI/model session, so a rule
       naming them can be addressed to nothing.
+
+    The two flags require a Claude Code CLI that has them — verified present on 2.1.289
+    and every build since. On an older CLI the judge fails with `unknown option`
+    rather than running unconfined.
 
     `denied_tools` still applies, as defence in depth and because it is the only
     control on runners with no equivalent mode. `Bash` in particular must stay

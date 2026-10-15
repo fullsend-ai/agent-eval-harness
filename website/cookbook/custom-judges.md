@@ -428,9 +428,9 @@ like an LLM judge — the `agent:` block is the only thing that changes how it r
 inputs are the case's collected output files (filtered by `agent.inputs`, default all)
 plus each `agent.context` dir copied under `./.context/`; the spot it is meant to write
 is `./output/`, for the verdict file. What it *can* reach is set by `agent.allowed_tools`
-(default `[Read(**), Edit(output/**)]`), which is authoritative because the judge runs
-deny-by-default on the Claude Code runner, backed by `agent.denied_tools` for runners
-without an equivalent mode.
+(default `[Read(**), Edit(output/**)]`), enforced because the judge runs deny-by-default on
+the Claude Code runner — reads work inside the staged workspace, anything reaching outside
+it is refused — backed by `agent.denied_tools` for runners without an equivalent mode.
 
 Say you grade whether a strategy's architecture claims are real. A text-only LLM judge
 has no way to check component names, CRDs, or API fields against the platform docs, so it
