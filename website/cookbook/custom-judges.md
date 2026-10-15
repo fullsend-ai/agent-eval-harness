@@ -283,7 +283,7 @@ The prompt is rendered with these variables:
     still reduces over the surviving samples, so one bad sample costs a stability flag. Keep
     stating the scale in the rubric text as well; a prompt that says "score 0, 1, or 2" and
     a config that says nothing is the combination that produced silently out-of-range scores
-    ([#182](https://github.com/opendatahub-io/agent-eval-harness/issues/182)).
+    ([#182](https://github.com/fullsend-ai/agent-eval-harness/issues/182)).
     An LLM judge's answer is rounded to an integer unless the scale says otherwise — declare
     `feedback_type: float`, or fractional bounds such as `[0, 2.5]`, for a continuous scale.
 

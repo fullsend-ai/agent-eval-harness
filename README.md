@@ -13,7 +13,7 @@
 <p align="center"><em>Make agent performance measurable — and improvable</em></p>
 
 <p align="center">
-  <a href="https://opendatahub-io.github.io/agent-eval-harness/"><img src="https://img.shields.io/badge/docs-live-7c5cff" alt="docs"></a>
+  <a href="https://fullsend-ai.github.io/agent-eval-harness/"><img src="https://img.shields.io/badge/docs-live-7c5cff" alt="docs"></a>
   <img src="https://img.shields.io/badge/python-3.11%2B-blue" alt="python">
   <img src="https://img.shields.io/badge/license-Apache--2.0-informational" alt="license">
   <img src="https://img.shields.io/badge/claude-plugin-7c5cff" alt="claude plugin">
@@ -26,8 +26,8 @@
 Same config on your laptop, Harbor containers, or EvalHub.
 
 <p align="center">
-  <a href="https://opendatahub-io.github.io/agent-eval-harness/">Docs</a> ·
-  <a href="https://opendatahub-io.github.io/agent-eval-harness/get-started/">Get started</a> ·
+  <a href="https://fullsend-ai.github.io/agent-eval-harness/">Docs</a> ·
+  <a href="https://fullsend-ai.github.io/agent-eval-harness/get-started/">Get started</a> ·
   <a href="#quick-start">Quick start</a> ·
   <a href="#execution-model">Execution model</a>
 </p>
@@ -80,7 +80,7 @@ claude plugin install agent-eval-harness@opendatahub-skills
 Or clone and load as a local plugin:
 
 ```bash
-git clone https://github.com/opendatahub-io/agent-eval-harness
+git clone https://github.com/fullsend-ai/agent-eval-harness
 pip install -e ./agent-eval-harness
 claude --plugin-dir ./agent-eval-harness
 ```

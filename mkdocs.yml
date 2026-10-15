@@ -4,9 +4,9 @@ site_name: Agent Eval Harness
 site_description: >-
   A generic evaluation framework for skills and agent capabilities — analyze, build a
   dataset, run, score with LLM and code judges, and improve, all from one declarative eval.yaml.
-site_url: https://opendatahub-io.github.io/agent-eval-harness/
-repo_url: https://github.com/opendatahub-io/agent-eval-harness
-repo_name: opendatahub-io/agent-eval-harness
+site_url: https://fullsend-ai.github.io/agent-eval-harness/
+repo_url: https://github.com/fullsend-ai/agent-eval-harness
+repo_name: fullsend-ai/agent-eval-harness
 edit_uri: edit/main/website/
 docs_dir: website
 copyright: Copyright &copy; Red Hat, Inc. — Licensed under Apache-2.0
@@ -154,11 +154,11 @@ extra:
           data: 0
           note: >-
             Thanks — please
-            <a href="https://github.com/opendatahub-io/agent-eval-harness/issues/new" target="_blank" rel="noopener">open an issue</a>
+            <a href="https://github.com/fullsend-ai/agent-eval-harness/issues/new" target="_blank" rel="noopener">open an issue</a>
             so we can improve this page.
   social:
     - icon: fontawesome/brands/github
-      link: https://github.com/opendatahub-io/agent-eval-harness
+      link: https://github.com/fullsend-ai/agent-eval-harness
 
 nav:
   - "Home": index.md

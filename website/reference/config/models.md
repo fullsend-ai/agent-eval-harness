@@ -195,7 +195,7 @@ a hook on a different provider kind than the skill is rejected at load. The bare
     OpenRouter env — `background_model` does not help there either, since it is consulted
     only when the config's own skill model activates the plan. Set `models.hook` to an
     `openrouter:/` id, or put the `openrouter:/` skill model in a [profile](extends.md)
-    ([#241](https://github.com/opendatahub-io/agent-eval-harness/issues/241)).
+    ([#241](https://github.com/fullsend-ai/agent-eval-harness/issues/241)).
 
 ```yaml
 models:

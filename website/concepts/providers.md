@@ -276,12 +276,12 @@ Secret — are in the [guide's limitations](../guides/openrouter.md#limitations)
   it, but without a plan the URI reaches `claude --model` (and
   `CLAUDE_CODE_SUBAGENT_MODEL`) verbatim. Write bare ids on agent roles unless the
   model is `openrouter:/`
-  ([#242](https://github.com/opendatahub-io/agent-eval-harness/issues/242)).
+  ([#242](https://github.com/fullsend-ai/agent-eval-harness/issues/242)).
 - **The hook model follows the config roles, not the CLI.** `--model openrouter:/…` over
   an Anthropic `models.skill` with no `models.hook` leaves the hook on the Claude
   default inside the OpenRouter environment; switch the skill model in a
   [profile](../reference/config/extends.md) or set `models.hook`
-  ([#241](https://github.com/opendatahub-io/agent-eval-harness/issues/241)).
+  ([#241](https://github.com/fullsend-ai/agent-eval-harness/issues/241)).
 - **One provider kind.** `models.providers` accepts the `openrouter` block only;
   `kind: openai-compatible` is refused. OpenAI-compatible endpoints are `openai:/`
   judges with `OPENAI_BASE_URL`, or the `codex` and `responses-api` runners.

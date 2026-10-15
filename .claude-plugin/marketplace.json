@@ -1,7 +1,7 @@
 {
   "name": "agent-eval-harness-dev",
   "owner": {
-    "name": "opendatahub-io"
+    "name": "fullsend-ai"
   },
   "metadata": {
     "description": "Local development marketplace for the agent-eval-harness plugin."
@@ -12,11 +12,11 @@
       "version": "1.56.2",
       "description": "Agent and skill evaluation harness with MLflow integration",
       "author": {
-        "name": "opendatahub-io"
+        "name": "fullsend-ai"
       },
       "source": "./",
-      "homepage": "https://github.com/opendatahub-io/agent-eval-harness",
-      "repository": "https://github.com/opendatahub-io/agent-eval-harness"
+      "homepage": "https://github.com/fullsend-ai/agent-eval-harness",
+      "repository": "https://github.com/fullsend-ai/agent-eval-harness"
     }
   ]
 }
