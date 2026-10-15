@@ -2126,7 +2126,7 @@ def _call_structured_judge_via_runner(prompt, model, feedback_type, config, jc,
         # Enforced by runners that support a budget flag (e.g. claude-code); the
         # Cursor CLI has no budget option, so for a Cursor-backed judge this is a
         # best-effort ceiling only and `timeout_s` is the effective bound.
-        max_budget_usd=2.0,
+        max_budget_usd=float(os.environ.get("AGENT_EVAL_RUNNER_JUDGE_MAX_BUDGET_USD", "2.0")),
         permissions={"allow": ["Read", "Grep", "Glob"]},
         staged_files=staged_images,
     )

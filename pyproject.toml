@@ -39,6 +39,9 @@ anova = [
     "pandas>=2.2,<3.0",
     "pingouin>=0.6.1",
 ]
+optimize = [
+    "cap-evolve-core @ git+https://github.com/skillberry-ai/cap-evolve.git@1d40d163c22a57c11a1764063cd48722e36168bc#subdirectory=core",
+]
 all = [
     "mlflow[genai]>=3.5",
     "anthropic[vertex]>=0.40",
@@ -56,6 +59,7 @@ test = ["pytest>=8.0"]
 
 [project.scripts]
 claude-trace = "agent_eval.cli.trace_run:main"
+agent-eval-capevolve = "agent_eval.engines.capevolve:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

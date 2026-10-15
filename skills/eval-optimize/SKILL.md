@@ -13,6 +13,63 @@ The key difference from `/eval-review`: you act autonomously. You read judge rat
 
 ## Step 0: Parse Arguments
 
+**`--engine capevolve` dispatch.** If `--engine capevolve` is among the
+arguments, this is the automated, statistically-gated cap-evolve path, not
+the interactive loop below — skip every other step in this file. Parse only
+`--config`, `--max-usd`, `--max-iterations`, `--dry-run`, `--pilot-case-ids`,
+`--runner-budget-usd`, `--judge-budget-usd`, `--optimizer`,
+`--optimizer-model`, `--skills-dir`, `--status`, and `--apply` from the
+arguments (ignore `--model`/`--run-id`/`--target-judge`, which don't apply
+here). See `docs/capevolve-poc.md` for what each mode does and the current
+scope limits (local runner only, three-case pilot). Do not proceed to Step 1
+below for a `--engine capevolve` invocation. The underlying command for every
+mode is `python3 -m agent_eval.engines.capevolve <flags>`.
+
+If `--skills-dir` wasn't given, check `tmp/optimize-config.yaml` for a
+`capevolve_skills_dir` value (written by `/eval-setup --optimize`) and use
+that instead of asking the user again.
+
+- **`--dry-run`**: run it. If the result is `{"needs_setup": true, "missing":
+  [...]}`, this project has no `optimize:`/`reward:` block yet — run a short
+  setup conversation: use `AskUserQuestion` (or ask directly) which files make
+  up the candidate skill (usually `SKILL.md` plus any `references/`) and how
+  outcomes should be scored (reuse existing judges from eval.yaml if present;
+  ask which judge or weighted combination should drive the reward otherwise).
+  Write the resulting `optimize:`/`reward:` block into `eval.yaml` with the
+  Edit tool (see the shape in `docs/capevolve-poc.md`'s "Configure eval.yaml"
+  section), then re-run `--dry-run`. Once it succeeds, narrate the result —
+  don't just print the JSON: state the train/val/test split sizes, the gate
+  mode and `k_se`, the qualitative point that smaller real gains come back
+  "indecisive" rather than "accept" at small val sizes, and the cost estimate
+  as a **range**, blended with `observed_cost_per_rollout` when the response
+  includes one (calibrated from this eval's own past runs).
+- **Launch** (no `--dry-run`/`--status`/`--apply`, `--max-usd` given): before
+  running the command, confirm the spend with the user via `AskUserQuestion`
+  — state the budget, the iteration/trial counts, and the cost estimate from
+  the prior `--dry-run` if you have it in context. Only run the launch command
+  after they confirm. It launches the campaign **detached** and returns
+  immediately — it does not block waiting for the result. Tell the user that,
+  give them the printed `run_dir`/`pid`/`log_file`, and how to stop it
+  (the response's `stop_hint`, e.g. `kill <pid>`). Point them at `--status`
+  (from any later session — it needs no `--config`, since the campaign runs
+  detached from this one) to check progress and `--apply` once it finishes.
+- **`--status`**: run it, then interpret the result in prose rather than
+  printing raw JSON: report `status` plainly (not launched / running /
+  finished / stopped — if stopped, say to check `log_file`), the
+  accepted/rejected/indecisive iteration counts, spend vs. budget, and an
+  honest caveat on the error bars (the `spent`/`budget` figures carry no
+  variance info by themselves — note that gains near the gate's resolution
+  are uncertain). If `final` is present, also summarize what the winning
+  candidate changed: `git diff` the seed capability
+  (`.capevolve/project/seed_capability/`) against
+  `<run_dir>/candidates/<best_id>/` and describe the change in a sentence or
+  two, grounded in the diff, not invented.
+- **`--apply`**: run it, report the branch name and changed files, then
+  surface the response's `caveat` and `suggested_next_step` verbatim as the
+  closing guidance — this is the doc's optimistic-bias warning (the sealed
+  test delta is honest; a full `/eval-run` will look better because some
+  cases were seen during the search) and its suggested confirmation run.
+
 | Argument | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `--config <path>` | no | auto-discover | Path to eval config |
