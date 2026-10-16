@@ -94,7 +94,9 @@ about ties:
 | Accuracy | Is it factually correct and internally consistent? |
 | Relevance | Does it stay focused on what was asked? |
 
-The judge call forces a `submit_comparison` tool with two fields, **in this order**:
+The judge returns the `submit_comparison` verdict — a structured output, or a forced
+tool call on models without one ([verdict transport](../reference/config/judges.md#verdict-transport))
+— with two fields, **in this order**:
 `reasoning` first, then `preferred` (`A` / `B` / `tie`). The ordering is deliberate —
 the judge works through both outputs before it commits to a verdict token, the same
 rationale-first contract every scored and pass/fail judge uses. Anything a custom

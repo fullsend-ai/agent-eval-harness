@@ -129,6 +129,27 @@ def judge_routing_keys(config, judge_model: Optional[str] = None) -> dict:
     return out
 
 
+def judge_verdict_policies(config, judge_model: Optional[str] = None) -> dict:
+    """``{routing key: {verdict policy, ...}}`` for the same ``openrouter:/``
+    judges as :func:`judge_routing_keys` (spec 015): each judge's effective
+    policy — its own ``verdict`` or ``models.judge_verdict`` — so the preflight
+    checks a key once per policy its judges actually run under, instead of
+    applying the run-level policy to a judge that overrides it."""
+    default = judge_model or getattr(config.models, "judge", None)
+    run_policy = getattr(config.models, "judge_verdict", "auto") or "auto"
+    out: dict = {}
+    for jc in getattr(config, "judges", None) or []:
+        model = getattr(jc, "model", None) or default
+        if not (isinstance(model, str) and model.startswith("openrouter:")):
+            continue
+        try:
+            key = parse_agent_model(model).key
+        except ValueError:
+            continue
+        out.setdefault(key, set()).add(getattr(jc, "verdict", "") or run_policy)
+    return out
+
+
 def build_plan(config, roles: Optional[dict] = None, *, runner: str = "claude-code",
                run_id: Optional[str] = None, require_key: bool = True) -> ProviderPlan:
     """The plan for ``config`` with ``roles`` (effective role URIs; defaults

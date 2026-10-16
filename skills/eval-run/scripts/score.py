@@ -15,6 +15,7 @@ import agent_eval._bootstrap  # noqa: F401 — auto-activate venv
 
 import argparse
 import ast
+import copy
 import importlib
 import json
 import logging
@@ -46,7 +47,7 @@ from agent_eval.prompt_backends import (
     split_model_uri,
 )
 from agent_eval.providers import JudgeProviderError
-from agent_eval.providers.openrouter.errors import is_tool_choice_400
+from agent_eval.providers.openrouter.errors import is_structured_output_400, is_tool_choice_400
 
 # Log (don't silently blank) any undefined variable a judge template references.
 _TEMPLATE_LOGGER = logging.getLogger("agent_eval.judge_template")
@@ -954,6 +955,7 @@ def _make_builtin_scorer(entry, jc, config):
         openai_kwargs = _openai_judge_kwargs(
             resolve_judge_client(judge_model, config.models.providers),
             model_arg, jc.provider_options)
+        verdict = _verdict_policy(jc, config)
 
         def scorer(outputs=None, **kwargs):
             out = outputs or {}
@@ -965,10 +967,11 @@ def _make_builtin_scorer(entry, jc, config):
             # rather than having the declaration silently dropped here.
             if backend == "anthropic":
                 return _call_structured_judge(rendered, model_arg, "bool",
-                                              images=images)
+                                              images=images, verdict=verdict)
             if backend == "openai":
                 return _call_structured_judge_openai(rendered, model_arg, "bool",
-                                                     images=images, **openai_kwargs)
+                                                     images=images, verdict=verdict,
+                                                     **openai_kwargs)
             return _call_structured_judge_via_runner(
                 rendered, model_arg, "bool", config, jc, images=images)
 
@@ -1070,6 +1073,18 @@ _BOOL_SYSTEM_PROMPT = (
     "evidence — then commit to the pass/fail judgment."
     + _UNTRUSTED_DATA_GUARD)
 
+# The `json_schema` verdict transport (spec 015): the provider constrains the
+# reply to the verdict schema, so the prompt asks for the object itself — same
+# fields, same rationale-first order as the tool contract above.
+_JSON_ONLY = ("Respond with exactly one JSON object and nothing else — no prose "
+              "before or after it, no code fence. ")
+
+_BOOL_SYSTEM_PROMPT_JSON = (
+    "You are a judge evaluating agent outputs. " + _JSON_ONLY +
+    "Its keys, in this order: \"rationale\" — write it first, a thorough "
+    "assessment of the evidence — then \"passed\", the pass/fail judgment as a "
+    "JSON boolean." + _UNTRUSTED_DATA_GUARD)
+
 # Scale assumed for a numeric judge that declares no `score_range`. Matches
 # JudgeConfig.score_range's documented default for LLM judges.
 _DEFAULT_SCORE_RANGE = (1, 5)
@@ -1114,16 +1129,38 @@ def _coerce_number(value, is_int):
     return int(round(float(value))) if is_int else float(value)
 
 
-def _score_system_prompt(bounds):
+def _scale_phrase(bounds):
     lo, hi, is_int = bounds
     kind = "an integer" if is_int else "a numeric"
     # "-1-1" for a [-1, 1] scale is unreadable; spell those out.
     span = (f"from {_fmt_bound(lo)} to {_fmt_bound(hi)}" if lo < 0
             else f"{_fmt_bound(lo)}-{_fmt_bound(hi)}")
+    return kind, span
+
+
+def _score_system_prompt(bounds):
+    kind, span = _scale_phrase(bounds)
     return ("You are a judge evaluating skill outputs. Call the submit_score "
             "tool once: write the rationale first — a thorough assessment of "
             f"the evidence — then commit to {kind} score {span}."
             + _UNTRUSTED_DATA_GUARD)
+
+
+def _score_system_prompt_json(bounds):
+    kind, span = _scale_phrase(bounds)
+    return ("You are a judge evaluating skill outputs. " + _JSON_ONLY +
+            "Its keys, in this order: \"rationale\" — write it first, a thorough "
+            f"assessment of the evidence — then \"score\", {kind} score {span}."
+            + _UNTRUSTED_DATA_GUARD)
+
+
+def _system_prompts(is_bool, bounds):
+    """System prompt per verdict transport (spec 015): `tool` asks for the
+    forced tool call, `json_schema` for the bare verdict object."""
+    if is_bool:
+        return {"tool": _BOOL_SYSTEM_PROMPT, "json_schema": _BOOL_SYSTEM_PROMPT_JSON}
+    return {"tool": _score_system_prompt(bounds),
+            "json_schema": _score_system_prompt_json(bounds)}
 
 
 def _score_judge_tool(bounds):
@@ -1227,6 +1264,66 @@ _BOOL_JUDGE_TOOL = {
 }
 
 
+def _strict_verdict_schema(input_schema):
+    """The verdict schema a provider constrains on (spec 015), derived from the
+    tool definition so the field names, their rationale-first order and their
+    descriptions stay single-sourced.
+
+    Every object closes `additionalProperties` and lists every property as
+    required (already true of the three verdict tools). Numeric
+    `minimum`/`maximum` move into the description: Anthropic's grammar
+    rejects numeric constraints with a 400, and OpenRouter may relay the
+    schema to an Anthropic endpoint. Nothing is lost — the bounds were
+    advisory on the non-strict tool schema and the range stays enforced
+    in-harness by `_enforce_bounds`.
+    """
+    def walk(node):
+        if isinstance(node, list):
+            for item in node:
+                walk(item)
+            return
+        if not isinstance(node, dict):
+            return
+        if node.get("type") == "object":
+            node["additionalProperties"] = False
+            props = node.get("properties")
+            if isinstance(props, dict):
+                node["required"] = list(props)
+        lo, hi = node.pop("minimum", None), node.pop("maximum", None)
+        if lo is not None or hi is not None:
+            kind = "an integer" if node.get("type") == "integer" else "a number"
+            if lo is not None and hi is not None:
+                span = f"from {_fmt_bound(lo)} to {_fmt_bound(hi)}"
+            elif lo is not None:
+                span = f"of at least {_fmt_bound(lo)}"
+            else:
+                span = f"of at most {_fmt_bound(hi)}"
+            desc = str(node.get("description") or "").rstrip()
+            node["description"] = f"{desc} Must be {kind} {span}.".strip()
+        for key, value in node.items():
+            if key not in ("enum", "const", "description", "required"):
+                walk(value)
+
+    schema = copy.deepcopy(input_schema)
+    walk(schema)
+    return schema
+
+
+def _verdict_from_data(data, is_bool, bounds):
+    """`(value, rationale)` from a verdict object — a tool call's input or a
+    structured-output reply — or None when the verdict key is missing or
+    mistyped (the caller decides whether that is a strict error)."""
+    if not isinstance(data, dict):
+        return None
+    rationale = str(data.get("rationale") or "").strip() or "(no rationale provided)"
+    if is_bool:
+        return (data["passed"], rationale) if isinstance(data.get("passed"), bool) else None
+    try:
+        return (_coerce_number(data["score"], bounds[2]), rationale)
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
 def _judge_user_message(prompt, images=None):
     """Build the user-message content for a judge call, inlining any images."""
     if not images:
@@ -1258,59 +1355,171 @@ def _call_judge_llm(prompt, model, system_prompt, images=None, max_tokens=4096):
     return response.content[0].text.strip()
 
 
+def _anthropic_tool_request(client, *, model, tool, system_prompt, user_content,
+                            max_tokens):
+    """The `tool` transport on the Anthropic SDK: a forced tool call, stepped
+    down to `tool_choice: auto` when the model rejects forcing (Claude Opus 5.5
+    and Sonnet 5.5 answer 400 `tool_choice: type "tool" and "any" are not
+    supported for this model`). Returns `(response, mode)` with `mode` in the
+    Decision 25 vocabulary: `function` (forced) or `auto` (the caller
+    strict-parses the reply)."""
+    kwargs = dict(model=model, max_tokens=max_tokens, system=system_prompt,
+                  tools=[tool], messages=[{"role": "user", "content": user_content}])
+    try:
+        response = client.messages.create(
+            tool_choice={"type": "tool", "name": tool["name"]}, **kwargs)
+        return response, "function"
+    except Exception as exc:
+        if not _is_tool_choice_rejection(exc):
+            raise
+    return client.messages.create(tool_choice={"type": "auto"}, **kwargs), "auto"
+
+
+_SDK_WARNINGS = set()
+
+
+def _anthropic_verdict_request(client, *, model, tool, system_prompts, user_content,
+                               max_tokens, policy="auto"):
+    """One Anthropic judge request over the spec 015 rungs: the structured
+    output (`output_config.format`, no tools) first, the forced tool call
+    second. Returns `(response, transport, tool_choice_mode)`; the mode is
+    None on `json_schema`. A refusal of the structured-output *parameter*
+    (a 400 naming it, or an SDK without `output_config`) steps down; anything
+    else propagates."""
+    rungs = _verdict_rungs("anthropic", model, policy)
+    nominal = _nominal_verdict_rung("anthropic", model, policy)
+    last = None
+    for index, transport in enumerate(rungs):
+        more = index + 1 < len(rungs)
+        try:
+            if transport == "json_schema":
+                response = client.messages.create(
+                    model=model, max_tokens=max_tokens,
+                    system=system_prompts["json_schema"],
+                    messages=[{"role": "user", "content": user_content}],
+                    output_config={"format": {
+                        "type": "json_schema",
+                        "schema": _strict_verdict_schema(tool["input_schema"])}})
+                mode = None
+            else:
+                response, mode = _anthropic_tool_request(
+                    client, model=model, tool=tool, system_prompt=system_prompts["tool"],
+                    user_content=user_content, max_tokens=max_tokens)
+        except TypeError as exc:
+            # An `anthropic` SDK older than 0.77.0 has no `output_config`.
+            if transport != "json_schema" or "output_config" not in str(exc) or not more:
+                raise
+            if "output_config" not in _SDK_WARNINGS:
+                _SDK_WARNINGS.add("output_config")
+                print("  WARNING: the installed anthropic SDK has no output_config "
+                      "(structured outputs need anthropic>=0.77); judges fall back to "
+                      "the forced tool call", file=sys.stderr, flush=True)
+            last = exc
+            continue
+        except Exception as exc:
+            if transport == "json_schema" and _is_structured_output_rejection(exc):
+                last = exc
+                if more:
+                    continue
+                raise JudgeProviderError(
+                    f"{model} rejected structured outputs and the verdict policy pins "
+                    f"json_schema: {exc}", error_type="verdict_unsupported",
+                    error_class="config", retryable=False,
+                    verdict_transport="json_schema") from exc
+            raise
+        _record_verdict_transport("anthropic", model, transport,
+                                  fell_back=(transport != nominal), learn=(policy == "auto"))
+        if mode is not None:
+            _record_tool_choice_mode(mode)
+        return response, transport, mode
+    raise JudgeProviderError(
+        f"no verdict transport served {model}: {last}", error_type="verdict_unsupported",
+        error_class="config", retryable=False)
+
+
+def _anthropic_json_verdict(response, tool, model):
+    """The verdict object of a structured-output reply on the Anthropic SDK.
+    Refusals and truncations are errors in their own right — never a prose
+    guess — because a constrained reply that does not parse is one of those or
+    a provider that ignored the schema."""
+    stop = getattr(response, "stop_reason", None)
+    text = "".join(getattr(b, "text", "") for b in response.content
+                   if getattr(b, "type", None) == "text").strip()
+    if stop == "refusal":
+        raise JudgeProviderError(
+            f"{model} refused the judge request (stop_reason=refusal): {text[:200]}",
+            error_type="refusal", retryable=False, verdict_transport="json_schema")
+    data = _loads_json_object(text) if text else None
+    if data is None:
+        if stop == "max_tokens":
+            raise JudgeProviderError(
+                f"{model} structured-output reply was cut off by max_tokens before the "
+                f"{tool['name']} verdict (raise the judge's max_tokens)",
+                error_type="truncated", retryable=False, verdict_transport="json_schema")
+        raise JudgeProviderError(
+            f"{model} returned no JSON object under structured output "
+            f"(stop_reason={stop}): {text[:200] or '(empty)'}",
+            error_type="bad_verdict", retryable=False, verdict_transport="json_schema")
+    return data
+
+
 def _call_structured_judge(prompt, model, feedback_type, images=None,
-                           max_tokens=4096, bounds=None):
-    """Call an LLM judge with forced tool output. Returns (value, rationale).
+                           max_tokens=4096, bounds=None, verdict="auto"):
+    """Call an LLM judge on the Anthropic SDK. Returns (value, rationale).
 
     feedback_type "bool" → (passed: bool, rationale); anything else →
     (score, rationale) on the judge's own scale. `bounds` is the judge's
     ``(lo, hi, is_int)`` from `_numeric_bounds`; it sets the scale stated in the
-    system prompt and the tool schema, defaulting to `_DEFAULT_SCORE_RANGE`.
-    Forcing a tool guarantees the value and rationale come back in known fields
-    instead of free-form text the model may format however it likes (opus-4-8
-    routinely ignores "return JSON" instructions). Falls back to parsing any
-    text in the response if no tool_use is returned.
+    system prompt and the verdict schema, defaulting to `_DEFAULT_SCORE_RANGE`.
+
+    The verdict comes back in known fields over one of two transports (spec
+    015, `verdict` = the policy): the provider's structured output
+    (`output_config.format`, the model may think before it writes the object)
+    or a forced tool call — the original contract, kept for Claude models
+    older than 4.5 and as the fallback. Under the forced tool, text instead
+    of a tool call is still parsed (rare); under `tool_choice: auto` (a model
+    that rejects forcing) and under structured output the parse is strict.
     """
     is_bool = (feedback_type == "bool")
     if bounds is None:
         bounds = (_DEFAULT_SCORE_RANGE[0], _DEFAULT_SCORE_RANGE[1], True)
     tool = _BOOL_JUDGE_TOOL if is_bool else _score_judge_tool(bounds)
-    system_prompt = _BOOL_SYSTEM_PROMPT if is_bool else _score_system_prompt(bounds)
     parser = (_parse_bool_response if is_bool
               else lambda text: _parse_score_response(text, bounds))
     client = _get_anthropic_client()
-    response = client.messages.create(
-        model=model,
-        max_tokens=max_tokens,
-        system=system_prompt,
-        tools=[tool],
-        tool_choice={"type": "tool", "name": tool["name"]},
-        messages=[{"role": "user", "content": _judge_user_message(prompt, images)}],
-    )
+    response, transport, mode = _anthropic_verdict_request(
+        client, model=model, tool=tool, system_prompts=_system_prompts(is_bool, bounds),
+        user_content=_judge_user_message(prompt, images), max_tokens=max_tokens,
+        policy=verdict)
     usage = _usage_from_anthropic_response(response, model)
     _record_judge_usage(usage)
-    verdict = None
+    if transport == "json_schema":
+        result = _verdict_from_data(_anthropic_json_verdict(response, tool, model),
+                                    is_bool, bounds)
+        if result is None:
+            raise JudgeProviderError(
+                f"{model} structured-output reply does not match the {tool['name']} "
+                "verdict schema", error_type="bad_verdict", retryable=False,
+                verdict_transport="json_schema")
+        return JudgeOutcome(result[0], result[1], usage=usage)
+    result = None
     for block in response.content:
         if getattr(block, "type", None) == "tool_use" and block.name == tool["name"]:
-            data = dict(block.input)
-            rationale = str(data.get("rationale") or "").strip()
-            if is_bool:
-                if isinstance(data.get("passed"), bool):
-                    verdict = (data["passed"], rationale or "(no rationale provided)")
-                    break
-            else:
-                try:
-                    verdict = (_coerce_number(data["score"], bounds[2]),
-                               rationale or "(no rationale provided)")
-                    break
-                except (KeyError, TypeError, ValueError):
-                    pass
-    if verdict is None:
-        # Fallback: model emitted text instead of a tool call (rare with tool_choice).
+            result = _verdict_from_data(dict(block.input), is_bool, bounds)
+            if result is not None:
+                break
+    if result is None:
+        if mode != "function":
+            raise JudgeProviderError(
+                f"judge returned no valid {tool['name']} tool call under tool_choice="
+                f"{mode!r} (stop_reason={getattr(response, 'stop_reason', None)})",
+                error_type="no_tool_call", retryable=False, tool_choice_mode=mode,
+                verdict_transport="tool")
+        # Fallback: model emitted text instead of a tool call (rare under a forced tool).
         text = "".join(getattr(b, "text", "") for b in response.content
                        if getattr(b, "type", None) == "text").strip()
-        verdict = parser(text)
-    return JudgeOutcome(verdict[0], verdict[1], usage=usage)
+        result = parser(text)
+    return JudgeOutcome(result[0], result[1], usage=usage)
 
 
 def _get_openai_client():
@@ -1412,7 +1621,15 @@ def _judge_semaphore(cfg):
 
 def _reset_judge_call_meta():
     _JUDGE_CALL_META.tool_choice_mode = None
+    _JUDGE_CALL_META.verdict_transport = None
     _JUDGE_CALL_META.usage = None
+
+
+def _pop_verdict_transport():
+    """`verdict_transport` of the last judge call on this thread (spec 015)."""
+    transport = getattr(_JUDGE_CALL_META, "verdict_transport", None)
+    _JUDGE_CALL_META.verdict_transport = None
+    return transport
 
 
 def _pop_judge_call_meta():
@@ -1437,6 +1654,88 @@ def _tool_choice_fallback_count():
 def _reset_tool_choice_fallbacks():
     with _JUDGE_STATE_LOCK:
         _TOOL_CHOICE_FALLBACKS["count"] = 0
+
+
+# --- Verdict transport (spec 015) ---------------------------------------------
+#
+# An SDK-backed judge carries its verdict over `json_schema` (the provider's
+# structured output: Anthropic `output_config.format`, OpenAI-shaped
+# `response_format`) or `tool` (the forced tool call, with the Decision 25
+# ladder). The policy (`models.judge_verdict`, per-judge `verdict`) picks the
+# rungs; the first transport that returns a verdict for a (backend, model)
+# becomes the start rung for the rest of the run, so a fallback is paid once.
+
+_VERDICT_TRANSPORTS = ("json_schema", "tool")
+_VERDICT_START = {}
+_VERDICT_COUNTS = {"json_schema": 0, "tool": 0, "fallbacks": 0}
+
+
+def _anthropic_supports_json_output(model):
+    """Whether a Claude id belongs to a family with structured outputs (the
+    documented list: Opus/Sonnet/Haiku 4.5 and later, every 5.x, Fable,
+    Mythos). An unrecognised or bare id is assumed capable — the request steps
+    down on the provider's 400 — so only a recognisably older id
+    (`claude-3-*`, `claude-opus-4-1`) starts on the tool rung."""
+    key = (model or "").strip().lower()
+    if "fable" in key or "mythos" in key:
+        return True
+    m = (re.search(r"claude-(?:opus|sonnet|haiku)-(\d+)(?:[-.](\d{1,2})(?!\d))?", key)
+         or re.search(r"claude-(\d+)(?:[-.](\d{1,2})(?!\d))?", key))
+    if not m:
+        return True
+    major, minor = int(m.group(1)), int(m.group(2) or 0)
+    if major >= 5:
+        return True
+    return major == 4 and minor >= 5
+
+
+def _nominal_verdict_rung(backend, model, policy):
+    """The transport the policy would use absent any fallback — what a
+    `verdict_fallbacks` count is measured against."""
+    if policy in _VERDICT_TRANSPORTS:
+        return policy
+    if backend == "anthropic" and not _anthropic_supports_json_output(model):
+        return "tool"
+    return "json_schema"
+
+
+def _verdict_rungs(backend, model, policy):
+    """The ordered transports for one judge call: an explicit policy is a
+    single rung (no cross-transport fallback); `auto` is `json_schema → tool`,
+    shortened to the rung already known to work for (backend, model)."""
+    nominal = _nominal_verdict_rung(backend, model, policy)
+    if policy in _VERDICT_TRANSPORTS or nominal == "tool":
+        return (nominal,)
+    with _JUDGE_STATE_LOCK:
+        start = _VERDICT_START.get((backend, model))
+    return ("tool",) if start == "tool" else ("json_schema", "tool")
+
+
+def _record_verdict_transport(backend, model, transport, *, fell_back, learn=True):
+    """Note the transport a verdict came over: on the thread-local call meta
+    (the per-case record), the run counters (`judge_usage`) and — under
+    `auto` only (`learn`) — the sticky start rung for (backend, model)."""
+    _JUDGE_CALL_META.verdict_transport = transport
+    with _JUDGE_STATE_LOCK:
+        _VERDICT_COUNTS[transport] = _VERDICT_COUNTS.get(transport, 0) + 1
+        if fell_back:
+            _VERDICT_COUNTS["fallbacks"] += 1
+        if learn:
+            _VERDICT_START.setdefault((backend, model), transport)
+
+
+def _verdict_transport_counts():
+    """`(transports, fallbacks)` for `summary.yaml` `judge_usage`."""
+    with _JUDGE_STATE_LOCK:
+        transports = {k: v for k, v in _VERDICT_COUNTS.items() if k != "fallbacks" and v}
+        return transports, _VERDICT_COUNTS["fallbacks"]
+
+
+def _reset_verdict_state():
+    with _JUDGE_STATE_LOCK:
+        _VERDICT_START.clear()
+        for key in _VERDICT_COUNTS:
+            _VERDICT_COUNTS[key] = 0
 
 
 # --- Judge usage side channel (spec 014) --------------------------------------
@@ -1622,16 +1921,19 @@ def _add_usage(bucket, usage):
             bucket[key] = (bucket[key] or 0) + val
 
 
-def aggregate_judge_usage(per_case, tool_choice_fallbacks=0):
+def aggregate_judge_usage(per_case, tool_choice_fallbacks=0, verdict_transports=None,
+                          verdict_fallbacks=0):
     """`summary.yaml` `judge_usage` from the per-case judge records.
 
     `{judge_cost_usd, requests, requests_missing_cost, prompt_tokens,
     completion_tokens, reasoning_tokens, cost_sources, by_judge, by_model,
-    tool_choice_fallbacks}`. `judge_cost_usd` is `null` when no call was priced
-    — a partial sum is never presented as spend; `requests_missing_cost` says
-    how much is unpriced. Returns None when no judge produced usage and no
-    Decision 25 fallback happened, so deterministic-only runs keep their
-    summary shape.
+    tool_choice_fallbacks, verdict_transports, verdict_fallbacks}`.
+    `judge_cost_usd` is `null` when no call was priced — a partial sum is never
+    presented as spend; `requests_missing_cost` says how much is unpriced.
+    `verdict_transports` counts judge calls per spec 015 transport and
+    `verdict_fallbacks` those that did not run on the policy's first rung.
+    Returns None when no judge produced usage and no fallback happened, so
+    deterministic-only runs keep their summary shape.
     """
     totals = _usage_bucket()
     by_judge, by_model, sources = {}, {}, {}
@@ -1648,7 +1950,7 @@ def aggregate_judge_usage(per_case, tool_choice_fallbacks=0):
                                            _usage_bucket()), usage)
             source = usage.get("cost_source") or "none"
             sources[source] = sources.get(source, 0) + int(usage.get("requests") or 1)
-    if totals["requests"] == 0 and not tool_choice_fallbacks:
+    if totals["requests"] == 0 and not tool_choice_fallbacks and not verdict_transports:
         return None
     out = {"judge_cost_usd": totals["cost_usd"]}
     out.update({k: v for k, v in totals.items() if k != "cost_usd"})
@@ -1657,6 +1959,10 @@ def aggregate_judge_usage(per_case, tool_choice_fallbacks=0):
     out["by_model"] = by_model
     if tool_choice_fallbacks:
         out["tool_choice_fallbacks"] = int(tool_choice_fallbacks)
+    if verdict_transports:
+        out["verdict_transports"] = {k: int(v) for k, v in verdict_transports.items()}
+    if verdict_fallbacks:
+        out["verdict_fallbacks"] = int(verdict_fallbacks)
     return out
 
 
@@ -1775,6 +2081,9 @@ def _raise_if_committed_error(response, provider_name="provider"):
     if is_tool_choice_400(_int_or_none(code), f"{message} {raw_text}"):
         error_type, retryable = "tool_choice_rejected", False
         note = " — the upstream provider rejected the forced tool_choice"
+    elif is_structured_output_400(_int_or_none(code), f"{message} {raw_text}"):
+        error_type, retryable = "structured_output_rejected", False
+        note = " — the upstream provider rejected the structured-output request"
     raise JudgeProviderError(
         f"{upstream or provider_name} failed the judge request inside a 200 "
         f"response (finish_reason={finish}, code={code}): "
@@ -1832,6 +2141,31 @@ def _steps_down_ladder(exc):
     return _is_routing_404(exc) or _is_tool_choice_rejection(exc)
 
 
+def _is_structured_output_rejection(exc):
+    """The provider refused the structured-output parameter itself (spec 015):
+    an HTTP 400 naming `output_config` / `response_format` / `json_schema`, or
+    the committed-200 relay of one. The judge steps from `json_schema` to the
+    forced tool call; any other failure propagates."""
+    if isinstance(exc, JudgeProviderError):
+        return exc.error_type == "structured_output_rejected"
+    if getattr(exc, "status_code", None) != 400:
+        return False
+    return is_structured_output_400(400, _http_error_text(exc))
+
+
+def _json_schema_extra_body(extra_body, backend):
+    """`extra_body` of a `json_schema` request. On OpenRouter it also asks for
+    `provider.require_parameters: true` so routing skips endpoints that do not
+    honour `response_format` (an unpinned judge still sends no pins)."""
+    body = copy.deepcopy(extra_body) if extra_body else {}
+    if backend == "openrouter":
+        provider = body.get("provider")
+        if not isinstance(provider, dict):
+            provider = body["provider"] = {}
+        provider.setdefault("require_parameters", True)
+    return body or None
+
+
 def _tool_choice_for(mode, tool_name):
     if mode == "function":
         return {"type": "function", "function": {"name": tool_name}}
@@ -1848,53 +2182,93 @@ def _token_limit_kwargs(model, max_tokens, token_param):
 
 
 def _openai_judge_request(client, cfg, *, model, messages, tool, max_tokens,
-                          token_param="auto", extra_body=None):
-    """One forced-tool judge request. Returns `(response, tool_choice_mode)`.
+                          token_param="auto", extra_body=None, policy="auto",
+                          json_messages=None):
+    """One judge request on the OpenAI-shaped path. Returns
+    `(response, tool_choice_mode, transport)`; the mode is None on `json_schema`.
 
-    Walks the Decision 25 ladder `function → required → auto` when the
-    provider refuses the rung's forcing mode: a routing 404 ("No endpoints
-    found" — a pinned endpoint that cannot force a named function) or a 400
-    that names `tool_choice` (the endpoint serves the model but rejects the
-    forcing mode, as Anthropic does for Claude Opus 5.5 through OpenRouter).
-    The next rung sends a weaker forcing mode and the caller strict-parses the
-    result. (The preflight that picks the rung from the endpoint catalog lands
-    in a later PR; until then the rungs are tried in order.) A refusal that
-    survives the ladder is a *config* error — the pinned endpoints, or the
-    model, cannot serve tool calling the way the judge asks — not a judge
-    failure. Neither refusal is backed off: a 400 and a 404 do not heal.
-    Committed-200 upstream errors are raised inside the retry wrapper so the
-    retryable ones get another attempt.
+    Spec 015 rungs: `json_schema` first — `response_format` with the strict
+    verdict schema, no tools (`json_messages` carry its system prompt) — then
+    the `tool` transport. A 400 naming `response_format`/`json_schema`, or the
+    routing 404, steps from the first to the second; the explicit policies
+    (`json_schema`, `tool`) run one rung only.
+
+    The `tool` rung walks the Decision 25 ladder `function → required → auto`
+    when the provider refuses the rung's forcing mode: a routing 404 ("No
+    endpoints found" — a pinned endpoint that cannot force a named function) or
+    a 400 that names `tool_choice` (the endpoint serves the model but rejects
+    the forcing mode, as Anthropic does for Claude Opus 5.5 through
+    OpenRouter). The next rung sends a weaker forcing mode and the caller
+    strict-parses the result. A refusal that survives the ladder is a *config*
+    error — the pinned endpoints, or the model, cannot serve tool calling the
+    way the judge asks — not a judge failure. No refusal is backed off: a 400
+    and a 404 do not heal. Committed-200 upstream errors are raised inside the
+    retry wrapper so the retryable ones get another attempt.
     """
     tool_name = tool["function"]["name"]
-    kwargs = dict(model=model, messages=messages, tools=[tool])
-    kwargs.update(_token_limit_kwargs(model, max_tokens, token_param))
-    if extra_body:
-        kwargs["extra_body"] = extra_body
+    backend = cfg.name if cfg is not None else "openai"
     provider_name = cfg.name if cfg is not None else "provider"
     semaphore = _judge_semaphore(cfg)
+    token_kwargs = _token_limit_kwargs(model, max_tokens, token_param)
+    nominal = _nominal_verdict_rung(backend, model, policy)
+    rungs = _verdict_rungs(backend, model, policy)
+
+    def _send(**kwargs):
+        if semaphore is None:
+            response = client.chat.completions.create(**kwargs)
+        else:
+            with semaphore:
+                response = client.chat.completions.create(**kwargs)
+        _raise_if_committed_error(response, provider_name=provider_name)
+        return response
+
+    if "json_schema" in rungs:
+        json_kwargs = dict(
+            model=model, messages=json_messages or messages,
+            response_format={"type": "json_schema", "json_schema": {
+                "name": tool_name, "strict": True,
+                "schema": _strict_verdict_schema(tool["function"]["parameters"])}},
+            **token_kwargs)
+        body = _json_schema_extra_body(extra_body, backend)
+        if body:
+            json_kwargs["extra_body"] = body
+        try:
+            response = _with_judge_retries(lambda: _send(**json_kwargs), cfg)
+        except Exception as exc:
+            if not (_is_structured_output_rejection(exc) or _is_routing_404(exc)):
+                raise
+            if "tool" not in rungs:
+                raise JudgeProviderError(
+                    f"{provider_name} rejected structured outputs for '{model}' and the "
+                    f"verdict policy pins json_schema: {exc}",
+                    error_type="verdict_unsupported", error_class="config",
+                    retryable=False, verdict_transport="json_schema") from exc
+        else:
+            _record_verdict_transport(backend, model, "json_schema",
+                                      fell_back=("json_schema" != nominal),
+                                      learn=(policy == "auto"))
+            _record_judge_usage(_usage_from_openai_response(response, model))
+            return response, None, "json_schema"
+
+    kwargs = dict(model=model, messages=messages, tools=[tool], **token_kwargs)
+    if extra_body:
+        kwargs["extra_body"] = extra_body
     last_error = None
     for mode in _TOOL_CHOICE_LADDER:
         choice = _tool_choice_for(mode, tool_name)
-
-        def _once(choice=choice):
-            if semaphore is None:
-                response = client.chat.completions.create(tool_choice=choice, **kwargs)
-            else:
-                with semaphore:
-                    response = client.chat.completions.create(tool_choice=choice, **kwargs)
-            _raise_if_committed_error(response, provider_name=provider_name)
-            return response
-
         try:
-            response = _with_judge_retries(_once, cfg)
+            response = _with_judge_retries(
+                lambda choice=choice: _send(tool_choice=choice, **kwargs), cfg)
         except Exception as exc:
             if not _steps_down_ladder(exc):
                 raise
             last_error = exc
             continue
         _record_tool_choice_mode(mode)
+        _record_verdict_transport(backend, model, "tool", fell_back=("tool" != nominal),
+                                  learn=(policy == "auto"))
         _record_judge_usage(_usage_from_openai_response(response, model))
-        return response, mode
+        return response, mode, "tool"
     pins = (extra_body or {}).get("provider") or {}
     pinned = list(pins.get("order") or pins.get("only") or [])
     where = f"the pinned providers {pinned}" if pinned else "any endpoint"
@@ -1960,6 +2334,16 @@ def _judge_tool_calls(message, tool_name, *, mode):
             error_type="bad_tool_call", tool_choice_mode=mode) from exc
 
 
+def _verdict_policy(jc, config):
+    """The spec 015 verdict policy of one judge: its own `verdict`, else
+    `models.judge_verdict`, else `auto`."""
+    own = getattr(jc, "verdict", "") or ""
+    if own:
+        return own
+    models = getattr(config, "models", None)
+    return getattr(models, "judge_verdict", "auto") or "auto"
+
+
 def _openai_judge_kwargs(cfg, model_arg, provider_options=None):
     """Keyword arguments binding an `openai`-transport judge call to its
     provider client config (spec 014); empty for the plain OpenAI path."""
@@ -2021,17 +2405,49 @@ def _openai_user_message(prompt, images=None):
     return parts
 
 
+def _openai_json_verdict(response, model):
+    """The verdict object of a structured-output reply on the OpenAI-shaped
+    path; refusals and truncations are errors in their own right."""
+    choice = response.choices[0]
+    message = choice.message
+    refusal = getattr(message, "refusal", None)
+    if refusal:
+        raise JudgeProviderError(
+            f"{model} refused the judge request: {str(refusal)[:200]}",
+            error_type="refusal", retryable=False, verdict_transport="json_schema")
+    text = (message.content or "").strip() if isinstance(message.content, str) else ""
+    data = _loads_json_object(text) if text else None
+    if data is None:
+        finish = getattr(choice, "finish_reason", None)
+        if finish == "length":
+            raise JudgeProviderError(
+                f"{model} structured-output reply was cut off (finish_reason=length) "
+                "before the verdict (raise the judge's max_tokens)",
+                error_type="truncated", retryable=False, verdict_transport="json_schema")
+        if finish == "content_filter":
+            raise JudgeProviderError(
+                f"{model} structured-output reply was stopped by the provider's "
+                "content filter", error_type="refusal", retryable=False,
+                verdict_transport="json_schema")
+        raise JudgeProviderError(
+            f"{model} returned no JSON object under structured output "
+            f"(finish_reason={finish}): {text[:200] or '(empty)'}",
+            error_type="bad_verdict", retryable=False, verdict_transport="json_schema")
+    return data
+
+
 def _call_structured_judge_openai(prompt, model, feedback_type, images=None,
                                   max_tokens=4096, bounds=None, *, client=None,
                                   extra_body=None, token_param="auto",
-                                  client_cfg=None):
-    """Call an OpenAI (or OpenAI-compatible) judge with forced tool output.
+                                  client_cfg=None, verdict="auto"):
+    """Call an OpenAI (or OpenAI-compatible) judge. Returns (value, rationale).
 
     Mirrors `_call_structured_judge` so a GPT/o-series judge — or any model
     behind an OpenAI-compatible gateway (`OPENAI_BASE_URL`), or an
     `openrouter:/…` model through its dedicated client — grades with the same
-    tool schema, rationale-first ordering, scale, and text-parse fallback,
-    regardless of which runner executed the skill under test.
+    verdict schema, rationale-first ordering, scale and transports (spec 015:
+    `response_format` first, the forced tool call second), regardless of which
+    runner executed the skill under test.
 
     The keyword-only arguments bind the call to a provider judge client
     (spec 014): `client_cfg` is the resolved `JudgeClientConfig` (memoised
@@ -2044,20 +2460,29 @@ def _call_structured_judge_openai(prompt, model, feedback_type, images=None,
         bounds = (_DEFAULT_SCORE_RANGE[0], _DEFAULT_SCORE_RANGE[1], True)
     judge_tool = _BOOL_JUDGE_TOOL if is_bool else _score_judge_tool(bounds)
     tool = _to_openai_tool(judge_tool)
-    system_prompt = _BOOL_SYSTEM_PROMPT if is_bool else _score_system_prompt(bounds)
+    prompts = _system_prompts(is_bool, bounds)
     parser = (_parse_bool_response if is_bool
               else lambda text: _parse_score_response(text, bounds))
     if client is None:
         client = _client_for(client_cfg)
-    response, mode = _openai_judge_request(
+    user = _openai_user_message(prompt, images)
+    response, mode, transport = _openai_judge_request(
         client, client_cfg, model=model, tool=tool, max_tokens=max_tokens,
-        token_param=token_param, extra_body=extra_body,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": _openai_user_message(prompt, images)},
-        ])
+        token_param=token_param, extra_body=extra_body, policy=verdict,
+        messages=[{"role": "system", "content": prompts["tool"]},
+                  {"role": "user", "content": user}],
+        json_messages=[{"role": "system", "content": prompts["json_schema"]},
+                       {"role": "user", "content": user}])
     message = response.choices[0].message
     usage = _usage_from_openai_response(response, model)
+    if transport == "json_schema":
+        result = _verdict_from_data(_openai_json_verdict(response, model), is_bool, bounds)
+        if result is None:
+            raise JudgeProviderError(
+                f"{model} structured-output reply does not match the "
+                f"{judge_tool['name']} verdict schema", error_type="bad_verdict",
+                retryable=False, verdict_transport="json_schema")
+        return JudgeOutcome(result[0], result[1], usage=usage)
     for data in _judge_tool_calls(message, judge_tool["name"], mode=mode):
         rationale = str(data.get("rationale") or "").strip()
         if is_bool:
@@ -2682,6 +3107,7 @@ def score_cases(judges, case_dirs, config, run_id=None, samples_override=None):
     aggregated = {name: {"values": [], "errored_cases": 0}
                   for name, *_ in judges}
     _reset_tool_choice_fallbacks()
+    _reset_verdict_state()
     parallelism = min(len(case_dirs), os.cpu_count() or 4)
     lock = threading.Lock()
     completed = 0
@@ -2735,6 +3161,7 @@ def score_cases(judges, case_dirs, config, run_id=None, samples_override=None):
                 n = 1
             bounds = judge_bounds.get(name)
             modes = []
+            transports = []
             usages = []
 
             def _run_scorer():
@@ -2759,6 +3186,9 @@ def score_cases(judges, case_dirs, config, run_id=None, samples_override=None):
                     mode = _pop_judge_call_meta()
                     if mode and mode != "function":
                         modes.append(mode)
+                    transport = _pop_verdict_transport()
+                    if transport:
+                        transports.append(transport)
 
             try:
                 if n > 1:
@@ -2783,6 +3213,8 @@ def score_cases(judges, case_dirs, config, run_id=None, samples_override=None):
                                       "judge_type": judge_type}
             if modes and isinstance(case_results.get(name), dict):
                 case_results[name]["tool_choice_mode"] = modes[-1]
+            if transports and isinstance(case_results.get(name), dict):
+                case_results[name]["verdict_transport"] = transports[-1]
             if usages and isinstance(case_results.get(name), dict):
                 case_results[name]["usage"] = (usages[0] if len(usages) == 1
                                                else _sum_usage(usages))
@@ -2864,7 +3296,8 @@ def score_cases(judges, case_dirs, config, run_id=None, samples_override=None):
     result = {"per_case": per_case, "aggregated": aggregated}
     # Judge-side usage (spec 014 Decision 15): tokens/cost per judge call,
     # aggregated here and written to summary.yaml — never into run_result.
-    judge_usage = aggregate_judge_usage(per_case, _tool_choice_fallback_count())
+    judge_usage = aggregate_judge_usage(per_case, _tool_choice_fallback_count(),
+                                           *_verdict_transport_counts())
     if judge_usage:
         result["judge_usage"] = judge_usage
     return result
@@ -3558,6 +3991,7 @@ def _load_llm_judge(jc, config, project_root=None):
     openai_kwargs = _openai_judge_kwargs(
         resolve_judge_client(judge_model, config.models.providers),
         model_arg, jc.provider_options)
+    verdict = _verdict_policy(jc, config)
 
     def scorer(outputs=None, **kwargs):
         out = outputs or {}
@@ -3565,11 +3999,11 @@ def _load_llm_judge(jc, config, project_root=None):
         images = _extract_images(out)
         if backend == "anthropic":
             return _call_structured_judge(rendered, model_arg, feedback_type,
-                                          images=images, bounds=bounds)
+                                          images=images, bounds=bounds, verdict=verdict)
         if backend == "openai":
             return _call_structured_judge_openai(
                 rendered, model_arg, feedback_type, images=images, bounds=bounds,
-                **openai_kwargs)
+                verdict=verdict, **openai_kwargs)
         return _call_structured_judge_via_runner(
             rendered, model_arg, feedback_type, config, jc, bounds=bounds,
             images=images)
@@ -3620,11 +4054,12 @@ class PairwiseResult:
 
 def compare_runs(run_a_dir, run_b_dir, config, case_ids,
                  prompt=None, prompt_file=None, model=None,
-                 provider_options=None):
+                 provider_options=None, verdict=None):
     """Compare two runs using position-swapped LLM judge.
 
     `provider_options` is the pairwise judge's `JudgeConfig.provider_options`
-    (routing/fallbacks/max_tokens for an `openrouter:/` model).
+    (routing/fallbacks/max_tokens for an `openrouter:/` model); `verdict` the
+    spec 015 transport policy (defaults to `models.judge_verdict`).
     """
     comparison_prompt = prompt
     if not comparison_prompt and prompt_file:
@@ -3659,6 +4094,8 @@ def compare_runs(run_a_dir, run_b_dir, config, case_ids,
     except Exception as e:
         return {"error": str(e)}
     judge_kwargs = _openai_judge_kwargs(judge_client_cfg, model_arg, provider_options)
+    judge_kwargs["verdict"] = (verdict or getattr(getattr(config, "models", None),
+                                                  "judge_verdict", "auto") or "auto")
 
     def _compare_case(case_id):
         record_a = load_case_record(run_a_dir / "cases" / case_id, config)
@@ -3920,29 +4357,44 @@ _PAIRWISE_SYSTEM = (
     "to the verdict. Put ALL of your reasoning inside the tool input — do not "
     "write any text outside the tool call." + _UNTRUSTED_DATA_GUARD)
 
+_PAIRWISE_SYSTEM_JSON = (
+    "You are a blind judge comparing two outputs, A and B. " + _JSON_ONLY +
+    "Its keys, in this order: \"reasoning\" — write it first, thorough and "
+    "self-contained — then \"preferred\": \"A\", \"B\" or \"tie\". Put ALL of "
+    "your reasoning inside the JSON object." + _UNTRUSTED_DATA_GUARD)
+
+_PAIRWISE_PROMPTS = {"tool": _PAIRWISE_SYSTEM, "json_schema": _PAIRWISE_SYSTEM_JSON}
+
 
 def _call_judge(backend, client, system_prompt, user_message, model,
-                max_tokens=16384, **openai_kwargs):
+                max_tokens=16384, verdict="auto", **openai_kwargs):
     """Run one pairwise comparison, dispatching on the resolved judge backend so
     an OpenAI (or OpenAI-compatible / OpenRouter) model can judge alongside
-    Anthropic. `openai_kwargs` (client_cfg/extra_body/token_param) bind an
-    `openrouter:/` judge to its client config; empty otherwise."""
+    Anthropic. `verdict` is the spec 015 policy; `openai_kwargs`
+    (client_cfg/extra_body/token_param) bind an `openrouter:/` judge to its
+    client config; empty otherwise."""
     if backend == "openai":
         return _call_pairwise_openai(client, system_prompt, user_message, model,
-                                     max_tokens=max_tokens, **openai_kwargs)
+                                     max_tokens=max_tokens, verdict=verdict,
+                                     **openai_kwargs)
     try:
-        response = client.messages.create(
-            model=model, max_tokens=max_tokens,
-            system=_PAIRWISE_SYSTEM,
-            tools=[_PAIRWISE_TOOL],
-            tool_choice={"type": "tool", "name": "submit_comparison"},
-            messages=[
-                {"role": "user", "content": f"{system_prompt}\n\n{user_message}"},
-            ],
-        )
+        response, transport, _mode = _anthropic_verdict_request(
+            client, model=model, tool=_PAIRWISE_TOOL, system_prompts=_PAIRWISE_PROMPTS,
+            user_content=f"{system_prompt}\n\n{user_message}", max_tokens=max_tokens,
+            policy=verdict)
         usage = _usage_from_anthropic_response(response, model)
-        # Preferred path: read the forced tool_use block directly — no text
-        # parsing, no improvised keys.
+        if transport == "json_schema":
+            try:
+                data = _anthropic_json_verdict(response, _PAIRWISE_TOOL, model)
+            except JudgeProviderError as exc:
+                # Retry once with a larger budget if the reply was truncated.
+                if exc.error_type == "truncated" and max_tokens < 32768:
+                    return _call_judge(backend, client, system_prompt, user_message,
+                                       model, max_tokens=max_tokens * 2, verdict=verdict)
+                raise
+            return {**data, "_usage": usage}, None
+        # Preferred path: read the tool_use block directly — no text parsing,
+        # no improvised keys.
         for block in response.content:
             if getattr(block, "type", None) == "tool_use" and block.name == "submit_comparison":
                 return {**dict(block.input), "_usage": usage}, None
@@ -3955,7 +4407,7 @@ def _call_judge(backend, client, system_prompt, user_message, model,
         # Retry once with a larger budget if the response was truncated.
         if response.stop_reason == "max_tokens" and max_tokens < 32768:
             return _call_judge(backend, client, system_prompt, user_message, model,
-                               max_tokens=max_tokens * 2)
+                               max_tokens=max_tokens * 2, verdict=verdict)
         return None, (f"No submit_comparison tool_use in response "
                       f"(stop_reason={response.stop_reason})")
     except Exception as e:
@@ -3964,23 +4416,34 @@ def _call_judge(backend, client, system_prompt, user_message, model,
 
 def _call_pairwise_openai(client, system_prompt, user_message, model,
                           max_tokens=16384, *, extra_body=None,
-                          token_param="auto", client_cfg=None):
+                          token_param="auto", client_cfg=None, verdict="auto"):
     """OpenAI (or OpenAI-compatible / OpenRouter) pairwise comparison, mirroring
     _call_judge. The keyword-only arguments bind the call to a provider judge
     client exactly as in `_call_structured_judge_openai`."""
     tool = _to_openai_tool(_PAIRWISE_TOOL)
     binding = dict(extra_body=extra_body, token_param=token_param,
-                   client_cfg=client_cfg)
+                   client_cfg=client_cfg, verdict=verdict)
+    user = f"{system_prompt}\n\n{user_message}"
     try:
-        response, mode = _openai_judge_request(
+        response, mode, transport = _openai_judge_request(
             client, client_cfg, model=model, tool=tool, max_tokens=max_tokens,
-            token_param=token_param, extra_body=extra_body,
-            messages=[
-                {"role": "system", "content": _PAIRWISE_SYSTEM},
-                {"role": "user", "content": f"{system_prompt}\n\n{user_message}"},
-            ])
+            token_param=token_param, extra_body=extra_body, policy=verdict,
+            messages=[{"role": "system", "content": _PAIRWISE_SYSTEM},
+                      {"role": "user", "content": user}],
+            json_messages=[{"role": "system", "content": _PAIRWISE_SYSTEM_JSON},
+                           {"role": "user", "content": user}])
         message = response.choices[0].message
         usage = _usage_from_openai_response(response, model)
+        if transport == "json_schema":
+            try:
+                data = _openai_json_verdict(response, model)
+            except JudgeProviderError as exc:
+                if exc.error_type == "truncated" and max_tokens < 32768:
+                    return _call_pairwise_openai(client, system_prompt, user_message,
+                                                 model, max_tokens=max_tokens * 2,
+                                                 **binding)
+                raise
+            return {**data, "_usage": usage}, None
         for data in _judge_tool_calls(message, "submit_comparison", mode=mode):
             return {**data, "_usage": usage}, None
         text = message.content or ""
@@ -4439,6 +4902,7 @@ def cmd_pairwise(args):
             model=model,
             provider_options=(pairwise_jc.provider_options
                               if pairwise_jc else None),
+            verdict=(pairwise_jc.verdict or None) if pairwise_jc else None,
         )
         if "error" in r:
             print(f"ERROR: {r['error']}", file=sys.stderr)

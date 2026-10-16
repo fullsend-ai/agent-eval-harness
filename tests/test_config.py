@@ -1518,3 +1518,51 @@ def test_background_model_accepts_variants_and_a_uri_form(tmp_path):
                       f"    openrouter: {{background_model: '{written}'}}\n"))
         assert cfg.models.providers.openrouter.background_model == stored
 
+
+
+def test_judge_verdict_policy_defaults_validates_and_overrides(tmp_path):
+    """Spec 015: `models.judge_verdict` and the per-judge `verdict`."""
+    cfg = EvalConfig.from_yaml(_write(tmp_path, """
+name: t
+execution:
+  skill: s
+models:
+  judge: claude-opus-5-5
+judges:
+  - name: a
+    prompt: rate it
+  - name: b
+    prompt: rate it
+    verdict: tool
+"""))
+    assert cfg.models.judge_verdict == "auto"
+    assert [j.verdict for j in cfg.judges] == ["", "tool"]
+
+    cfg = EvalConfig.from_yaml(_write(tmp_path, """
+name: t
+execution:
+  skill: s
+models:
+  judge: claude-opus-5-5
+  judge_verdict: json_schema
+"""))
+    assert cfg.models.judge_verdict == "json_schema"
+
+    with pytest.raises(ValueError, match="models.judge_verdict must be one of auto, json_schema, tool"):
+        EvalConfig.from_yaml(_write(tmp_path, """
+name: t
+execution:
+  skill: s
+models:
+  judge_verdict: forced
+"""))
+    with pytest.raises(ValueError, match="judge 'a' verdict must be one of"):
+        EvalConfig.from_yaml(_write(tmp_path, """
+name: t
+execution:
+  skill: s
+judges:
+  - name: a
+    prompt: rate it
+    verdict: structured
+"""))

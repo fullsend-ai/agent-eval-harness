@@ -172,3 +172,12 @@ def test_transport_errors_become_key_free_exceptions(monkeypatch):
     with pytest.raises(OpenRouterHTTPError) as exc:
         get_json("https://openrouter.ai/api/v1/providers")
     assert exc.value.status is None and "name resolution" in exc.value.message
+
+
+def test_structured_output_400_is_recognised_by_status_and_text():
+    from agent_eval.providers.openrouter.errors import is_structured_output_400
+    assert is_structured_output_400(400, "response_format is not supported by this endpoint")
+    assert is_structured_output_400(400, "output_config: Extra inputs are not permitted")
+    assert is_structured_output_400(400, "Provider returned error json_schema unsupported")
+    assert not is_structured_output_400(400, "messages: at least one message is required")
+    assert not is_structured_output_400(404, "response_format")

@@ -251,6 +251,16 @@ class TestParsers:
         assert len(rationale) > 200
 
 
+@pytest.fixture(autouse=True)
+def _fresh_verdict_memory():
+    """Spec 015 keeps a per-run memory of the verdict transport that worked for
+    a (backend, model); one test must never inherit another's."""
+    import score as _score
+    _score._reset_verdict_state()
+    yield
+    _score._reset_verdict_state()
+
+
 class TestStructuredJudge:
 
     def _resp(self, *blocks):
@@ -268,7 +278,7 @@ class TestStructuredJudge:
             "submit_score", {"score": 4, "rationale": "solid across criteria"}))
         with patch("score._get_anthropic_client") as mock_client:
             mock_client.return_value.messages.create.return_value = resp
-            val, rat = score._call_structured_judge("p", "m", "score")
+            val, rat = score._call_structured_judge("p", "m", "score", verdict="tool")
         assert val == 4 and rat == "solid across criteria"
 
     def test_structured_bool_from_tool_use(self):
@@ -277,7 +287,7 @@ class TestStructuredJudge:
             "submit_evaluation", {"passed": False, "rationale": "missing field"}))
         with patch("score._get_anthropic_client") as mock_client:
             mock_client.return_value.messages.create.return_value = resp
-            val, rat = score._call_structured_judge("p", "m", "bool")
+            val, rat = score._call_structured_judge("p", "m", "bool", verdict="tool")
         assert val is False and rat == "missing field"
 
     def test_structured_falls_back_to_text(self):
@@ -1063,15 +1073,17 @@ class TestNumericBounds:
 class TestJudgeRequestPayload:
     """The bug in #182 was in the REQUEST, which nothing asserted on."""
 
-    def _capture(self, bounds):
+    def _capture(self, bounds, verdict="tool"):
         import score
-        resp = type("R", (), {"content": [type("B", (), {
-            "type": "tool_use", "name": "submit_score",
-            "input": {"score": 1, "rationale": "r"}})()]})()
+        blocks = [type("B", (), {"type": "tool_use", "name": "submit_score",
+                                 "input": {"score": 1, "rationale": "r"}})(),
+                  type("B", (), {"type": "text",
+                                 "text": '{"rationale": "r", "score": 1}'})()]
+        resp = type("R", (), {"content": blocks, "stop_reason": "end_turn"})()
         with patch("score._get_anthropic_client") as mock_client:
             create = mock_client.return_value.messages.create
             create.return_value = resp
-            score._call_structured_judge("p", "m", "score", bounds=bounds)
+            score._call_structured_judge("p", "m", "score", bounds=bounds, verdict=verdict)
         return create.call_args.kwargs
 
     def test_declared_range_reaches_system_prompt_and_schema(self):
@@ -1091,6 +1103,22 @@ class TestJudgeRequestPayload:
         assert "1-5" in kwargs["system"]
         schema = kwargs["tools"][0]["input_schema"]["properties"]["score"]
         assert (schema["minimum"], schema["maximum"]) == (1, 5)
+
+    def test_structured_output_carries_the_scale_without_numeric_constraints(self):
+        """Spec 015: the `json_schema` transport sends `output_config.format`
+        and no tools; the range lives in the prompt and the description, since
+        Anthropic's grammar rejects `minimum`/`maximum`."""
+        kwargs = self._capture((0.0, 2.0, True), verdict="auto")
+        assert "tools" not in kwargs and "tool_choice" not in kwargs
+        assert "0-2" in kwargs["system"] and "JSON object" in kwargs["system"]
+        fmt = kwargs["output_config"]["format"]
+        assert fmt["type"] == "json_schema"
+        schema = fmt["schema"]
+        assert schema["additionalProperties"] is False
+        assert schema["required"] == ["rationale", "score"]
+        prop = schema["properties"]["score"]
+        assert "minimum" not in prop and "maximum" not in prop
+        assert "from 0 to 2" in prop["description"] and prop["type"] == "integer"
 
 
 class TestRationaleBeforeVerdict:
@@ -1322,15 +1350,17 @@ class TestLLMJudgeWiring:
     #182 fix outright — left the whole suite green.
     """
 
-    def _request(self, **judge_kwargs):
+    def _request(self, judge_verdict="tool", **judge_kwargs):
         import os
         import score
         config = EvalConfig(name="t", skill="t")
-        config.models = ModelsConfig(judge="claude-sonnet-4-6")
+        config.models = ModelsConfig(judge="claude-sonnet-4-6", judge_verdict=judge_verdict)
         jc = JudgeConfig(name="j", prompt="rate it", **judge_kwargs)
-        resp = type("R", (), {"content": [type("B", (), {
-            "type": "tool_use", "name": "submit_score",
-            "input": {"score": 1, "rationale": "r"}})()]})()
+        blocks = [type("B", (), {"type": "tool_use", "name": "submit_score",
+                                 "input": {"score": 1, "rationale": "r"}})(),
+                  type("B", (), {"type": "text",
+                                 "text": '{"rationale": "r", "score": 1}'})()]
+        resp = type("R", (), {"content": blocks, "stop_reason": "end_turn"})()
         with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "k"}), \
                 patch("score._get_anthropic_client") as mock_client:
             mock_client.return_value.messages.create.return_value = resp
@@ -1353,6 +1383,18 @@ class TestLLMJudgeWiring:
     def test_a_float_judge_asks_for_a_number(self):
         kwargs = self._request(feedback_type="float", score_range=[0, 1])
         assert kwargs["tools"][0]["input_schema"]["properties"]["score"]["type"] == "number"
+
+    def test_the_default_policy_sends_structured_output_with_the_scale(self):
+        """`models.judge_verdict` defaults to `auto`: a 4.6 judge gets
+        `output_config.format` carrying the declared scale (spec 015)."""
+        kwargs = self._request(judge_verdict="auto", feedback_type="int", score_range=[0, 2])
+        assert "tools" not in kwargs
+        prop = kwargs["output_config"]["format"]["schema"]["properties"]["score"]
+        assert "from 0 to 2" in prop["description"] and "0-2" in kwargs["system"]
+
+    def test_a_judge_level_verdict_overrides_the_run_policy(self):
+        kwargs = self._request(judge_verdict="auto", feedback_type="int", verdict="tool")
+        assert kwargs["tool_choice"] == {"type": "tool", "name": "submit_score"}
 
 
 class TestSignedScale:
@@ -1410,7 +1452,7 @@ class TestOpenAIStructuredJudge:
         client = self._client(tool_name="submit_evaluation",
                               arguments={"passed": True, "rationale": "solid"})
         with patch("score._get_openai_client", return_value=client):
-            result = _call_structured_judge_openai("grade", "gpt-4o", "bool")
+            result = _call_structured_judge_openai("grade", "gpt-4o", "bool", verdict="tool")
         assert result == (True, "solid")
         # Forced tool + system message carry over unchanged.
         assert self.captured["tool_choice"]["function"]["name"] == "submit_evaluation"
@@ -1421,7 +1463,7 @@ class TestOpenAIStructuredJudge:
                               arguments={"score": 3.7, "rationale": "ok"})
         with patch("score._get_openai_client", return_value=client):
             value, rationale = _call_structured_judge_openai(
-                "grade", "openai:/gpt-4o", "score", bounds=(0, 5, True))
+                "grade", "openai:/gpt-4o", "score", bounds=(0, 5, True), verdict="tool")
         assert value == 4 and rationale == "ok"
 
     def test_text_fallback_when_no_tool_call(self):
@@ -1437,7 +1479,8 @@ class TestOpenAIStructuredJudge:
                               arguments={"passed": True, "rationale": "r"})
         images = [{"label": "shot", "media_type": "image/png", "data": "QUJD"}]
         with patch("score._get_openai_client", return_value=client):
-            _call_structured_judge_openai("grade", "gpt-4o", "bool", images=images)
+            _call_structured_judge_openai("grade", "gpt-4o", "bool", images=images,
+                                          verdict="tool")
         user_content = self.captured["messages"][1]["content"]
         urls = [p["image_url"]["url"] for p in user_content
                 if p.get("type") == "image_url"]
@@ -1448,7 +1491,7 @@ class TestOpenAIStructuredJudge:
         client = self._client(tool_name="submit_evaluation",
                               arguments={"passed": True, "rationale": "r"})
         with patch("score._get_openai_client", return_value=client):
-            _call_structured_judge_openai("grade", "o3-mini", "bool")
+            _call_structured_judge_openai("grade", "o3-mini", "bool", verdict="tool")
         assert "max_completion_tokens" in self.captured
         assert "max_tokens" not in self.captured
 
@@ -1457,9 +1500,26 @@ class TestOpenAIStructuredJudge:
         client = self._client(tool_name="submit_evaluation",
                               arguments={"passed": True, "rationale": "r"})
         with patch("score._get_openai_client", return_value=client):
-            _call_structured_judge_openai("grade", "gpt-4o", "bool")
+            _call_structured_judge_openai("grade", "gpt-4o", "bool", verdict="tool")
         assert "max_tokens" in self.captured
         assert "max_completion_tokens" not in self.captured
+
+    def test_structured_output_is_the_default_first_rung(self):
+        """Spec 015: `response_format` json_schema (strict, no tools) on the
+        plain OpenAI client, and no `extra_body` — `require_parameters` is an
+        OpenRouter routing knob."""
+        from score import _call_structured_judge_openai
+        client = self._client(content='{"rationale": "solid", "passed": true}')
+        with patch("score._get_openai_client", return_value=client):
+            result = _call_structured_judge_openai("grade", "gpt-4o", "bool")
+        assert result == (True, "solid")
+        sent = self.captured
+        assert "tools" not in sent and "tool_choice" not in sent and "extra_body" not in sent
+        fmt = sent["response_format"]
+        assert fmt["type"] == "json_schema" and fmt["json_schema"]["strict"] is True
+        assert fmt["json_schema"]["name"] == "submit_evaluation"
+        assert fmt["json_schema"]["schema"]["additionalProperties"] is False
+        assert "JSON object" in sent["messages"][0]["content"]
 
     def test_base_url_only_gets_placeholder_key(self, monkeypatch):
         """An unauthenticated OpenAI-compatible gateway (base_url, no key) still
@@ -1503,9 +1563,13 @@ def _or_providers(routing=_OR_PINNED, **judge):
         judge=JudgeClientOptions(**judge)))
 
 
-def _or_config(model=f"openrouter:/{_OR_SLUG}", judge=None, **providers_kw):
+def _or_config(model=f"openrouter:/{_OR_SLUG}", judge=None, verdict="tool", **providers_kw):
+    """`verdict` defaults to the forced-tool transport: the tests below pin
+    the Decision 25 contract; `TestJsonSchemaVerdict` covers spec 015's
+    default (`auto`)."""
     config = EvalConfig(name="test", skill="test")
-    config.models = ModelsConfig(judge=model, providers=_or_providers(**providers_kw))
+    config.models = ModelsConfig(judge=model, judge_verdict=verdict,
+                                 providers=_or_providers(**providers_kw))
     config.judges = [judge or JudgeConfig(name="j", prompt="rate it", feedback_type="bool")]
     return config
 
@@ -2217,3 +2281,342 @@ class TestJudgeUsageSideChannel:
         assert "usage" not in result["per_case"]["case-001"]["without"]
         assert result["judge_usage"]["judge_cost_usd"] == 0.5
         assert result["judge_usage"]["requests"] == 1
+
+
+# --- verdict transport (spec 015) --------------------------------------------
+
+def _anthropic_client(*script):
+    """Fake Anthropic SDK client replaying `script` in order (an exception
+    instance is raised, anything else returned; the last entry repeats)."""
+    calls = []
+
+    def create(**kwargs):
+        calls.append(kwargs)
+        step = script[min(len(calls) - 1, len(script) - 1)]
+        if isinstance(step, BaseException):
+            raise step
+        return step
+
+    client = SimpleNamespace(messages=SimpleNamespace(create=create))
+    client.calls = calls
+    return client
+
+
+def _anthropic_text(text, stop_reason="end_turn"):
+    return SimpleNamespace(id="msg", model="claude-opus-5-5", stop_reason=stop_reason,
+                           content=[SimpleNamespace(type="text", text=text)])
+
+
+def _anthropic_tool_use(name, data):
+    return SimpleNamespace(id="msg", model="claude-opus-5-5", stop_reason="tool_use",
+                           content=[SimpleNamespace(type="tool_use", name=name, input=data)])
+
+
+def _forced_tool_refusal():
+    return _HttpError(400, 'tool_choice: type "tool" and "any" are not supported for this model.')
+
+
+def _output_config_refusal():
+    return _HttpError(400, "output_config: Extra inputs are not permitted")
+
+
+def _response_format_refusal():
+    return _HttpError(400, "Provider returned error", body={
+        "message": "Provider returned error", "code": 400,
+        "metadata": {"provider_name": "Novita",
+                     "raw": "response_format json_schema is not supported by this model"}})
+
+
+class TestVerdictTransportAnthropic:
+    """Spec 015 on the Anthropic SDK: structured output first, the forced tool
+    second, `tool_choice: auto` third — learnt once per model and run."""
+
+    def test_strict_schema_closes_objects_and_moves_the_range_into_the_description(self):
+        import score
+        source = score._score_judge_tool((1, 10, True))["input_schema"]
+        schema = score._strict_verdict_schema(source)
+        assert schema["additionalProperties"] is False
+        assert schema["required"] == ["rationale", "score"]
+        assert list(schema["properties"]) == ["rationale", "score"]
+        prop = schema["properties"]["score"]
+        assert "minimum" not in prop and "maximum" not in prop
+        assert prop["description"].endswith("Must be an integer from 1 to 10.")
+        assert source["properties"]["score"]["minimum"] == 1          # source untouched
+        assert score._strict_verdict_schema(schema) == schema          # idempotent
+        pair = score._strict_verdict_schema(score._PAIRWISE_TOOL["input_schema"])
+        assert pair["properties"]["preferred"]["enum"] == ["A", "B", "tie"]
+        number = score._strict_verdict_schema(score._score_judge_tool((0.0, 1.0, False))["input_schema"])
+        assert number["properties"]["score"]["description"].endswith("Must be a number from 0 to 1.")
+
+    @pytest.mark.parametrize("model,expected", [
+        ("claude-opus-5-5", True), ("claude-sonnet-5.5", True), ("claude-opus-5", True),
+        ("claude-opus-4-8", True), ("claude-opus-4-5-20251101", True),
+        ("claude-haiku-4-5-20251001", True), ("claude-fable-5-1", True),
+        ("claude-mythos-5-1", True), ("claude-opus-4-1", False),
+        ("claude-opus-4-20250514", False), ("claude-3-5-sonnet-20241022", False),
+        ("claude-3-opus-20240229", False), ("m", True), ("opus", True)])
+    def test_structured_output_support_by_model_family(self, model, expected):
+        import score
+        assert score._anthropic_supports_json_output(model) is expected
+
+    def test_json_schema_request_and_verdict(self):
+        import score
+        client = _anthropic_client(_anthropic_text('{"rationale": "fine", "score": 4}'))
+        with patch("score._get_anthropic_client", return_value=client):
+            out = score._call_structured_judge("p", "claude-opus-5-5", "score",
+                                               bounds=(1, 5, True))
+        assert out == (4, "fine") and out.usage["provider"] == "anthropic"
+        sent = client.calls[0]
+        assert sent["output_config"]["format"]["type"] == "json_schema"
+        assert "tools" not in sent and "tool_choice" not in sent
+        assert score._pop_verdict_transport() == "json_schema"
+        assert score._verdict_transport_counts() == ({"json_schema": 1}, 0)
+
+    def test_thinking_blocks_are_skipped(self):
+        import score
+        reply = SimpleNamespace(stop_reason="end_turn", content=[
+            SimpleNamespace(type="thinking", thinking="hmm"),
+            SimpleNamespace(type="text", text='{"rationale": "r", "passed": true}')])
+        with patch("score._get_anthropic_client", return_value=_anthropic_client(reply)):
+            assert score._call_structured_judge("p", "claude-opus-5-5", "bool") == (True, "r")
+
+    def test_falls_back_to_the_forced_tool_once_then_remembers(self):
+        import score
+        client = _anthropic_client(
+            _output_config_refusal(),
+            _anthropic_tool_use("submit_evaluation", {"rationale": "r", "passed": True}))
+        with patch("score._get_anthropic_client", return_value=client):
+            first = score._call_structured_judge("p", "claude-opus-4-6", "bool")
+            second = score._call_structured_judge("p", "claude-opus-4-6", "bool")
+        assert first == (True, "r") and second == (True, "r")
+        assert "output_config" in client.calls[0]
+        assert client.calls[1]["tool_choice"] == {"type": "tool", "name": "submit_evaluation"}
+        assert "output_config" not in client.calls[2]
+        assert client.calls[2]["tool_choice"]["type"] == "tool"
+        assert len(client.calls) == 3
+        assert score._verdict_transport_counts() == ({"tool": 2}, 2)
+        assert score._tool_choice_fallback_count() == 0
+
+    def test_forced_tool_refused_steps_to_auto_with_a_strict_parse(self):
+        import score
+        client = _anthropic_client(
+            _output_config_refusal(), _forced_tool_refusal(),
+            _anthropic_tool_use("submit_score", {"rationale": "r", "score": 2}))
+        with patch("score._get_anthropic_client", return_value=client):
+            out = score._call_structured_judge("p", "claude-opus-5-5", "score",
+                                               bounds=(0, 2, True))
+        assert out == (2, "r")
+        assert client.calls[2]["tool_choice"] == {"type": "auto"}
+        assert score._pop_judge_call_meta() == "auto"
+        assert score._tool_choice_fallback_count() == 1
+
+    def test_the_auto_rung_without_a_tool_call_is_an_error_not_prose(self):
+        import score
+        client = _anthropic_client(_output_config_refusal(), _forced_tool_refusal(),
+                                   _anthropic_text('{"rationale": "r", "score": 2}'))
+        with patch("score._get_anthropic_client", return_value=client), \
+                pytest.raises(JudgeProviderError) as exc:
+            score._call_structured_judge("p", "claude-opus-5-5", "score", bounds=(0, 2, True))
+        assert exc.value.error_type == "no_tool_call"
+        assert exc.value.tool_choice_mode == "auto" and exc.value.verdict_transport == "tool"
+
+    @pytest.mark.parametrize("reply,error_type", [
+        (_anthropic_text("", stop_reason="refusal"), "refusal"),
+        (_anthropic_text('{"rationale": "r', stop_reason="max_tokens"), "truncated"),
+        (_anthropic_text('{"verdict": "yes"}'), "bad_verdict"),
+        (_anthropic_text("Looks fine, 4/5."), "bad_verdict")])
+    def test_refusal_truncation_and_non_verdict_replies_are_errors(self, reply, error_type):
+        import score
+        with patch("score._get_anthropic_client", return_value=_anthropic_client(reply)), \
+                pytest.raises(JudgeProviderError) as exc:
+            score._call_structured_judge("p", "claude-opus-5-5", "score")
+        assert exc.value.error_type == error_type
+        assert exc.value.verdict_transport == "json_schema"
+
+    def test_a_pre_4_5_claude_starts_on_the_forced_tool(self):
+        import score
+        client = _anthropic_client(
+            _anthropic_tool_use("submit_evaluation", {"rationale": "r", "passed": False}))
+        with patch("score._get_anthropic_client", return_value=client):
+            out = score._call_structured_judge("p", "claude-3-5-sonnet-20241022", "bool")
+        assert out == (False, "r")
+        assert "output_config" not in client.calls[0]
+        assert client.calls[0]["tool_choice"]["type"] == "tool"
+        assert score._verdict_transport_counts() == ({"tool": 1}, 0)
+
+    def test_an_explicit_json_schema_policy_does_not_fall_back(self):
+        import score
+        client = _anthropic_client(_output_config_refusal())
+        with patch("score._get_anthropic_client", return_value=client), \
+                pytest.raises(JudgeProviderError) as exc:
+            score._call_structured_judge("p", "claude-opus-5-5", "bool", verdict="json_schema")
+        assert exc.value.error_type == "verdict_unsupported"
+        assert exc.value.error_class == "config" and len(client.calls) == 1
+
+    def test_an_explicit_tool_policy_is_not_learnt_as_the_start_rung(self):
+        import score
+        client = _anthropic_client(
+            _anthropic_tool_use("submit_evaluation", {"rationale": "r", "passed": True}),
+            _anthropic_text('{"rationale": "r", "passed": true}'))
+        with patch("score._get_anthropic_client", return_value=client):
+            score._call_structured_judge("p", "claude-opus-5-5", "bool", verdict="tool")
+            assert score._VERDICT_START == {}
+            score._call_structured_judge("p", "claude-opus-5-5", "bool")
+        assert "output_config" not in client.calls[0]
+        assert "output_config" in client.calls[1]
+
+    def test_an_sdk_without_output_config_falls_back_with_one_warning(self, capsys):
+        import score
+        score._SDK_WARNINGS.clear()
+        client = _anthropic_client(
+            TypeError("Messages.create() got an unexpected keyword argument 'output_config'"),
+            _anthropic_tool_use("submit_evaluation", {"rationale": "r", "passed": True}))
+        with patch("score._get_anthropic_client", return_value=client):
+            assert score._call_structured_judge("p", "claude-opus-5-5", "bool") == (True, "r")
+            score._call_structured_judge("p", "claude-opus-5-5", "bool")
+        assert client.calls[1]["tool_choice"]["type"] == "tool"
+        assert capsys.readouterr().err.count("anthropic>=0.77") == 1
+
+    def test_other_errors_propagate_from_the_first_rung(self):
+        import score
+        client = _anthropic_client(_HttpError(401, "invalid x-api-key"))
+        with patch("score._get_anthropic_client", return_value=client), \
+                pytest.raises(_HttpError):
+            score._call_structured_judge("p", "claude-opus-5-5", "bool")
+        assert len(client.calls) == 1
+
+    def test_aggregate_counts_transports_and_fallbacks(self):
+        import score
+        agg = score.aggregate_judge_usage({}, verdict_transports={"json_schema": 3, "tool": 1},
+                                          verdict_fallbacks=1)
+        assert agg["verdict_transports"] == {"json_schema": 3, "tool": 1}
+        assert agg["verdict_fallbacks"] == 1 and "tool_choice_fallbacks" not in agg
+        assert score.aggregate_judge_usage({}, verdict_transports={}) is None
+
+
+class TestVerdictTransportOpenRouter:
+    """Spec 015 on the OpenAI-shaped path through the OpenRouter client."""
+
+    def _score(self, config, client, monkeypatch):
+        import score
+        monkeypatch.setattr(score, "_client_for", lambda cfg: client)
+        _, scorer, *_ = load_judges(config)[0]
+        return scorer(outputs={"files": {"output.txt": "test"}})
+
+    def _json_ok(self):
+        return _or_response(tool_name=None, content='{"rationale": "solid", "passed": true}')
+
+    def test_the_default_policy_sends_response_format_with_require_parameters(
+            self, or_env, monkeypatch):
+        client = _or_client(self._json_ok())
+        result = self._score(_or_config(verdict="auto"), client, monkeypatch)
+        assert result == (True, "solid")
+        sent = client.calls[0]
+        fmt = sent["response_format"]
+        assert fmt["type"] == "json_schema" and fmt["json_schema"]["strict"] is True
+        assert fmt["json_schema"]["name"] == "submit_evaluation"
+        assert fmt["json_schema"]["schema"]["additionalProperties"] is False
+        assert "tools" not in sent and "tool_choice" not in sent
+        # an unpinned judge still sends no pins (`sort` is not one); it does ask
+        # for honoured parameters
+        provider = sent["extra_body"]["provider"]
+        assert provider["require_parameters"] is True
+        assert "order" not in provider and "only" not in provider
+        assert "JSON object" in sent["messages"][0]["content"]
+        assert len(client.calls) == 1 and or_env == []
+
+    def test_a_pinned_judge_keeps_its_pins_on_the_json_rung(self, or_env, monkeypatch):
+        client = _or_client(self._json_ok())
+        self._score(_or_config(verdict="auto", inherit_pins=True), client, monkeypatch)
+        provider = client.calls[0]["extra_body"]["provider"]
+        assert provider["order"] == ["z-ai", "novita"]
+        assert provider["require_parameters"] is True
+
+    def test_a_response_format_refusal_steps_to_the_tool_ladder_and_is_remembered(
+            self, or_env, monkeypatch):
+        import score
+        client = _or_client(_response_format_refusal(), _or_ok(), _or_ok())
+        config = _or_config(verdict="auto")
+        assert self._score(config, client, monkeypatch) == (True, "solid")
+        assert self._score(config, client, monkeypatch) == (True, "solid")
+        assert "response_format" in client.calls[0]
+        assert client.calls[1]["tool_choice"]["type"] == "function"
+        # no require_parameters on an unpinned judge's tool rung (Decision 25)
+        assert "require_parameters" not in client.calls[1]["extra_body"]["provider"]
+        assert "response_format" not in client.calls[2]
+        assert client.calls[2]["tool_choice"]["type"] == "function"
+        assert len(client.calls) == 3 and or_env == []
+        assert score._verdict_transport_counts() == ({"tool": 2}, 2)
+        assert score._tool_choice_fallback_count() == 0
+
+    def test_a_routing_404_on_the_json_rung_steps_to_the_tool_ladder(self, or_env, monkeypatch):
+        client = _or_client(_routing_404(), _or_ok())
+        assert self._score(_or_config(verdict="auto"), client, monkeypatch) == (True, "solid")
+        assert client.calls[1]["tool_choice"]["type"] == "function" and or_env == []
+
+    def test_a_committed_200_structured_output_refusal_steps_down(self, or_env, monkeypatch):
+        err = {"code": 400, "message": "Provider returned error",
+               "metadata": {"provider_name": "Novita",
+                            "raw": "json_schema response_format is not supported"}}
+        client = _or_client(_or_response(tool_name=None, finish_reason="error", error=err),
+                            _or_ok())
+        assert self._score(_or_config(verdict="auto"), client, monkeypatch) == (True, "solid")
+        assert client.calls[1]["tool_choice"]["type"] == "function"
+
+    def test_refusal_length_and_non_verdict_json_are_errors(self, or_env, monkeypatch):
+        import score
+        refused = _or_response(tool_name=None, content=None)
+        refused.choices[0].message.refusal = "I cannot help with that."
+        cases = [(refused, "refusal"),
+                 (_or_response(tool_name=None, content='{"rationale": "r', finish_reason="length"),
+                  "truncated"),
+                 (_or_response(tool_name=None, content='{"verdict": "yes"}'), "bad_verdict")]
+        for reply, error_type in cases:
+            score._reset_verdict_state()
+            client = _or_client(reply)
+            with pytest.raises(JudgeProviderError) as exc:
+                self._score(_or_config(verdict="auto"), client, monkeypatch)
+            assert exc.value.error_type == error_type, error_type
+            assert exc.value.verdict_transport == "json_schema"
+            assert len(client.calls) == 1
+
+    def test_an_explicit_json_schema_policy_is_a_config_error_when_refused(
+            self, or_env, monkeypatch):
+        client = _or_client(_response_format_refusal())
+        with pytest.raises(JudgeProviderError) as exc:
+            self._score(_or_config(verdict="json_schema", max_retries=3), client, monkeypatch)
+        assert exc.value.error_type == "verdict_unsupported"
+        assert exc.value.error_class == "config" and len(client.calls) == 1 and or_env == []
+
+    def test_a_429_on_the_json_rung_is_retried_not_stepped_down(self, or_env, monkeypatch):
+        client = _or_client(_HttpError(429, "slow down", retry_after="2"), self._json_ok())
+        assert self._score(_or_config(verdict="auto", max_retries=2), client,
+                           monkeypatch) == (True, "solid")
+        assert "response_format" in client.calls[1] and or_env == [2.0]
+
+    def test_a_judge_level_verdict_overrides_the_run_policy(self, or_env, monkeypatch):
+        judge = JudgeConfig(name="j", prompt="rate it", feedback_type="bool", verdict="tool")
+        client = _or_client(_or_ok())
+        assert self._score(_or_config(verdict="auto", judge=judge), client,
+                           monkeypatch) == (True, "solid")
+        assert "response_format" not in client.calls[0]
+        assert client.calls[0]["tool_choice"]["type"] == "function"
+
+    def test_per_case_record_and_summary_carry_the_transport(self, or_env, monkeypatch, tmp_path):
+        import score
+        case_dir = tmp_path / "case-001"
+        (case_dir / "artifacts").mkdir(parents=True)
+        (case_dir / "artifacts" / "out.md").write_text("body")
+        client = _or_client(_response_format_refusal(), _or_ok())
+        config = _or_config(verdict="auto")
+        config.outputs = [OutputConfig(path="artifacts")]
+        monkeypatch.setattr(score, "_client_for", lambda cfg: client)
+
+        result = score_cases(load_judges(config), [case_dir], config)
+
+        rec = result["per_case"]["case-001"]["j"]
+        assert rec["value"] is True and rec["verdict_transport"] == "tool"
+        assert "tool_choice_mode" not in rec                      # the forced call itself worked
+        usage = result["judge_usage"]
+        assert usage["verdict_transports"] == {"tool": 1} and usage["verdict_fallbacks"] == 1
+        assert "tool_choice_fallbacks" not in usage

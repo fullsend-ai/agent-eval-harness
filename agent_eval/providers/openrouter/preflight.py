@@ -99,7 +99,7 @@ def _check_endpoint(key, slug, e, roles, quants, res) -> list:
 
 
 def _check_key(key, roles, spec, judge_pinned, variant, known, catalog, snapshot_catalog,
-               pricing, res) -> dict:
+               pricing, res, verdicts=("auto",)) -> dict:
     """Check one routing key against one declaration; returns its snapshot
     entry and records failures/warnings on ``res``."""
     pins = pinned_providers(spec)
@@ -136,6 +136,7 @@ def _check_key(key, roles, spec, judge_pinned, variant, known, catalog, snapshot
                             f"(served by: {', '.join(entry['catalog']['providers']) or 'nobody'})")
         return entry
     function_capable, function_reported = [], False
+    structured_capable, params_reported = [], False
     for slug in sorted(pins):
         for e in served.get(slug, []):
             reasons = _check_endpoint(key, slug, e, roles, quants, res)
@@ -150,6 +151,11 @@ def _check_key(key, roles, spec, judge_pinned, variant, known, catalog, snapshot
                 function_reported = True
                 if stc.get("function"):
                     function_capable.append(tag)
+            params = e.get("supported_parameters")
+            if isinstance(params, list):
+                params_reported = True
+                if "structured_outputs" in params:
+                    structured_capable.append(tag)
     if not entry["eligible"]:
         detail = "; ".join(f"{x['tag']}: {', '.join(x['reasons'])}" for x in entry["excluded"])
         res.failures.append(f"{label}: no eligible pinned endpoint ({detail})")
@@ -157,19 +163,45 @@ def _check_key(key, roles, spec, judge_pinned, variant, known, catalog, snapshot
     if entry["excluded"]:
         res.warnings.append(f"{label}: excluded pinned endpoint(s) " + "; ".join(
             f"{x['tag']} ({', '.join(x['reasons'])})" for x in entry["excluded"]))
-    if "judge" in roles and judge_pinned and function_reported:
-        lacking = [t for t in entry["eligible"] if t not in function_capable]
-        if not function_capable:
-            res.failures.append(f"{label}: no pinned endpoint supports tool_choice: function — "
-                                "a pinned judge's forced tool call answers 404 (Decision 25)")
-        elif lacking:
-            res.warnings.append(f"{label}: pinned endpoint(s) {', '.join(lacking)} lack "
-                                "tool_choice: function; the judge falls back per the tool_choice ladder")
+    if "judge" in roles and judge_pinned:
+        # Spec 015: the `json_schema` transport needs `structured_outputs` on the
+        # endpoint; the `tool` transport (the fallback under `auto`, the only
+        # rung under `tool`) needs `tool_choice: function` (Decision 25). One
+        # pass per policy the key's judges actually run under; a judge with
+        # its own `verdict:` is not held to the run-level policy.
+        policies = sorted(set(verdicts or ("auto",)))
+        for verdict in policies:
+            who = f" (judges on verdict: {verdict})" if len(policies) > 1 else ""
+            if verdict in ("auto", "json_schema") and params_reported:
+                lacking = [t for t in entry["eligible"] if t not in structured_capable]
+                if not structured_capable and verdict == "json_schema":
+                    res.failures.append(f"{label}{who}: no pinned endpoint advertises "
+                                        "structured_outputs and the verdict policy pins "
+                                        "json_schema (spec 015)")
+                elif not structured_capable:
+                    res.warnings.append(f"{label}{who}: no pinned endpoint advertises "
+                                        "structured_outputs; the judge will run on the "
+                                        "forced-tool transport (spec 015)")
+                elif lacking:
+                    res.warnings.append(f"{label}{who}: pinned endpoint(s) {', '.join(lacking)} "
+                                        "lack structured_outputs; the judge falls back to the "
+                                        "forced tool there (spec 015)")
+            if verdict in ("auto", "tool") and function_reported:
+                lacking = [t for t in entry["eligible"] if t not in function_capable]
+                if not function_capable:
+                    res.failures.append(f"{label}{who}: no pinned endpoint supports tool_choice: "
+                                        "function — a pinned judge's forced tool call answers 404 "
+                                        "(Decision 25)")
+                elif lacking:
+                    res.warnings.append(f"{label}{who}: pinned endpoint(s) {', '.join(lacking)} lack "
+                                        "tool_choice: function; the judge falls back per the "
+                                        "tool_choice ladder")
     return entry
 
 
 def run_preflight(plan, *, level: str = "strict", run_dir=None, catalog=None, fetch=None,
-                  judges: Optional[dict] = None) -> PreflightResult:
+                  judges: Optional[dict] = None, verdict: str = "auto",
+                  judge_verdicts: Optional[dict] = None) -> PreflightResult:
     """Run the checks for ``plan`` at ``level``; ``judges`` is
     ``{routing key: pinned}`` for the run's ``openrouter:/`` judges (see
     ``plan.judge_routing_keys``: the judge's effective RoutingSpec, ``True`` for
@@ -191,8 +223,11 @@ def run_preflight(plan, *, level: str = "strict", run_dir=None, catalog=None, fe
     for key, declared in (judges or {}).items():
         # ``declared``: the judge's effective RoutingSpec (plan.judge_routing_keys),
         # ``True`` for "the table's entry", falsy for a judge that sends no pins.
+        # ``judge_verdicts`` (plan.judge_verdict_policies) lists the spec 015
+        # policies the key's judges run under; absent → the run-level ``verdict``.
         entry = keys.setdefault(routing_key(key), {"variant": None, "roles": set(), "judge_spec": None})
         entry["roles"].add("judge")
+        entry["verdicts"] = set((judge_verdicts or {}).get(key) or ()) or {verdict}
         if declared is True:
             declared = table.for_model(key) if table is not None else None
         if declared and not isinstance(declared, bool) and entry["judge_spec"] is None:
@@ -232,7 +267,8 @@ def run_preflight(plan, *, level: str = "strict", run_dir=None, catalog=None, fe
             checks.append(({"judge"}, judge_spec, bool(judge_pins)))
         for check_roles, spec, judge_pinned in checks:
             entry = _check_key(key, check_roles, spec, judge_pinned, info["variant"], known, catalog,
-                               snapshot_catalog, pricing, res)
+                               snapshot_catalog, pricing, res,
+                               verdicts=info.get("verdicts") or {verdict})
             if key not in snap_keys:
                 snap_keys[key] = entry
             else:
@@ -284,7 +320,7 @@ def main(argv=None) -> int:
     from agent_eval.config import EvalConfig, OpenRouterConfig  # call-time: providers never import config at load
     from agent_eval.providers.base import ProviderPlan
     from agent_eval.providers.openrouter.plan import (
-        build_plan, effective_roles, judge_routing_keys, plan_is_active)
+        build_plan, effective_roles, judge_routing_keys, judge_verdict_policies, plan_is_active)
 
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -306,7 +342,9 @@ def main(argv=None) -> int:
             raise ConfigError(f"set {orc.api_key_env}: the key and eligibility checks need the inference key")
         plan = ProviderPlan(**{**plan.__dict__, "key": key, "session": None})
         res = run_preflight(plan, level=args.level or orc.preflight, run_dir=args.run_dir,
-                            judges=judge_routing_keys(config))
+                            judges=judge_routing_keys(config),
+                            verdict=getattr(config.models, "judge_verdict", "auto"),
+                            judge_verdicts=judge_verdict_policies(config))
     except (ConfigError, ValueError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2

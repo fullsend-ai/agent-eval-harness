@@ -32,14 +32,17 @@ _TC = {"none": True, "auto": True, "required": True, "function": True}
 ENDPOINTS = {
     "z-ai/glm-5.2": [
         {"provider_name": "Novita", "tag": "novita/fp8", "quantization": "fp8", "status": 0,
-         "supported_parameters": ["tools", "tool_choice"], "supports_tool_choice": dict(_TC),
+         "supported_parameters": ["tools", "tool_choice", "response_format", "structured_outputs"],
+         "supports_tool_choice": dict(_TC),
          "max_completion_tokens": 131072, "pricing": {"prompt": "0.0000002", "completion": "0.0000008"}},
         {"provider_name": "Z.AI", "tag": "z-ai", "quantization": "fp8", "status": 0,
-         "supported_parameters": ["tools", "tool_choice"], "supports_tool_choice": dict(_TC),
+         "supported_parameters": ["tools", "tool_choice", "response_format"],
+         "supports_tool_choice": dict(_TC),
          "max_completion_tokens": 128000, "pricing": {"prompt": "0.0000003", "completion": "0.0000009"}},
         # a second Novita endpoint at another quantization, listed last on purpose
         {"provider_name": "Novita", "tag": "novita/bf16", "quantization": "bf16", "status": 0,
-         "supported_parameters": ["tools", "tool_choice"], "supports_tool_choice": dict(_TC),
+         "supported_parameters": ["tools", "tool_choice", "response_format", "structured_outputs"],
+         "supports_tool_choice": dict(_TC),
          "max_completion_tokens": 131072},
     ],
     "qwen/qwen3-8b": [
