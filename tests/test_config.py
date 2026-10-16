@@ -1518,3 +1518,86 @@ def test_background_model_accepts_variants_and_a_uri_form(tmp_path):
                       f"    openrouter: {{background_model: '{written}'}}\n"))
         assert cfg.models.providers.openrouter.background_model == stored
 
+
+
+@pytest.mark.parametrize("key", ["allowed_tools", "denied_tools"])
+def test_path_scoped_write_rule_warns(tmp_path, key):
+    """`Write(<path>)` matches nothing on the Claude Code runner, as an allow
+    or as a deny — the Write tool is governed by `Edit(<path>)`. An author who
+    writes a scoped Write deny believes they confined the judge and did not,
+    and nothing below this layer says a word."""
+    with pytest.warns(UserWarning, match="governed by 'Edit"):
+        EvalConfig.from_yaml(
+            _tool_list_config(tmp_path, key, "['Write(/etc/**)']"))
+
+
+@pytest.mark.parametrize("key", ["allowed_tools", "denied_tools"])
+def test_scoped_edit_never_draws_the_dead_rule_warning(tmp_path, key):
+    """Only the parenthesised `Write(...)` form is dead. `Edit(<path>)` is the
+    recommended replacement and must never be flagged as one — in either list.
+
+    (A BARE `Write` is a different matter: silent in a deny list, but widening
+    in an allow list — see `test_bare_write_tool_in_an_allow_list_warns`.)"""
+    import warnings
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        EvalConfig.from_yaml(
+            _tool_list_config(tmp_path, key, "['Edit(output/**)']"))
+    assert not [w for w in caught if "matches nothing" in str(w.message)]
+
+
+@pytest.mark.parametrize("rule", ["Read", "Grep", "Glob"])
+def test_bare_widening_tool_in_an_allow_list_warns(tmp_path, rule):
+    """A bare `Read`/`Grep`/`Glob` ALLOW removes the CLI's working-directory
+    confinement for that tool. Measured on claude 2.1.300: with
+    `[Read(./**), Grep, Glob, Edit(./output/**)]` a read outside the workspace
+    is denied 3/3 while a Grep of the same file returns its CONTENT 3/3, with
+    `permission_denials` empty. The author believes the scoped neighbours
+    confine the judge; one bare word opts out (CWE-1188)."""
+    with pytest.warns(UserWarning, match="removes the Claude Code working-dir"):
+        EvalConfig.from_yaml(
+            _tool_list_config(tmp_path, "allowed_tools", f"[{rule}]"))
+
+
+@pytest.mark.parametrize("rule", ["Read", "Grep", "Glob"])
+def test_bare_widening_tool_in_a_deny_list_does_not_warn(tmp_path, rule):
+    """A bare `Grep` DENY is the normal way to remove the tool; it widens
+    nothing. The warning is allow-list-only."""
+    import warnings
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        EvalConfig.from_yaml(
+            _tool_list_config(tmp_path, "denied_tools", f"[{rule}]"))
+    assert not [w for w in caught if "working-dir" in str(w.message)]
+
+
+def test_scoped_widening_tool_does_not_warn(tmp_path):
+    """`Read(./**)` is the fix the warning asks for, so it must stay quiet —
+    a warning that fires on the corrected config is pure noise."""
+    import warnings
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        EvalConfig.from_yaml(_tool_list_config(
+            tmp_path, "allowed_tools", "['Read(./**)', 'Grep(./**)']"))
+    assert not [w for w in caught if "working-dir" in str(w.message)]
+
+
+@pytest.mark.parametrize("rule", ["Write", "Edit", "MultiEdit", "NotebookEdit"])
+def test_bare_write_tool_in_an_allow_list_warns(tmp_path, rule):
+    """The mirror of the bare-read case, and the shape every agent judge had
+    before the default became `Edit(output/**)`: under deny-by-default a bare
+    write allow grants writes to any host path. Scope, do not drop — the
+    verdict file needs a write rule."""
+    with pytest.warns(UserWarning, match="write to any path on the host"):
+        EvalConfig.from_yaml(
+            _tool_list_config(tmp_path, "allowed_tools", f"[{rule}]"))
+
+
+@pytest.mark.parametrize("rule", ["Write", "Edit"])
+def test_bare_write_tool_in_a_deny_list_does_not_warn(tmp_path, rule):
+    """A bare write DENY removes the tool; it widens nothing."""
+    import warnings
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        EvalConfig.from_yaml(_tool_list_config(tmp_path, "denied_tools", f"[{rule}]"))
+    assert not [w for w in caught if "any path on the host" in str(w.message)]

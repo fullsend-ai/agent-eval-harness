@@ -202,7 +202,17 @@ class ClaudeCodeRunner(EvalRunner):
     _VALID_EFFORTS = CLAUDE_CODE_EFFORTS
     _VALID_PERMISSION_MODES = {
         "default", "acceptEdits", "plan", "auto", "dontAsk", "bypassPermissions",
+        # Every unlisted tool call becomes a prompt, which `--print` has nobody
+        # to answer — see `_VALID_PERMISSION_PROMPTS`. Agent judges run under
+        # it. (`manual` is in `claude --help`'s choices on 2.1.299; `default`
+        # is not, but is still accepted.)
+        "manual",
     }
+    # `--permission-prompts none` means "nobody answers a prompt, so anything
+    # that would prompt is denied". Paired with a non-permissive mode it is
+    # what makes an allow list authoritative under `--print`; without it an
+    # unlisted tool simply runs (#239).
+    _VALID_PERMISSION_PROMPTS = {"host", "none"}
 
     @classmethod
     def from_config(cls, config, *, log_prefix=None, **overrides):
@@ -222,6 +232,10 @@ class ClaudeCodeRunner(EvalRunner):
             effort=overrides.get("effort", config.runner.effort),
             permission_mode=overrides.get(
                 "permission_mode", config.runner.permission_mode),
+            # Deliberately override-only: this is a judge-side lever with no
+            # eval.yaml surface, so a skill-under-test cannot weaken itself
+            # into the permissive posture an agent judge is moved out of.
+            permission_prompts=overrides.get("permission_prompts"),
             log_prefix=log_prefix,
             provider_plan=overrides.get("provider_plan"),
             run_id=overrides.get("run_id"),
@@ -240,6 +254,7 @@ class ClaudeCodeRunner(EvalRunner):
         log_prefix: Optional[str] = None,
         effort: Optional[str] = None,
         permission_mode: Optional[str] = None,
+        permission_prompts: Optional[str] = None,
         provider_plan=None,
         run_id: Optional[str] = None,
     ):
@@ -271,6 +286,14 @@ class ClaudeCodeRunner(EvalRunner):
                 f"Invalid permission_mode '{permission_mode}'. "
                 f"Must be one of: {sorted(self._VALID_PERMISSION_MODES)}")
         self._permission_mode = permission_mode
+        if permission_prompts is not None and (
+            not isinstance(permission_prompts, str)
+            or permission_prompts not in self._VALID_PERMISSION_PROMPTS
+        ):
+            raise ValueError(
+                f"Invalid permission_prompts '{permission_prompts}'. "
+                f"Must be one of: {sorted(self._VALID_PERMISSION_PROMPTS)}")
+        self._permission_prompts = permission_prompts
 
     def bind_provider(self, binding) -> None:
         """The provider session's per-case binding: generation ids are sighted
@@ -324,6 +347,8 @@ class ClaudeCodeRunner(EvalRunner):
 
         if self._permission_mode:
             cmd.extend(["--permission-mode", self._permission_mode])
+        if self._permission_prompts:
+            cmd.extend(["--permission-prompts", self._permission_prompts])
 
         plugin_dirs = self._plugin_dirs
         if plugin_dirs:

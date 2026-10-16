@@ -559,9 +559,12 @@ def test_cursor_default_editor_denies_do_not_revoke_an_allowed_write(
         CursorAgentRunner._restore_permissions(snapshot)
 
 
-def test_cursor_default_judge_policy_still_denies_writes(tmp_path, monkeypatch):
-    """The read-only default must keep denying writes on Cursor — lifting the
-    family is conditional on the author allowing one of its members."""
+def test_cursor_default_judge_policy_scopes_writes_to_the_verdict_dir(
+        tmp_path, monkeypatch):
+    """The default judge policy must reach Cursor as a SCOPED write, not a
+    blanket one and not a blanket deny. Cursor honours path scoping, so
+    `Edit(output/**)` becomes `Write(output/**)`: the verdict file is
+    writable and nothing else is."""
     import warnings
 
     from score import _judge_tool_policy
@@ -572,7 +575,12 @@ def test_cursor_default_judge_policy_still_denies_writes(tmp_path, monkeypatch):
         snapshot = runner._prepare_permissions(tmp_path)
     try:
         config = json.loads(snapshot.path.read_text())
-        assert "Write(**)" in config["permissions"]["deny"]
+        allow, deny = (config["permissions"]["allow"],
+                       config["permissions"]["deny"])
+        assert "Write(output/**)" in allow
+        assert "Write(**)" not in allow     # scoped, not blanket
+        assert "Write(**)" not in deny      # and not revoked outright
+        assert "Shell(**)" in deny and "WebFetch(*)" in deny
     finally:
         CursorAgentRunner._restore_permissions(snapshot)
 

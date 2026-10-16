@@ -333,7 +333,11 @@ Return the JSON array now:"""
             timeout_s=int(config.execution.timeout
                           if config.execution.timeout is not None else 600),
             max_budget_usd=5.0,
-            permissions={"allow": ["Read", "Grep", "Glob"]},
+            # Scoped, not bare: a bare `Read`/`Grep`/`Glob` allow removes the
+            # CLI's working-directory confinement rather than merely
+            # pre-approving the tool, and all three work inside the workspace
+            # with no rule at all. See `_judge_tool_policy` in score.py.
+            permissions={"allow": ["Read(**)"]},
         )
         try:
             if result.exit_code != 0:
