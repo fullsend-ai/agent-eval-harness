@@ -1059,6 +1059,16 @@ _KNOWN_TOOL_NAMES = frozenset({
 # container (in-workspace read denied 3/3).
 _CONFINEMENT_WIDENING_TOOLS = frozenset({"Read", "Grep", "Glob"})
 
+# The write family has the same problem and the opposite remedy. Under the
+# judge's deny-by-default posture a bare `Write` or `Edit` allow grants writes
+# to any path on the host — the shape every agent judge had before the default
+# became `Edit(output/**)`. Unlike the read family these are NOT redundant: a
+# judge with no write rule cannot deliver its verdict at all. So the advice is
+# "scope it", never "drop it". `Write(<path>)` is not the scoping to reach for
+# — see the separate warning below; on Claude Code the Write tool follows
+# `Edit(<path>)`.
+_UNSCOPED_WRITE_TOOLS = frozenset({"Write", "Edit", "MultiEdit", "NotebookEdit"})
+
 
 def _warn_unknown_tool_names(rules, context, is_allow=False):
     """Warn for a permission rule whose tool name is not one we recognize.
@@ -1087,6 +1097,15 @@ def _warn_unknown_tool_names(rules, context, is_allow=False):
                   "the escape is not recorded in 'permission_denials'. Scope "
                   f"it as '{name}(./**)', or drop it: Read, Grep and Glob all "
                   "work inside the staged workspace with no allow rule at all.")
+            continue
+        if is_allow and "(" not in rule and name in _UNSCOPED_WRITE_TOOLS:
+            # See `_UNSCOPED_WRITE_TOOLS`. Scope, do not drop: the verdict
+            # file needs a write rule.
+            _warn(f"{context} entry {rule!r}: a bare '{name}' allow lets the "
+                  "judge write to any path on the host, not just its staged "
+                  "workspace. Scope it to the verdict directory — "
+                  "'Edit(output/**)' — which is the form the Write tool "
+                  "actually follows on Claude Code.")
             continue
         if name == "Write" and "(" in rule:
             # The one rule the harness KNOWS the runner drops on the floor:

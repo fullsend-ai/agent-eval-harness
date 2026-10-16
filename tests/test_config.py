@@ -1532,15 +1532,18 @@ def test_path_scoped_write_rule_warns(tmp_path, key):
 
 
 @pytest.mark.parametrize("key", ["allowed_tools", "denied_tools"])
-def test_bare_write_and_scoped_edit_do_not_warn(tmp_path, key):
-    """Only the parenthesised `Write(...)` form is dead; bare `Write` works,
-    and `Edit(<path>)` is the recommended replacement."""
+def test_scoped_edit_never_draws_the_dead_rule_warning(tmp_path, key):
+    """Only the parenthesised `Write(...)` form is dead. `Edit(<path>)` is the
+    recommended replacement and must never be flagged as one — in either list.
+
+    (A BARE `Write` is a different matter: silent in a deny list, but widening
+    in an allow list — see `test_bare_write_tool_in_an_allow_list_warns`.)"""
     import warnings
-    for value in ("[Write]", "['Edit(output/**)']"):
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            EvalConfig.from_yaml(_tool_list_config(tmp_path, key, value))
-        assert not [w for w in caught if "Edit(" in str(w.message)], value
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        EvalConfig.from_yaml(
+            _tool_list_config(tmp_path, key, "['Edit(output/**)']"))
+    assert not [w for w in caught if "matches nothing" in str(w.message)]
 
 
 @pytest.mark.parametrize("rule", ["Read", "Grep", "Glob"])
@@ -1577,3 +1580,24 @@ def test_scoped_widening_tool_does_not_warn(tmp_path):
         EvalConfig.from_yaml(_tool_list_config(
             tmp_path, "allowed_tools", "['Read(./**)', 'Grep(./**)']"))
     assert not [w for w in caught if "working-dir" in str(w.message)]
+
+
+@pytest.mark.parametrize("rule", ["Write", "Edit", "MultiEdit", "NotebookEdit"])
+def test_bare_write_tool_in_an_allow_list_warns(tmp_path, rule):
+    """The mirror of the bare-read case, and the shape every agent judge had
+    before the default became `Edit(output/**)`: under deny-by-default a bare
+    write allow grants writes to any host path. Scope, do not drop — the
+    verdict file needs a write rule."""
+    with pytest.warns(UserWarning, match="write to any path on the host"):
+        EvalConfig.from_yaml(
+            _tool_list_config(tmp_path, "allowed_tools", f"[{rule}]"))
+
+
+@pytest.mark.parametrize("rule", ["Write", "Edit"])
+def test_bare_write_tool_in_a_deny_list_does_not_warn(tmp_path, rule):
+    """A bare write DENY removes the tool; it widens nothing."""
+    import warnings
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        EvalConfig.from_yaml(_tool_list_config(tmp_path, "denied_tools", f"[{rule}]"))
+    assert not [w for w in caught if "any path on the host" in str(w.message)]
