@@ -3930,8 +3930,23 @@ def _copy_tree_dereferenced(src, dest, confine_root, ancestors, skip=None,
     return errors
 
 
+def _escape_staging_text(text):
+    """Make a path or reason safe to print on a log line.
+
+    Paths come from skill-produced (untrusted) trees, so a name can carry a
+    newline, a carriage return or an ESC. Left raw, one could forge a
+    ``::error::``-style workflow command or a fake log line. ``repr`` escapes
+    every control character; a leading ``::`` is broken up as well so the
+    text can never start a workflow command.
+    """
+    text = repr(str(text))[1:-1]
+    return "\\:\\:" + text[2:] if text.startswith("::") else text
+
+
 def _format_staging_problems(problems, limit=10):
-    detail = "; ".join(f"{p}: {why[:200]}" for p, why in problems[:limit])
+    detail = "; ".join(
+        f"{_escape_staging_text(p)}: {_escape_staging_text(why[:200])}"
+        for p, why in problems[:limit])
     more = "" if len(problems) <= limit else f" (+{len(problems) - limit} more)"
     noun = "entry" if len(problems) == 1 else "entries"
     return f"{len(problems)} {noun}: {detail}{more}"
