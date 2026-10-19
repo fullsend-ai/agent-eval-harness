@@ -3231,14 +3231,25 @@ def _emit_stale_field_warnings(refs_by_judge, records):
 
 
 _OUTPUTS_NAME_RE = re.compile(r"\boutputs\b")
-_JINJA_BLOCK_RE = re.compile(r"\{\{.*?\}\}|\{%.*?%\}", re.S)
 
 
 def _template_reads_outputs(template_text):
     """Whether a Jinja template references ``outputs`` in an expression or
-    statement. Plain prose that happens to say "outputs" does not count."""
-    return any(_OUTPUTS_NAME_RE.search(block)
-               for block in _JINJA_BLOCK_RE.findall(template_text or ""))
+    statement. Plain prose that happens to say "outputs" does not count.
+
+    Uses Jinja's own parser, so a delimiter inside a quoted string
+    (``{{ '}}' ~ outputs.files }}``) cannot hide a reference. A template that
+    does not parse is treated as reading ``outputs`` — an unneeded file load
+    costs memory, a missing one changes a verdict.
+    """
+    if not template_text:
+        return False
+    from jinja2 import Environment, meta
+    try:
+        ast = Environment().parse(template_text)
+    except Exception:
+        return True
+    return "outputs" in meta.find_undeclared_variables(ast)
 
 
 def _judges_read_files(judges):
@@ -3782,6 +3793,44 @@ _STAGING_SKIP_REASONS = (
 # recursion limit with it and surface as something unrelated.
 _MAX_CONTEXT_DEPTH = 64
 
+# Cumulative bounds on one staging operation. Depth and ancestor-loop checks do
+# not stop an acyclic fan-out (two links per level to an already-visited
+# directory expands exponentially) and staging runs before the judge timeout
+# starts, so the copy itself carries limits. Exceeding one fails the judge.
+_MAX_STAGE_ENTRIES = 1_000_000
+_MAX_STAGE_BYTES = 20 * 1024 ** 3
+_MAX_STAGE_SECONDS = 600
+
+
+class _StagingBudget:
+    """Entry, byte and wall-clock allowance shared by one staging operation."""
+
+    def __init__(self, max_entries=_MAX_STAGE_ENTRIES,
+                 max_bytes=_MAX_STAGE_BYTES, max_seconds=_MAX_STAGE_SECONDS):
+        self.max_entries = max_entries
+        self.max_bytes = max_bytes
+        self.max_seconds = max_seconds
+        self.entries = 0
+        self.bytes = 0
+        self.exceeded = None
+        self._deadline = time.monotonic() + max_seconds
+
+    def charge(self, nbytes=0, entries=1):
+        """Account for staged entries and bytes; returns a reason once a limit is hit
+        (and on every later call), else None."""
+        if self.exceeded is None:
+            self.entries += entries
+            self.bytes += nbytes
+            if self.entries > self.max_entries:
+                self.exceeded = f"more than {self.max_entries} entries"
+            elif self.bytes > self.max_bytes:
+                self.exceeded = f"more than {self.max_bytes} bytes"
+            elif time.monotonic() > self._deadline:
+                self.exceeded = f"longer than {self.max_seconds}s"
+        if self.exceeded is None:
+            return None
+        return f"staging limit exceeded ({self.exceeded}); not copied"
+
 
 def _copy_path(src, dest):
     """Copy a file or directory tree into the staged workspace, dereferencing
@@ -3801,12 +3850,14 @@ def _copy_path(src, dest):
     or duplicated dozens of times, with nothing anywhere saying so.
     """
     if src.is_dir():
-        return _copy_tree_dereferenced(src, dest, os.path.realpath(src), ())
+        return _copy_tree_dereferenced(src, dest, os.path.realpath(src), (),
+                                       budget=_StagingBudget())
     shutil.copy2(src, dest)
     return []
 
 
-def _copy_tree_dereferenced(src, dest, confine_root, ancestors, skip=None):
+def _copy_tree_dereferenced(src, dest, confine_root, ancestors, skip=None,
+                            budget=None):
     """Recursive worker for :func:`_copy_path`.
 
     ``confine_root`` is the real path of the declared entry being staged (an
@@ -3823,7 +3874,13 @@ def _copy_tree_dereferenced(src, dest, confine_root, ancestors, skip=None):
     ``skip``, when given, is called with each entry name directly under
     ``src`` (this level only, not deeper); a true result leaves the entry out
     without reporting it.
+
+    ``budget`` (a :class:`_StagingBudget`, shared by the whole walk) bounds the
+    entries, bytes and time one staging operation may spend; a fresh one is
+    made when omitted.
     """
+    if budget is None:
+        budget = _StagingBudget()
     if len(ancestors) >= _MAX_CONTEXT_DEPTH:
         return [(str(src), f"deeper than {_MAX_CONTEXT_DEPTH} levels; not copied")]
     try:
@@ -3838,6 +3895,10 @@ def _copy_tree_dereferenced(src, dest, confine_root, ancestors, skip=None):
         if skip is not None and skip(entry.name):
             continue
         child, target = Path(entry.path), dest / entry.name
+        over = budget.charge()
+        if over:
+            errors.append((str(child), over))
+            break
         try:
             real = os.path.realpath(child)
             if real != confine_root and not real.startswith(
@@ -3852,9 +3913,14 @@ def _copy_tree_dereferenced(src, dest, confine_root, ancestors, skip=None):
                 if real in ancestors:
                     errors.append((str(child), "symlink loop; not copied"))
                     continue
-                errors.extend(_copy_tree_dereferenced(child, target,
-                                                      confine_root, ancestors))
+                errors.extend(_copy_tree_dereferenced(
+                    child, target, confine_root, ancestors, budget=budget))
             elif entry.is_file(follow_symlinks=True):
+                over = budget.charge(entry.stat(follow_symlinks=True).st_size,
+                                     entries=0)
+                if over:
+                    errors.append((str(child), over))
+                    break
                 shutil.copy2(child, target)
             else:
                 errors.append(
@@ -3920,13 +3986,21 @@ def _stage_case_outputs(workspace, case_dir, output_dirs, selected):
 
     sources = [(str(p), ()) for p in output_dirs or ()]
     sources.append(("_modified", _SKIP_MODIFIED_PREFIXES))
-    staged = []
+    normalized = [(os.path.normpath(raw), exclude) for raw, exclude in sources]
+    # Overlapping declarations ("." and "a", or "a" and "a/b") copy once. Drop a
+    # path whenever another declared path is its ancestor, whatever the order:
+    # copying a child first and its parent later would overwrite the child's
+    # read-only files (copy2 keeps the source mode) and fail with EACCES.
+    declared = [rel for rel, _ in normalized]
     problems = []
-    for raw, exclude in sources:
-        rel = os.path.normpath(raw)
-        # Overlapping declarations ("." and "a", or "a" and "a/b") copy once.
-        if any(s in (".", rel) or rel.startswith(s + os.sep) for s in staged):
+    seen = set()
+    budget = _StagingBudget()
+    for rel, exclude in normalized:
+        if rel in seen or any(
+                other != rel and (other == "." or rel.startswith(other + os.sep))
+                for other in declared):
             continue
+        seen.add(rel)
         src = case_dir / rel
         if not src.is_dir():
             continue
@@ -3940,9 +4014,8 @@ def _stage_case_outputs(workspace, case_dir, output_dirs, selected):
                 continue
             dest = workspace / rel
             skip = (lambda name, ex=exclude: name.startswith(ex)) if exclude else None
-        staged.append(rel)
         problems.extend(_copy_tree_dereferenced(src, dest, str(src), (),
-                                                skip=skip))
+                                                skip=skip, budget=budget))
     return problems
 
 

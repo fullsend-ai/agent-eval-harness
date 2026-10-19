@@ -770,6 +770,52 @@ class TestOutputStagingByCopy:
         _stage_agent_workspace(ws2, record, ["out"], [], tmp_path, ["out"])
         assert not (ws2 / "_modified").exists()
 
+    @pytest.mark.parametrize("declared", [
+        ["out/repo", "out"],
+        ["out", "out/repo"],
+        ["out/repo", "."],
+        [".", "out/repo"],
+    ])
+    def test_overlapping_outputs_copy_once_in_any_order(self, tmp_path, declared):
+        from score import _stage_agent_workspace
+        record = _make_case(tmp_path / "case", {
+            "out/repo/objects/ab": "blob", "out/top.md": "top"})
+        # collect.py preserves modes; copy2 keeps them, so a second pass over
+        # the same destination would fail with EACCES.
+        blob = tmp_path / "case" / "out" / "repo" / "objects" / "ab"
+        blob.chmod(0o444)
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        try:
+            _stage_agent_workspace(ws, record, None, [], tmp_path, declared)
+        finally:
+            for f in ws.rglob("ab"):
+                f.chmod(0o644)
+        assert (ws / "out" / "repo" / "objects" / "ab").read_text() == "blob"
+        assert (ws / "out" / "top.md").read_text() == "top"
+
+    def test_acyclic_symlink_fanout_hits_the_staging_limit(self, tmp_path):
+        from score import _StagingBudget, _copy_tree_dereferenced
+        root = tmp_path / "tree"
+        depth = 12
+        cur = root
+        for i in range(depth):
+            nxt = cur / "real"
+            nxt.mkdir(parents=True)
+            os.symlink("real", cur / "link")
+            cur = nxt
+        (cur / "leaf.txt").write_text("x")
+        budget = _StagingBudget(max_entries=500)
+        errors = _copy_tree_dereferenced(root, tmp_path / "dest",
+                                         str(root.resolve()), (), budget=budget)
+        assert any("staging limit exceeded" in why for _p, why in errors)
+        assert budget.entries <= 501
+
+    def test_staging_limit_fails_the_judge_staging(self):
+        from score import _report_staging_problems
+        with pytest.raises(RuntimeError, match="staging limit exceeded"):
+            _report_staging_problems([("x", "staging limit exceeded (...); not copied")])
+
 
 class TestRecordFilesGating:
     """``record["files"]`` is loaded only when some judge reads it (#258)."""
@@ -860,6 +906,9 @@ class TestRecordFilesGating:
         ("{% for p in outputs.files %}{{ p }}{% endfor %}", "", True),
         ("Grade it.", "outputs.get('exit_code') == 0", True),
         ("Grade it.", "annotations.get('k') == 'v'", False),
+        ("{{ '}}' ~ outputs.files }}", "", True),
+        ("{% if x == '%}' %}{{ outputs }}{% endif %}", "", True),
+        ("{{ unclosed outputs", "", True),
     ])
     def test_judges_read_files_decision(self, prompt, condition, expected):
         from score import _judges_read_files
