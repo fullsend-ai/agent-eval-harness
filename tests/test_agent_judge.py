@@ -1143,6 +1143,32 @@ class TestAgentJudgeHardening:
         assert msg.endswith("(+5 more)")
         assert "x" * 201 not in msg
 
+    def test_staging_problem_report_escapes_control_characters(self):
+        from score import _format_staging_problems
+        msg = _format_staging_problems(
+            [("a\nb\rc\x1bd", "::error::x\ny"), ("::warning::p", "ok")])
+        assert "\n" not in msg and "\r" not in msg and "\x1b" not in msg
+        assert "a\\nb\\rc\\x1bd" in msg
+        assert "::error::" not in msg.replace("\\:\\:error::", "")
+        assert not msg.split(": ", 1)[1].startswith("::")
+
+    def test_hostile_symlink_name_cannot_forge_a_log_line(
+            self, tmp_path, capsys):
+        """A dangling link named with a newline and a workflow command must be
+        reported on one escaped line, not as a forged `::error::` line."""
+        from score import _stage_agent_workspace
+        ctx = tmp_path / "ctxdir"
+        ctx.mkdir()
+        (ctx / "doc.md").write_text("reference")
+        os.symlink("nowhere", ctx / "x\n::error::forged")
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        _stage_agent_workspace(ws, {"files": {}}, None, ["ctxdir"], tmp_path)
+        err = capsys.readouterr().err
+        assert "agent.context skipped 1 entry" in err
+        assert not any(line.startswith("::") for line in err.splitlines())
+        assert "x\\n::error::forged" in err
+
     def test_no_llm_judges_fail_closed_on_unclassifiable_builtin(self):
         """An unclassifiable builtin is dropped (fail closed), not retained (CWE-754)."""
         from unittest.mock import MagicMock, patch

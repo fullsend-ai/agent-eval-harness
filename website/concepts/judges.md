@@ -146,6 +146,14 @@ Every judge is called with a single `outputs` dict, assembled per case by
 `load_case_record`. It reads *all* files from your configured output dirs — no schema
 parsing, so key names come straight from disk. Commonly available keys:
 
+!!! note "Agent judges and file contents"
+    When **every** judge is an [agent judge](../reference/config/judges.md) whose prompt
+    doesn't render `{{ outputs }}` (and no `if:` condition names `outputs`), the harness
+    skips loading file contents into the record, so `files` is empty. Those judges read
+    the artifacts from disk instead: the declared output dirs and `_modified/` are
+    copied into their workspace. Any other judge kind in the run, or an agent judge that
+    renders `{{ outputs }}`, brings file loading back for the whole run.
+
 | Key | Contents |
 | --- | --- |
 | `files` | `{relative_path: text}` for every artifact file (binary files become a `{_binary, path, name}` marker) |
