@@ -261,6 +261,8 @@ def run_prompt_via_runner(
     timeout_s: int = 600,
     max_budget_usd: float = 5.0,
     permissions: Optional[dict] = None,
+    permission_mode: Optional[str] = None,
+    permission_prompts: Optional[str] = None,
     system_prompt: Optional[str] = None,
     workspace: Optional[Path] = None,
     staged_files: Optional[dict[str, bytes]] = None,
@@ -288,7 +290,14 @@ def run_prompt_via_runner(
     # Prompt-only backends (LLM judges, synthetic generation) must not inherit
     # the skill agent's permission_mode. Cursor maps ``plan`` to ``--mode plan``,
     # which makes judges explore the workspace instead of emitting a verdict.
-    cfg.runner.permission_mode = None
+    # A caller may still ask for a specific mode (an agent judge asks for
+    # deny-by-default); that is an explicit argument, never an inheritance.
+    #
+    # Only Claude Code accepts the deny-by-default modes (`manual`); the Cursor
+    # and Codex constructors reject them with ValueError, so a runner-backed
+    # judge on those runners would fail before running. Keep None there.
+    cfg.runner.permission_mode = (
+        permission_mode if cfg.runner.type == "claude-code" else None)
     cfg.runner.settings = dict(cfg.runner.settings or {})
     # Strip `add_dirs`: a prompt-only judge/generation call grades untrusted,
     # model-generated content in an isolated workspace and must not inherit
@@ -301,16 +310,26 @@ def run_prompt_via_runner(
     if hasattr(config, "inputs"):
         cfg.inputs = copy.copy(config.inputs)
         cfg.inputs.tools = []
+    # `Read(**)`, not a bare `Read`: naming the bare tool REMOVES the CLI's
+    # working-directory confinement, so the obvious spelling would widen a
+    # prompt-only call to host-wide reads (see `_judge_tool_policy`).
     cfg.permissions = (permissions if permissions is not None
-                       else {"allow": ["Read", "Grep", "Glob"]})
+                       else {"allow": ["Read(**)"]})
 
     try:
         _stage_prompt_files(workspace_path, staged_files)
+        extra = {}
+        if permission_prompts and cfg.runner.type == "claude-code":
+            # Only Claude Code has the flag, and only it needs it: this is
+            # what makes `cfg.permissions["allow"]` authoritative instead of
+            # merely pre-approving (#239).
+            extra["permission_prompts"] = permission_prompts
         runner = RUNNERS[cfg.runner.type].from_config(
             cfg,
             log_prefix=None,
             permissions=cfg.permissions,
             effort=cfg.runner.effort,
+            **extra,
         )
         result = runner.execute(
             target=None,

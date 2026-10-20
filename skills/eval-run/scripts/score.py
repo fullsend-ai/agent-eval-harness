@@ -1427,6 +1427,7 @@ def _judge_semaphore(cfg):
 def _reset_judge_call_meta():
     _JUDGE_CALL_META.tool_choice_mode = None
     _JUDGE_CALL_META.usage = None
+    _JUDGE_CALL_META.denials = None
 
 
 def _pop_judge_call_meta():
@@ -1584,6 +1585,32 @@ def _pop_judge_usage():
     usage = getattr(_JUDGE_CALL_META, "usage", None)
     _JUDGE_CALL_META.usage = None
     return usage
+
+
+def _record_judge_denials(denials):
+    """Thread-local copy of the tool calls the runner refused for this judge.
+
+    Evidence that the policy did something. Without it a confined judge and an
+    unconfined one produce identical records, which is how #239 went unnoticed:
+    the judge returned a confident verdict and nothing anywhere said it had
+    reached outside its inputs.
+    """
+    _JUDGE_CALL_META.denials = denials or None
+
+
+def _pop_judge_denials():
+    denials = getattr(_JUDGE_CALL_META, "denials", None)
+    _JUDGE_CALL_META.denials = None
+    return denials
+
+
+def _summarize_denials(denials):
+    """`[{tool_name, tool_input}, ...]` -> `{"count": n, "tools": {name: n}}`."""
+    tools = {}
+    for d in denials or []:
+        name = (d or {}).get("tool_name") or "unknown"
+        tools[name] = tools.get(name, 0) + 1
+    return {"count": len(denials or []), "tools": tools}
 
 
 def _sum_usage(records):
@@ -2122,11 +2149,16 @@ _DEFAULT_JUDGE_DENIED_TOOLS = ("Bash", "WebFetch", "WebSearch", "Agent",
 # `Task` and `Agent` are two names for the one sub-agent tool, so comparing
 # them literally would leave `allowed_tools: [Task]` with the default `Agent`
 # deny, and since a deny beats an allow the judge would end up with no
-# sub-agent tool at all. The editors are interchangeable with `Write` on Claude
-# Code, and on Cursor they collapse into its single `Write` permission — so
-# denying a sibling of a tool the author allowed revokes the allow outright
-# (for a Cursor judge, `Edit` in the deny list is `Write(**)`, which would take
-# away the verdict file).
+# sub-agent tool at all.
+#
+# The write family is grouped for a different reason, and NOT because the
+# names are interchangeable: measured on claude 2.1.299, denying bare `Edit`,
+# `MultiEdit` and `NotebookEdit` leaves the Write TOOL working — bare denies
+# are strictly per-tool-name. It is the PARENTHESISED `Edit(<path>)` form that
+# governs Write, and on Cursor every member collapses into its single `Write`
+# permission. So denying a sibling of a tool the author allowed revokes the
+# allow outright: for a Cursor judge, `Edit` in the deny list is `Write(**)`,
+# which would take the verdict file away.
 _TOOL_CAPABILITY_GROUPS = (
     frozenset({"Write", "Edit", "MultiEdit", "NotebookEdit"}),
     frozenset({"Agent", "Task"}),
@@ -2138,12 +2170,51 @@ def _bare_tool_name(rule):
     return str(rule).split("(", 1)[0].strip()
 
 
+# The allow list an agent judge gets when it declares none. Two measured
+# properties of claude 2.1.299 shape it (see `_JUDGE_PERMISSION_MODE`):
+#
+# - A *bare* `Read`/`Grep`/`Glob` allow WIDENS the judge's reach. With no rule
+#   at all the CLI confines reads to the working directory; naming the bare
+#   tool removes that, so the old `[Read, Grep, Glob]` default handed every
+#   judge host-wide reads — another case's workspace, the project's answer key,
+#   ~/.aws. The parenthesised form keeps the confinement.
+# - `Write(...)` is a dead rule name: it matches nothing as an allow or as a
+#   deny. The Write TOOL is governed by `Edit(<path>)` rules, which is how the
+#   judge gets its one legitimate write — the verdict file — and nothing else.
+#
+# Measured over 6 runs at this policy: verdict written 6/6, a prompted write
+# outside ./output/ denied 6/6, a prompted read outside the workspace denied
+# 6/6.
+#
+# `Grep`/`Glob` are absent and nothing is lost by it: the CLI auto-approves
+# the read-only tools INSIDE the working directory whether or not the allow
+# list names them (measured with an allow list of `Edit(output/**)` alone),
+# while a BARE `Grep`/`Glob` allow would remove the confinement that keeps
+# them out of the rest of the host. Naming them could only widen.
+_DEFAULT_JUDGE_ALLOWED_TOOLS = ("Read(**)", "Edit(output/**)")
+
+# Agent judges run deny-by-default. `manual` makes an unlisted tool prompt
+# rather than run, and `--permission-prompts none` turns a prompt nobody can
+# answer into an automatic denial — together they are what make a call the
+# allow list above does not cover a refusal rather than a silent success.
+# The harness's previous posture was no `--permission-mode` flag at all,
+# which is the most permissive setting there is: measured, a judge in that
+# posture wrote outside its workspace and read an out-of-tree file with
+# `permission_denials: []`.
+_JUDGE_PERMISSION_MODE = "manual"
+_JUDGE_PERMISSION_PROMPTS = "none"
+
+
 def _judge_tool_policy(allowed=None, denied=None):
     """Resolve a judge's ``{"allow": [...], "deny": [...]}`` permission policy.
 
     An allow list only pre-approves tools; on a headless Claude Code runner the
-    unlisted ones stay callable, so the deny list is what actually confines a
-    judge (#239). Two rules govern how they interact:
+    unlisted ones stay callable *unless* the judge runs under
+    ``_JUDGE_PERMISSION_MODE``/``_JUDGE_PERMISSION_PROMPTS``, so the deny list
+    is what confines a judge on Cursor, which maps the rules (#239). Codex
+    ignores tool-level permission rules entirely (it warns that they are not
+    enforced) and relies on its ``workspace-write`` filesystem sandbox
+    instead. Two rules govern how the two lists interact:
 
     - With no ``denied`` list, the default applies, minus any tool the author
       explicitly allowed — and minus the rest of that tool's capability group
@@ -2155,7 +2226,7 @@ def _judge_tool_policy(allowed=None, denied=None):
       same tool inverts deny-beats-allow for that rule (CWE-863); whichever way
       they meant it, the written rule is the one that wins.
     """
-    allow = list(allowed) if allowed else ["Read", "Grep", "Glob"]
+    allow = list(allowed) if allowed else list(_DEFAULT_JUDGE_ALLOWED_TOOLS)
     if denied is not None:
         return {"allow": allow, "deny": list(denied)}
     lifted = {_bare_tool_name(t) for t in allow}
@@ -2210,15 +2281,24 @@ def _call_structured_judge_via_runner(prompt, model, feedback_type, config, jc,
         # Cursor CLI has no budget option, so for a Cursor-backed judge this is a
         # best-effort ceiling only and `timeout_s` is the effective bound.
         max_budget_usd=2.0,
-        # Allow only pre-approves; deny is what actually confines a headless
-        # Claude Code judge. Neither list is configurable on this path — it has
-        # no `agent:` block — so the full default deny always applies.
-        permissions=_judge_tool_policy(),
+        # Same deny-by-default posture as an agent judge: the mode is what
+        # makes a call the allow list does not cover a refusal, and the deny
+        # list is defence in depth on runners without one. Neither is
+        # configurable on this path — it has no `agent:` block — so the full
+        # default deny always applies. No write grant either: this contract
+        # takes the verdict from stdout, so the judge has nothing legitimate
+        # to write.
+        permissions=_judge_tool_policy(["Read(**)"]),
+        permission_mode=_JUDGE_PERMISSION_MODE,
+        permission_prompts=_JUDGE_PERMISSION_PROMPTS,
         staged_files=staged_images,
     )
     try:
         usage = _usage_from_run_result(result, model)
         _record_judge_usage(usage)
+        # This path runs deny-by-default too, so its refusals are evidence on
+        # the same footing as an agent judge's.
+        _record_judge_denials(getattr(result, "permission_denials", None))
         if result.exit_code != 0:
             snippet = (result.stderr or result.stdout or extracted_text or "").strip()
             snippet = snippet.replace("\n", " ")[:200]
@@ -2795,6 +2875,7 @@ def score_cases(judges, case_dirs, config, run_id=None, samples_override=None):
             bounds = judge_bounds.get(name)
             modes = []
             usages = []
+            denials = []
 
             def _run_scorer():
                 # One judge call → (value, rationale). The usage record comes
@@ -2818,6 +2899,7 @@ def score_cases(judges, case_dirs, config, run_id=None, samples_override=None):
                     mode = _pop_judge_call_meta()
                     if mode and mode != "function":
                         modes.append(mode)
+                    denials.extend(_pop_judge_denials() or [])
 
             try:
                 if n > 1:
@@ -2845,6 +2927,18 @@ def score_cases(judges, case_dirs, config, run_id=None, samples_override=None):
             if usages and isinstance(case_results.get(name), dict):
                 case_results[name]["usage"] = (usages[0] if len(usages) == 1
                                                else _sum_usage(usages))
+            if denials and isinstance(case_results.get(name), dict):
+                # Evidence that the tool policy did something. A judge that
+                # tried to leave its staged inputs and was stopped reads
+                # identically to one that never tried, unless the refusals
+                # are recorded — which is how #239 went unnoticed.
+                summary = _summarize_denials(denials)
+                case_results[name]["permission_denials"] = summary
+                tools = ", ".join(f"{t} x{n}" for t, n
+                                  in sorted(summary["tools"].items()))
+                print(f"  judge '{name}' on {case_id}: {summary['count']} "
+                      f"tool call(s) refused by policy ({tools})",
+                      file=sys.stderr, flush=True)
         # Annotate step-scoped judges so the summary/report shows the step.
         for jn, sid in judge_steps.items():
             if isinstance(case_results.get(jn), dict):
@@ -3655,12 +3749,22 @@ def _load_agent_judge(jc, config, project_root=None):
                 judge_config.inputs.tools = []
             judge_config.permissions = {k: list(v)
                                         for k, v in judge_permissions.items()}
+            extra = {}
+            if judge_runner.type == "claude-code":
+                # Deny-by-default, and not negotiable from the judge's own
+                # `agent.runner:` block: a judge that could set
+                # `permission_mode: bypassPermissions` would put itself back
+                # in the posture this exists to leave (same reasoning as the
+                # `workspace_mode: repo` rejection above).
+                extra["permission_mode"] = _JUDGE_PERMISSION_MODE
+                extra["permission_prompts"] = _JUDGE_PERMISSION_PROMPTS
             runner = RUNNERS[judge_runner.type].from_config(
                 judge_config,
                 log_prefix=None,
                 permissions={k: list(v)
                              for k, v in judge_permissions.items()},
                 effort=judge_runner.effort,
+                **extra,
             )
             result = runner.execute(
                 target=None,               # prompt mode: no skill wrapper
@@ -3672,6 +3776,7 @@ def _load_agent_judge(jc, config, project_root=None):
             )
             usage = _usage_from_run_result(result, judge_model)
             _record_judge_usage(usage)
+            _record_judge_denials(getattr(result, "permission_denials", None))
             if result.exit_code != 0:
                 snippet = (result.stderr or result.stdout or "").strip()
                 snippet = snippet.replace("\n", " ")[:200]

@@ -361,8 +361,11 @@ class TestLLMRubricJudgeLoading:
         assert "write your verdict" not in captured["prompt"].lower()
         # Read-only means denying the escape hatches too; the allow list by
         # itself does not stop a headless Claude Code judge calling Bash.
+        # `Read(**)` not bare `Read`: the bare form removes the CLI's
+        # working-directory confinement. No write grant — this contract takes
+        # the verdict from stdout, so the judge has nothing to write.
         assert captured["kwargs"]["permissions"] == {
-            "allow": ["Read", "Grep", "Glob"],
+            "allow": ["Read(**)"],
             "deny": ["Bash", "WebFetch", "WebSearch", "Agent",
                      "Edit", "MultiEdit", "NotebookEdit"],
         }

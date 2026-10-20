@@ -1,3 +1,10 @@
+## [1.56.4](https://github.com/fullsend-ai/agent-eval-harness/compare/v1.56.3...v1.56.4) (2026-10-20)
+
+
+### Bug Fixes
+
+* **score:** confine agent judges deny-by-default ([#254](https://github.com/fullsend-ai/agent-eval-harness/issues/254)) ([3a5d3a9](https://github.com/fullsend-ai/agent-eval-harness/commit/3a5d3a9dabc0ec2807d9088750069e049ddf30f5)), closes [#253](https://github.com/fullsend-ai/agent-eval-harness/issues/253) [#240](https://github.com/fullsend-ai/agent-eval-harness/issues/240) [fullsend-ai/agents#1622](https://github.com/fullsend-ai/agents/issues/1622) [#1622](https://github.com/fullsend-ai/agent-eval-harness/issues/1622) [#1622](https://github.com/fullsend-ai/agent-eval-harness/issues/1622) [fullsend-ai/agents#1622](https://github.com/fullsend-ai/agents/issues/1622)
+
 ## [1.56.3](https://github.com/fullsend-ai/agent-eval-harness/compare/v1.56.2...v1.56.3) (2026-10-15)
 
 

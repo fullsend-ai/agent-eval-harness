@@ -25,27 +25,43 @@ from agent_eval.agent import RunResult
 from agent_eval.config import (
     EvalConfig, JudgeConfig, ModelsConfig, OutputConfig, RunnerConfig,
 )
-from score import _DEFAULT_JUDGE_DENIED_TOOLS, load_judges
+from score import (
+    _DEFAULT_JUDGE_ALLOWED_TOOLS, _DEFAULT_JUDGE_DENIED_TOOLS, load_judges,
+)
 
-# Pinned here so a change to the harness default has to be made deliberately,
+# Pinned here so a change to a harness default has to be made deliberately,
 # in one place, and shows up in the diff of a security-relevant test.
 DEFAULT_JUDGE_DENY = ["Bash", "WebFetch", "WebSearch", "Agent",
                       "Edit", "MultiEdit", "NotebookEdit"]
+# `Read(**)` keeps the CLI's working-directory confinement that a BARE `Read`
+# removes; `Edit(output/**)` is the only write the judge needs (and `Edit` is
+# the rule name that governs the Write tool — `Write(...)` matches nothing).
+DEFAULT_JUDGE_ALLOW = ["Read(**)", "Edit(output/**)"]
+# What the default allow list leaves of the default deny list: naming
+# `Edit(output/**)` lifts the whole write capability group, because on Cursor
+# an `Edit` deny is a `Write(**)` deny that would beat the scoped allow. The
+# write tools are governed by that scoped allow plus deny-by-default, not by
+# a name deny.
+DEFAULT_EFFECTIVE_DENY = ["Bash", "WebFetch", "WebSearch", "Agent"]
 
 
 def _without(tools, name):
     return [t for t in tools if t != name]
 
 
-def test_default_deny_list_matches_the_pinned_expectation():
+def test_default_tool_policy_matches_the_pinned_expectation():
     assert list(_DEFAULT_JUDGE_DENIED_TOOLS) == DEFAULT_JUDGE_DENY
+    assert list(_DEFAULT_JUDGE_ALLOWED_TOOLS) == DEFAULT_JUDGE_ALLOW
+    # A bare Read/Grep/Glob allow WIDENS the judge past the working directory,
+    # so none may reappear in the default un-parenthesised.
+    assert not {"Read", "Grep", "Glob"} & set(DEFAULT_JUDGE_ALLOW)
 
 
 # ---------------------------------------------------------------------------
 # Fake runner: records how it was constructed/invoked and produces a verdict
 # ---------------------------------------------------------------------------
 
-def _make_fake_runner(verdicts, *, mode="file", capture=None):
+def _make_fake_runner(verdicts, *, mode="file", capture=None, denials=None):
     """Build a fake runner class for patching into RUNNERS.
 
     Args:
@@ -56,6 +72,8 @@ def _make_fake_runner(verdicts, *, mode="file", capture=None):
               "stdout" -> return the verdict as JSON embedded in stdout.
         capture: optional dict; the fake records from_config/execute details
             into it for assertions.
+        denials: optional list of per-call ``permission_denials`` lists (one
+            per execute() call; ``None`` means the runner reports none).
     """
     state = {"calls": 0}
 
@@ -92,7 +110,9 @@ def _make_fake_runner(verdicts, *, mode="file", capture=None):
             elif verdict is not None and mode == "stdout":
                 stdout = "thinking...\nHere is my verdict:\n" + json.dumps(verdict)
             return RunResult(exit_code=0, stdout=stdout, stderr="",
-                             duration_s=0.01, cost_usd=0.02)
+                             duration_s=0.01, cost_usd=0.02,
+                             permission_denials=(denials[i] if denials
+                                                 and i < len(denials) else None))
 
     FakeRunner._state = state
     return FakeRunner
@@ -313,8 +333,8 @@ class TestRunnerIsolation:
         # (unlisted tools stay callable), so the escape hatches are denied.
         # `Write` is absent on purpose: the verdict contract asks every judge
         # to write ./output/score.json and a bare deny would beat any allow.
-        expected = {"allow": ["Read", "Grep", "Glob"],
-                    "deny": DEFAULT_JUDGE_DENY}
+        expected = {"allow": DEFAULT_JUDGE_ALLOW,
+                    "deny": DEFAULT_EFFECTIVE_DENY}
         assert "Write" not in DEFAULT_JUDGE_DENY
         perms = cap["from_config_overrides"].get("permissions")
         assert perms == expected
@@ -372,8 +392,8 @@ class TestRunnerIsolation:
         judge = _agent_judge(feedback_type="bool", allowed_tools=[])
         self._load_and_run(judge, {"passed": True, "rationale": "x"}, cap)
         perms = cap["from_config_overrides"].get("permissions")
-        assert perms == {"allow": ["Read", "Grep", "Glob"],
-                         "deny": DEFAULT_JUDGE_DENY}
+        assert perms == {"allow": DEFAULT_JUDGE_ALLOW,
+                         "deny": DEFAULT_EFFECTIVE_DENY}
 
     def test_denied_tools_override(self):
         cap = {}
@@ -432,8 +452,8 @@ class TestRunnerIsolation:
         # skill's cli runner / broad perms.
         assert cap["config_runner"].type == "claude-code"
         assert cap["config_permissions"] == {
-            "allow": ["Read", "Grep", "Glob"],
-            "deny": DEFAULT_JUDGE_DENY}
+            "allow": DEFAULT_JUDGE_ALLOW,
+            "deny": DEFAULT_EFFECTIVE_DENY}
         # And the original skill config was not mutated by the shallow copy.
         assert config.runner.type == "cli"
         assert config.permissions == {"allow": ["Read", "Write", "Bash", "Edit"]}
@@ -519,8 +539,12 @@ class TestRunnerBoundary:
         argv = self._run(tmp_path, monkeypatch,
                          _agent_judge(feedback_type="int", score_range=[0, 5]))
         assert self._flag(argv, "--disallowed-tools") == [
-            ",".join(DEFAULT_JUDGE_DENY)]
-        assert self._flag(argv, "--allowed-tools") == ["Read,Grep,Glob"]
+            ",".join(DEFAULT_EFFECTIVE_DENY)]
+        assert self._flag(argv, "--allowed-tools") == [
+            ",".join(DEFAULT_JUDGE_ALLOW)]
+        # Deny-by-default: without these an unlisted tool simply runs (#239).
+        assert self._flag(argv, "--permission-mode") == ["manual"]
+        assert self._flag(argv, "--permission-prompts") == ["none"]
 
     def test_written_deny_list_reaches_the_cli(self, tmp_path, monkeypatch):
         argv = self._run(tmp_path, monkeypatch,
@@ -535,6 +559,38 @@ class TestRunnerBoundary:
                          _agent_judge(feedback_type="int", score_range=[0, 5],
                                       allowed_tools=["Read"], denied_tools=[]))
         assert self._flag(argv, "--disallowed-tools") == []
+        # The mode is not negotiable even when the deny list is emptied: it is
+        # the control, the deny list is defence in depth for other runners.
+        assert self._flag(argv, "--permission-mode") == ["manual"]
+        assert self._flag(argv, "--permission-prompts") == ["none"]
+
+    def test_dot_slash_prefixed_rules_survive_to_argv(self, tmp_path,
+                                                      monkeypatch):
+        """The `./`-prefixed spelling is what a real consumer wrote
+        (fullsend-ai/agents#1622). Verified against claude 2.1.300 that
+        `Edit(./output/**)` permits the verdict write under the forced mode,
+        so the harness must pass it through untouched."""
+        argv = self._run(tmp_path, monkeypatch, _agent_judge(
+            feedback_type="int", score_range=[0, 5],
+            allowed_tools=["Read(./**)", "Grep(./**)", "Glob(./**)",
+                           "Edit(./output/**)"],
+            denied_tools=["Bash", "WebFetch", "WebSearch", "Agent",
+                          "MultiEdit", "NotebookEdit"]))
+        assert self._flag(argv, "--allowed-tools") == [
+            "Read(./**),Grep(./**),Glob(./**),Edit(./output/**)"]
+        assert self._flag(argv, "--disallowed-tools") == [
+            "Bash,WebFetch,WebSearch,Agent,MultiEdit,NotebookEdit"]
+
+    def test_judge_runner_cannot_weaken_the_mode(self, tmp_path, monkeypatch):
+        """A judge able to set `permission_mode: bypassPermissions` in its own
+        `agent.runner:` block would put itself back in the posture this exists
+        to leave — same reasoning as the `workspace_mode: repo` rejection."""
+        judge = _agent_judge(feedback_type="int", score_range=[0, 5])
+        judge.agent["runner"] = RunnerConfig(
+            type="claude-code", permission_mode="bypassPermissions")
+        argv = self._run(tmp_path, monkeypatch, judge)
+        assert self._flag(argv, "--permission-mode") == ["manual"]
+        assert self._flag(argv, "--permission-prompts") == ["none"]
 
 
 # ---------------------------------------------------------------------------
@@ -1135,6 +1191,77 @@ class TestAgentJudgeHardening:
         staged = ws / ".context" / "docs"
         assert (staged / "a.md").exists()
         assert not (staged / "b.md").exists()   # reported, not merged in
+
+    def test_denial_summary_shapes_the_evidence_record(self):
+        """Without a record, a confined judge and an unconfined one produce
+        identical output — which is how #239 went unnoticed."""
+        from score import _summarize_denials
+        assert _summarize_denials([
+            {"tool_name": "Write", "tool_input": {"file_path": "/etc/x"}},
+            {"tool_name": "Write", "tool_input": {"file_path": "/etc/y"}},
+            {"tool_name": "Read"},
+            {},
+        ]) == {"count": 4, "tools": {"Write": 2, "Read": 1, "unknown": 1}}
+        assert _summarize_denials([]) == {"count": 0, "tools": {}}
+        assert _summarize_denials(None) == {"count": 0, "tools": {}}
+
+    def _score_with_denials(self, tmp_path, verdicts, denials, *, cases=1,
+                            samples=1):
+        from score import score_cases
+        judge = _agent_judge(feedback_type="int", score_range=[0, 5],
+                             samples=samples)
+        config = _config(judge)
+        case_dirs = []
+        for i in range(cases):
+            d = tmp_path / f"case-{i + 1:03d}"
+            d.mkdir()
+            case_dirs.append(d)
+        fake = _make_fake_runner(verdicts, denials=denials)
+        with _patched_runners(fake):
+            return score_cases(load_judges(config), case_dirs, config)["per_case"]
+
+    def test_runner_denials_reach_the_scored_case_and_stderr(self, tmp_path,
+                                                             capsys):
+        """`RunResult.permission_denials` must survive the thread-local
+        handoff into the per-case result, not just `_summarize_denials`."""
+        per_case = self._score_with_denials(
+            tmp_path, {"score": 1, "rationale": "x"},
+            [[{"tool_name": "Bash"}, {"tool_name": "Write"}]])
+        cell = per_case["case-001"]["arch_score"]
+        assert cell["permission_denials"] == {
+            "count": 2, "tools": {"Bash": 1, "Write": 1}}
+        assert "2 tool call(s) refused by policy" in capsys.readouterr().err
+
+    def test_denials_accumulate_across_samples(self, tmp_path):
+        per_case = self._score_with_denials(
+            tmp_path, [{"score": 1, "rationale": "a"},
+                       {"score": 1, "rationale": "b"}],
+            [[{"tool_name": "Bash"}], [{"tool_name": "Bash"},
+                                       {"tool_name": "WebFetch"}]],
+            samples=2)
+        assert per_case["case-001"]["arch_score"]["permission_denials"] == {
+            "count": 3, "tools": {"Bash": 2, "WebFetch": 1}}
+
+    def test_denials_are_kept_when_the_judge_errors(self, tmp_path):
+        """A judge that was refused and then produced no verdict is the case
+        where the evidence matters most."""
+        per_case = self._score_with_denials(
+            tmp_path, None, [[{"tool_name": "Bash"}]])
+        cell = per_case["case-001"]["arch_score"]
+        assert cell["value"] is None and "error" in cell
+        assert cell["permission_denials"] == {"count": 1, "tools": {"Bash": 1}}
+
+    def test_denials_do_not_leak_into_a_later_case(self, tmp_path):
+        per_case = self._score_with_denials(
+            tmp_path, {"score": 1, "rationale": "x"},
+            [[{"tool_name": "Bash"}], None], cases=2)
+        # Cases are scored on a thread pool, so which case makes the first
+        # runner call is not fixed: exactly one case carries the refusal.
+        with_denials = [c for c in per_case.values()
+                        if "permission_denials" in c["arch_score"]]
+        assert len(with_denials) == 1
+        assert with_denials[0]["arch_score"]["permission_denials"] == {
+            "count": 1, "tools": {"Bash": 1}}
 
     def test_staging_problem_report_is_bounded(self):
         from score import _format_staging_problems

@@ -285,3 +285,43 @@ def test_reap_drain_is_bounded_when_a_descendant_holds_stdout():
     assert any("gen-fake-drain" in line for line in lines)
     assert child.returncode is not None
 
+
+
+def test_permission_prompts_is_validated_and_emitted(tmp_path, monkeypatch):
+    """`--permission-prompts none` is the flag that makes an allow list
+    authoritative under `--print`; a typo must not silently fall back to the
+    permissive default."""
+    import os
+    import pytest
+    from agent_eval.agent.claude_code import ClaudeCodeRunner
+
+    with pytest.raises(ValueError, match="Invalid permission_prompts 'nope'"):
+        ClaudeCodeRunner(permission_prompts="nope")
+    with pytest.raises(ValueError, match="Invalid permission_prompts"):
+        ClaudeCodeRunner(permission_prompts=1)
+    # Valid values construct; None leaves the flag off entirely.
+    for value in ("host", "none", None):
+        ClaudeCodeRunner(permission_prompts=value)
+
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    stub = bindir / "claude"
+    stub.write_text(
+        "#!/bin/sh\n"
+        "printf '%s\\0' \"$@\" > argv.txt\n"
+        "cat > /dev/null\n"
+        "printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\","
+        "\"is_error\":false,\"num_turns\":1,\"total_cost_usd\":0.0,"
+        "\"result\":\"ok\"}'\n")
+    stub.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bindir}:{os.environ['PATH']}")
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    runner = ClaudeCodeRunner(permission_mode="manual",
+                              permission_prompts="none")
+    runner.execute(target=None, args="hi", workspace=ws, model="m",
+                   timeout_s=60)
+    argv = (ws / "argv.txt").read_text().split("\0")[:-1]
+    assert "--permission-prompts" in argv
+    assert argv[argv.index("--permission-prompts") + 1] == "none"
+    assert argv[argv.index("--permission-mode") + 1] == "manual"

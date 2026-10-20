@@ -4,6 +4,15 @@
 
 Proposed
 
+> **Superseded in part (#253/#254).** This is a historical design spec. Every
+> `allowed_tools: [Read, Grep, Glob]` below (lines 97, 164, 234, 247, 292) — and the
+> "read-only default" it describes — no longer holds. The default is now
+> `[Read(**), Edit(output/**)]` under a deny-by-default permission mode, and a
+> **bare** `Read`/`Grep`/`Glob` allow is a *widening*: it removes the CLI's
+> working-directory confinement and grants host-wide reads. Do not copy the bare
+> list into a config; see `website/reference/config/judges.md` for the current
+> behaviour.
+
 ## Problem
 
 Judges in the harness come in four shapes today, and all of the *reasoning* ones are

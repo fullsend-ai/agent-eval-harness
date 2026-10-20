@@ -1032,17 +1032,93 @@ _KNOWN_TOOL_NAMES = frozenset({
 })
 
 
-def _warn_unknown_tool_names(rules, context):
+# Tools whose BARE name, written as an ALLOW rule, removes the CLI's
+# working-directory confinement rather than merely pre-approving the tool.
+# Measured on claude 2.1.300 under the agent judge's deny-by-default posture
+# (`--permission-mode manual --permission-prompts none`), 3 runs each:
+#
+#   allow [Read(./**), Grep, Glob, Edit(./output/**)]
+#     Read  of a file outside the workspace -> DENIED  3/3
+#     Grep  of the same file                -> ITS CONTENT RETURNED  3/3
+#     Glob  outside the workspace           -> ITS PATHS RETURNED    3/3
+#
+# One bare word silently undoes the path scoping its neighbours spell out,
+# and `permission_denials` stays empty, so nothing downstream notices.
+#
+# Dropping the bare rule costs nothing: with Read, Grep and Glob absent from
+# the allow list entirely, all three still work INSIDE the workspace (3/3
+# each) — the CLI auto-approves read-only tools within the working directory
+# — while the same calls outside are denied (3/3). A bare rule is therefore
+# never load-bearing for a confined judge; it is only ever a widening, which
+# is what makes this warning safe to raise on sight.
+#
+# Why a warning and not a default deny: a deny cannot close this. A
+# `Grep(<path>)` deny does NOT beat a bare `Grep` allow (content returned
+# 3/3), and the one deny broad enough to matter, `Read(//tmp/**)`, breaks the
+# judge's own staged workspace, which is a `mkdtemp` under /tmp in a
+# container (in-workspace read denied 3/3).
+_CONFINEMENT_WIDENING_TOOLS = frozenset({"Read", "Grep", "Glob"})
+
+# The write family has the same problem and the opposite remedy. Under the
+# judge's deny-by-default posture a bare `Write` or `Edit` allow grants writes
+# to any path on the host — the shape every agent judge had before the default
+# became `Edit(output/**)`. Unlike the read family these are NOT redundant: a
+# judge with no write rule cannot deliver its verdict at all. So the advice is
+# "scope it", never "drop it". `Write(<path>)` is not the scoping to reach for
+# — see the separate warning below; on Claude Code the Write tool follows
+# `Edit(<path>)`.
+_UNSCOPED_WRITE_TOOLS = frozenset({"Write", "Edit", "MultiEdit", "NotebookEdit"})
+
+
+def _warn_unknown_tool_names(rules, context, is_allow=False):
     """Warn for a permission rule whose tool name is not one we recognize.
 
     Matches on the bare name, so a scoped rule like ``Bash(pytest:*)`` is
     checked as ``Bash``. ``mcp__*`` rules name a server, not a tool, and are
     skipped.
+
+    ``is_allow`` marks an allow list, where a bare
+    ``_CONFINEMENT_WIDENING_TOOLS`` entry also warns. Only an allow list: a
+    bare ``Grep`` in a DENY list is the normal, correct way to remove the
+    tool.
     """
     for rule in rules:
         if not isinstance(rule, str):
             continue
         name = rule.split("(", 1)[0].strip()
+        if is_allow and "(" not in rule and name in _CONFINEMENT_WIDENING_TOOLS:
+            # See `_CONFINEMENT_WIDENING_TOOLS`. CWE-1188: the author believes
+            # the scoped rules next to this one confine the judge, and this
+            # one quietly opts out of the confinement for its own tool.
+            _warn(f"{context} entry {rule!r}: a bare '{name}' allow removes "
+                  "the Claude Code working-directory confinement, so the "
+                  f"judge can {name.lower()} any path on the host — another "
+                  "case's workspace, the project's answer key, ~/.aws — and "
+                  "the escape is not recorded in 'permission_denials'. Scope "
+                  f"it as '{name}(./**)', or drop it: Read, Grep and Glob all "
+                  "work inside the staged workspace with no allow rule at all.")
+            continue
+        if is_allow and "(" not in rule and name in _UNSCOPED_WRITE_TOOLS:
+            # See `_UNSCOPED_WRITE_TOOLS`. Scope, do not drop: the verdict
+            # file needs a write rule.
+            _warn(f"{context} entry {rule!r}: a bare '{name}' allow lets the "
+                  "judge write to any path on the host, not just its staged "
+                  "workspace. Scope it to the verdict directory — "
+                  "'Edit(output/**)' — which is the form the Write tool "
+                  "actually follows on Claude Code.")
+            continue
+        if name == "Write" and "(" in rule:
+            # The one rule the harness KNOWS the runner drops on the floor:
+            # on Claude Code a path-scoped `Write(...)` matches nothing, as an
+            # allow or as a deny — the Write tool is governed by `Edit(path)`.
+            # An author writing `denied_tools: ["Write(/etc/**)"]` believes
+            # they confined the judge and did not (CWE-1188). A warning, not
+            # an error: Cursor does map the rule.
+            _warn(f"{context} entry {rule!r}: on the Claude Code runner a "
+                  "path-scoped 'Write(...)' rule matches nothing, as an allow "
+                  "or as a deny — the Write tool is governed by 'Edit(<path>)' "
+                  "rules. Use 'Edit(...)' unless this judge runs on Cursor.")
+            continue
         if not name or name.startswith("mcp__") or name in _KNOWN_TOOL_NAMES:
             continue
         near = next((k for k in sorted(_KNOWN_TOOL_NAMES)
@@ -1052,6 +1128,32 @@ def _warn_unknown_tool_names(rules, context):
         _warn(f"{context} entry {rule!r} is not a known tool name{hint}. "
               "A runner silently ignores a rule it cannot map, so this one "
               "has no effect.")
+
+
+def _warn_allow_without_write_rule(rules, context):
+    """Warn when a judge's written allow list can't grant the verdict write.
+
+    Under the agent judge's forced deny-by-default mode (claude-code only) the
+    Write tool is governed by ``Edit(<path>)`` rules, so an allow list with no
+    write rule (e.g. the formerly documented ``[Read, Grep, Glob]``) cannot
+    create ``./output/score.json``. The judge degrades rather than breaks —
+    the stdout fallback still yields a verdict, at roughly 2-3x the turns and
+    cost. The written list is the author's, so it is never rewritten: warn and
+    name the fix. A path-scoped ``Write(...)`` rule is dead on this runner and
+    does not count as a write rule.
+    """
+    for rule in rules:
+        if not isinstance(rule, str):
+            continue
+        name = rule.split("(", 1)[0].strip()
+        if name in _UNSCOPED_WRITE_TOOLS and not (
+                name == "Write" and "(" in rule):
+            return
+    _warn(f"{context} has no write rule, so under the deny-by-default mode "
+          "the judge cannot create ./output/score.json and falls back to "
+          "returning the verdict on stdout, at roughly 2-3x the turns and "
+          "cost. Add 'Edit(output/**)' to allow just the verdict file — the "
+          "Write tool follows 'Edit(<path>)' rules, not 'Write(<path>)'.")
 
 
 def _env_var_name(value, context):
@@ -2306,7 +2408,17 @@ class EvalConfig:
                     )
                 _warn_unknown_tool_names(
                     tools_val, f"Judge '{j.get('name', '')}': "
-                               f"'agent.{tools_key}'")
+                               f"'agent.{tools_key}'",
+                    is_allow=(tools_key == "allowed_tools"))
+                # The forced deny-by-default mode is claude-code-only; a judge
+                # on another runner never hits it.
+                judge_runner = agent_val.get("runner")
+                if (tools_key == "allowed_tools" and tools_val
+                        and (judge_runner is None
+                             or judge_runner.type == "claude-code")):
+                    _warn_allow_without_write_rule(
+                        tools_val, f"Judge '{j.get('name', '')}': "
+                                   f"'agent.{tools_key}'")
             score_range_val = j.get("score_range")
             if score_range_val is not None:
                 jname = j.get("name", "")

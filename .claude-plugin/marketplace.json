@@ -9,7 +9,7 @@
   "plugins": [
     {
       "name": "agent-eval-harness",
-      "version": "1.56.3",
+      "version": "1.56.4",
       "description": "Agent and skill evaluation harness with MLflow integration",
       "author": {
         "name": "fullsend-ai"

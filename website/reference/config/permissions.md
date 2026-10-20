@@ -34,7 +34,7 @@ permissions:
 
 | Form | Shape | Use for |
 | --- | --- | --- |
-| **Simple** | a string — a tool name or a pre-formed pattern (`"Skill"`, `"mcp__*"`, `"Write(artifacts/**)"`) | Coarse tool allow/deny; passed through **as-is**. |
+| **Simple** | a string — a tool name or a pre-formed pattern (`"Skill"`, `"mcp__*"`, `"Edit(artifacts/**)"`) | Coarse tool allow/deny; passed through **as-is**. |
 | **Path-based** | a dict `{ path: <dir-or-file>, tools: [<tool>, …] }` | Scoping file tools to (or away from) a directory — e.g. keeping a prompt-mode agent out of the answer key. |
 
 You can mix both forms in the same list. The presence of *any* dict switches the
@@ -178,7 +178,7 @@ flowchart TD
     {
       "permissions": {
         "deny": ["Read(eval/**)", "Edit(eval/**)"],
-        "allow": ["Write(artifacts/**)"]
+        "allow": ["Edit(artifacts/**)"]
       }
     }
     ```

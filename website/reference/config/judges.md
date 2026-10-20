@@ -303,8 +303,8 @@ Every sub-key is optional.
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
 | `runner` | mapping | `{type: claude-code}` | Per-judge runner block, parsed exactly like the top-level [`runner`](runner.md) (`type`, `effort`, `command`, `env`, …). Lets the judge use a different runner/model stack than the skill-under-test. |
-| `allowed_tools` | list | `[Read, Grep, Glob]` | Tool allowlist for the judge. Read-only by default; add `Bash` only under sandboxing (see below). An allow rule pre-approves a tool, it does not confine it — see the warning below. `[]` is treated as unset. |
-| `denied_tools` | list | `[Bash, WebFetch, WebSearch, Agent, Edit, MultiEdit, NotebookEdit]` | Tools the judge may never use. Needed because an allow list only pre-approves tools on the Claude Code runner; unlisted ones stay callable. **The default** has anything `allowed_tools` names subtracted from it — along with the rest of that tool's capability group (`Write`/`Edit`/`MultiEdit`/`NotebookEdit`, and `Agent`/`Task`) — since a deny beats an allow and `Bash` left denied would take away the tool `allowed_tools: [Bash(pytest:*)]` asks for; **a list you write** replaces the default outright, with no subtraction. `[]` disables it entirely. `Write` is absent on purpose — see the note below. |
+| `allowed_tools` | list | `[Read(**), Edit(output/**)]` | Tool allowlist for the judge: read anywhere in the staged workspace, write nothing but the verdict file. Enforced on the Claude Code runner, which runs judges deny-by-default: a call reaching outside the workspace, or any write, shell or network call the policy does not cover, is refused. The read-only tools still work inside the workspace whether or not the list names them. Use `Read(**)` not bare `Read` (bare *widens* past the working directory) and `Edit(<path>)` not `Write(<path>)` (the latter matches nothing). Add `Bash` only under sandboxing (see below). `[]` is treated as unset. |
+| `denied_tools` | list | `[Bash, WebFetch, WebSearch, Agent, Edit, MultiEdit, NotebookEdit]` | Tools the judge may never use: defence in depth behind the deny-by-default mode, and the tool-level control on Cursor, which maps the rules (Codex ignores tool-level rules entirely and relies on its `workspace-write` filesystem sandbox). Keep `Bash` denied — merely unlisted it is weaker, since a built-in classifier still auto-approves `cat`/`grep`/`echo`, while a deny de-registers the tool. **The default** has anything `allowed_tools` names subtracted from it — along with the rest of that tool's capability group (`Write`/`Edit`/`MultiEdit`/`NotebookEdit`, and `Agent`/`Task`) — since a deny beats an allow and `Bash` left denied would take away the tool `allowed_tools: [Bash(pytest:*)]` asks for; **a list you write** replaces the default outright, with no subtraction. `[]` disables it entirely. `Write` is absent on purpose — see the note below. |
 | `context` | list of paths | `[]` | Dirs/files copied under `./.context/<name>` for the agent to consult (a copy, so nothing the judge writes reaches the originals). Distinct from the top-level `context:`, which is appended to the prompt text. |
 | `inputs` | list | all output dirs | Which collected output dirs (by `outputs[].path` name) to stage as files. Use `[.]` to stage everything. |
 | `timeout` | int | `execution.timeout` or `600` | Per-run wall-clock budget in seconds. |
@@ -330,27 +330,63 @@ Per case, the harness:
    LLM judges get), reads the verdict, and tears the workspace down. Runner cost/tokens
    are attributed to the judge.
 
-!!! warning "What the deny list does and does not cover"
+!!! info "How a judge is actually confined"
 
-    A deny rule confines a judge. An allow rule does **not**: on a headless Claude
-    Code runner a call with no matching allow rule is not refused, it simply runs
-    (that is [#239](https://github.com/opendatahub-io/agent-eval-harness/issues/239)).
-    Scoping an allow rule — `Write(./output/**)` — documents intent and is the right
-    thing to write, but do not count it as enforcement.
+    On the **Claude Code** runner an agent judge runs deny-by-default:
+    `--permission-mode manual --permission-prompts none`. `manual` turns an unlisted
+    tool call into a permission prompt, and `--print` has nobody to answer one, so it
+    is refused. That is what gives `allowed_tools` teeth. Without it an
+    unlisted tool simply runs
+    ([#239](https://github.com/opendatahub-io/agent-eval-harness/issues/239)) — the
+    harness's previous posture passed no `--permission-mode` at all, which is the
+    most permissive setting there is. The mode is forced for judges and cannot be
+    weakened from `agent.runner:`.
 
-    So two gaps remain open by design, and the judge's *file* reach is not confined:
+    Three rule-syntax traps, all measured on claude 2.1.299 — they are why the
+    default is `[Read(**), Edit(output/**)]` and not the more obvious spelling:
 
-    - **`Write` is not denied by default**, because the verdict contract asks every
-      judge to write `./output/score.json` and a bare `Write` deny would beat any
-      allow. Allowing any write tool also lifts the default `Edit`/`MultiEdit`/
-      `NotebookEdit` denies, since they are one capability (and a single `Write`
-      permission on Cursor).
-    - **`Read` is not scoped**, so a bare `Read` reaches absolute paths.
+    - A **bare** `Read`, `Grep` or `Glob` allow *widens* the judge. With no rule the
+      CLI already confines reads to the working directory; naming the bare tool
+      removes that, so the old `[Read, Grep, Glob]` default granted host-wide reads —
+      another case's workspace, the project's answer key, `~/.aws`. The parenthesised
+      form keeps the confinement.
+    - **`Write(<path>)` matches nothing**, as an allow or as a deny. The Write tool is
+      governed by `Edit(<path>)` rules. Scope writes with `Edit`, never `Write`.
+    - `Grep` and `Glob` may not exist as tools in a given CLI/model session, so a rule
+      naming them can be addressed to nothing.
 
-    A judge that grades material you do not control — an agent's diff, a scraped
-    page, a third-party repo — should therefore run on a runner that sandboxes the
-    filesystem, the same advice as for `Bash` below. The deny list buys you the
-    shell, the network and sub-agents; it does not make the judge a sealed box.
+    The two flags require a Claude Code CLI that has them — verified present on 2.1.289
+    and every build since. On an older CLI the judge fails with `unknown option`
+    rather than running unconfined.
+
+    **Upgrading.** A written `allowed_tools` list with no write rule — the
+    previously documented `[Read, Grep, Glob]` is exactly that shape — can no longer
+    create `./output/score.json` under the forced deny-by-default mode. The judge
+    degrades rather than breaks: the stdout fallback still produces a verdict, at
+    roughly 2-3x the turns and cost. The harness warns at config load for a judge on
+    the `claude-code` runner (or with no judge runner set) and does **not** rewrite
+    your list, since a written rule is yours. To fix it, add `Edit(output/**)` — the
+    Write tool follows `Edit(<path>)` rules, not `Write(<path>)`.
+
+    `denied_tools` still applies, as defence in depth and because it is the
+    tool-level control on Cursor, which maps the rules. Codex ignores tool-level
+    rules entirely and relies on its `workspace-write` filesystem sandbox. `Bash` in particular must stay
+    denied: merely *unlisted*, a built-in classifier still auto-approves a set of
+    commands (`cat`, `grep`, `echo`, `whoami` …), and a judge denied `Grep` has been
+    observed routing around it via `Bash grep`. A deny de-registers the tool
+    outright, which is strictly stronger than leaving it unlisted.
+
+    Refused calls are recorded per judge per case as `permission_denials`
+    (`{count, tools}`) in `summary.yaml` and printed to stderr during the run, so a
+    policy that fired leaves evidence.
+
+!!! warning "What this still does not buy you"
+
+    Reads are confined to the working directory, not to a subdirectory of it — read
+    scoping below the workspace is not expressible in this CLI version. And a judge
+    grading material you do not control is still running untrusted text through a
+    model holding file tools. For that, sandbox the runner itself (no network, clean
+    credentials, path confinement), the same advice as for `Bash` below.
 
     Staging `agent.context` reports what it could not copy. A **dangling link, a
     socket, a `latest -> .` loop or a link resolving outside the entry** is skipped
@@ -392,7 +428,7 @@ automatically, so rubric authors write only the criteria.
 The judge reads model-generated, **untrusted** case artifacts, so isolation is enforced:
 
 !!! warning "Enable `Bash` only on a sandboxed runner"
-    The default `allowed_tools` is read-only (`[Read, Grep, Glob]`). Add `Bash` **only**
+    The default `allowed_tools` is `[Read(**), Edit(output/**)]`. Add `Bash` **only**
     on a runner with OS-level sandboxing — no network, cleaned host credentials, path
     confinement — because the judge executes against untrusted material (CWE-78/CWE-200).
 
@@ -414,7 +450,7 @@ judges:
     samples: 3
     agent:
       runner: { type: claude-code }              # optional; defaults to claude-code
-      allowed_tools: [Read, Grep, Glob]          # read-only default
+      allowed_tools: [Read(**), Edit(output/**)] # the default; see above
       context: [.context/architecture-context]   # copied under ./.context/
       inputs: [strat-tasks]                       # which output dirs to stage (default: all)
 ```

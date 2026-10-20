@@ -99,6 +99,60 @@ runner:
     assert captured["settings"]["mode"] == "ask"
 
 
+@pytest.mark.parametrize("runner_type", ["cursor", "codex"])
+def test_deny_by_default_mode_does_not_reach_runners_that_reject_it(
+        tmp_path, monkeypatch, runner_type):
+    """Cursor and Codex raise ValueError on `permission_mode='manual'`. Go
+    through their real `from_config` so the constructor validation runs
+    (a mocked `run_prompt_via_runner` would hide it)."""
+    import agent_eval.agent.cursor_agent as cursor_agent
+    from agent_eval.agent.codex import CodexRunner
+    from agent_eval.agent.cursor_agent import CursorAgentRunner
+
+    monkeypatch.setattr(cursor_agent, "_discover_cursor_agent",
+                        lambda configured=None: "cursor-agent")
+    seen = {}
+    runner_cls = CursorAgentRunner if runner_type == "cursor" else CodexRunner
+
+    def fake_execute(self, **kwargs):
+        seen["permission_mode"] = self._permission_mode
+        return RunResult(exit_code=0, stdout='{"score": 5}', stderr="",
+                         duration_s=0)
+
+    monkeypatch.setattr(runner_cls, "execute", fake_execute)
+
+    cfg = EvalConfig.from_yaml(_write_config(tmp_path, f"""
+name: t
+execution:
+  prompt: "{{{{ input.prompt }}}}"
+runner:
+  type: {runner_type}
+"""))
+
+    result, _, _ = run_prompt_via_runner(
+        cfg, "score this", "gpt-5.4-medium", workspace=tmp_path,
+        permission_mode="manual", permission_prompts="none")
+
+    assert result.exit_code == 0
+    assert seen["permission_mode"] is None
+
+
+def test_deny_by_default_mode_is_applied_on_claude_code(tmp_path, monkeypatch):
+    class _Capture(_FakeRunner):
+        pass
+
+    monkeypatch.setitem(RUNNERS, "claude-code", _Capture)
+    _Capture.captured = None
+    cfg = EvalConfig.from_yaml(_write_config(tmp_path, """
+name: t
+execution:
+  prompt: "{{ input.prompt }}"
+"""))
+    run_prompt_via_runner(cfg, "score this", "claude-sonnet-4-6",
+                          workspace=tmp_path, permission_mode="manual")
+    assert _Capture.captured["permission_mode"] == "manual"
+
+
 def test_extract_runner_text_prefers_cursor_terminal_result():
     stdout = "\n".join([
         '{"type":"assistant","session_id":"s","message":{"content":[{"type":"text","text":"{\\"sc"}]}}',

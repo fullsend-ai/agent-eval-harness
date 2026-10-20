@@ -46,7 +46,7 @@ Not every runner reads every field. The matrix below shows where each field land
 | --- | --- | :---: | :---: | :---: | :---: | :---: |
 | `type` | `str` | discriminator | discriminator | discriminator | discriminator | discriminator |
 | `effort` | `str` (enum) | `--effort` flag | appended to a base `--model` as `[effort=…]`; existing Cursor effort variants pass through | `model_reasoning_effort` | `{effort}` placeholder | — |
-| `permission_mode` | `str` (enum) | `--permission-mode` flag | `plan` → `--mode plan`; `bypassPermissions` → `--force` | mapped to Codex sandbox mode | — | — |
+| `permission_mode` | `str` (enum) | `--permission-mode` flag (also accepts `manual`, claude-code-only) | `plan` → `--mode plan`; `bypassPermissions` → `--force` | mapped to Codex sandbox mode | — | — |
 | `settings` | `dict` | merged into workspace `.claude/settings.json` | `binary` only; other keys warn and are ignored | `-c` config overrides for `codex exec` | — | connection settings (see below) |
 | `plugin_dirs` | `list[str]` | one `--plugin-dir` per entry (workspace-staged copy for out-of-workspace paths) | one `--plugin-dir` per entry (workspace-staged copy for out-of-workspace paths) | skills copied into `.agents/skills` | — | — |
 | `env` | `dict` | injected on the safe allowlist | injected into the subprocess env | injected on the safe allowlist | — (uses `execution.env`) | — |
@@ -101,8 +101,14 @@ isolated per-case workspaces where `.claude/settings.json` `permissions.allow` /
 `additionalDirectories` are trust-gated and the trust dialog can't appear in
 headless mode. One of:
 
-| Value | `default` | `acceptEdits` | `plan` | `auto` | `dontAsk` | `bypassPermissions` |
-| --- | --- | --- | --- | --- | --- | --- |
+| Value | `default` | `acceptEdits` | `plan` | `auto` | `dontAsk` | `bypassPermissions` | `manual` |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+
+`manual` turns every unlisted tool call into a permission prompt. It is
+**claude-code-only**: Cursor and Codex reject it. Agent judges are forced onto it
+(together with `--permission-prompts none`, so a prompt nobody can answer is an
+automatic denial), which is what makes a judge's `allowed_tools` authoritative —
+see [judges](judges.md).
 
 An invalid value raises at construction time for `claude-code` and `codex`; `cli` and
 `responses-api` ignore the field. For a prompt-free, deny-by-default headless
@@ -126,7 +132,7 @@ so judges and synthetic generation are not launched in plan mode.
 ```yaml
 runner:
   type: claude-code
-  permission_mode: dontAsk   # default | acceptEdits | plan | auto | dontAsk | bypassPermissions
+  permission_mode: dontAsk   # default | acceptEdits | plan | auto | dontAsk | bypassPermissions | manual (claude-code only)
 ```
 
 ### `settings`
