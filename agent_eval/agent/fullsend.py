@@ -31,7 +31,8 @@ from typing import Optional
 from agent_eval.config import workspace_source_roots
 from .base import EvalRunner, RunResult
 from .stream_capture import (
-    extract_usage, message_ids_for_run, per_model_turns as combine_per_model_turns,
+    count_subagent_turns, extract_usage, message_ids_for_run,
+    per_model_turns as combine_per_model_turns,
 )
 
 _print_lock = threading.Lock()
@@ -285,6 +286,11 @@ class FullsendRunner(EvalRunner):
         (token_usage, cost_usd, num_turns, stream_ids, models_seen,
          per_model_usage, stream_ids_by_model) = extract_usage(stdout.splitlines())
         subagent_dir = invocation_subagents
+        # Transcript-only subagent turns count toward num_turns too (a valid
+        # metrics.json num_turns still overrides below).
+        subagent_turns = count_subagent_turns(subagent_dir, already_seen=stream_ids)
+        if subagent_turns:
+            num_turns = (num_turns or 0) + subagent_turns
         per_model_turns = combine_per_model_turns(subagent_dir, stream_ids_by_model)
         message_ids = message_ids_for_run(stream_ids, subagent_dir)
 
@@ -519,7 +525,9 @@ def _copy_subagent_transcripts(src: Path, dest: Path, workspace: Path) -> None:
     for f in sorted(src.glob("*-agent-*.jsonl")):
         if f.is_file() and not f.is_symlink():
             target = dest / f.name
-            if target.is_symlink():
+            # An existing destination must be a regular file: a symlink or a
+            # directory (copy2 would write inside it, following a nested link).
+            if target.is_symlink() or (target.exists() and not target.is_file()):
                 continue
             dest.mkdir(parents=True, exist_ok=True)
             shutil.copy2(f, target)

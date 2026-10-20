@@ -409,6 +409,24 @@ class TestFullsendExecute:
         assert (ws / "artifacts" / "report-1.md").read_text() == "report 1"
         assert (ws / "subagents" / "s1-agent-a1.jsonl").is_file()
 
+    def test_missing_metrics_counts_transcript_only_subagent_turns(self, tmp_path):
+        ws = _workspace(tmp_path)
+        out = ws / "output" / "fullsend"
+        it = out / "run-1" / "fs-sandbox-1" / "iteration-1"
+        (it / "transcripts").mkdir(parents=True)
+        (it / "output.jsonl").write_text(json.dumps(
+            {"type": "assistant", "message": {
+                "id": "msg_1", "model": "claude-opus-4-6", "role": "assistant",
+                "content": [{"type": "text", "text": "Working"}],
+                "usage": {"input_tokens": 10, "output_tokens": 5}}}) + "\n")
+        (it / "transcripts" / "s1-agent-a1.jsonl").write_text(json.dumps(
+            {"message": {"role": "assistant", "id": "msg_sub_1",
+                         "model": "claude-haiku-4-5"}}) + "\n")
+        result = _runner(tmp_path)._map_run_dir(
+            out / "run-1", ws, exit_code=-1, stderr="", duration=1.0)
+        assert result.per_model_turns == {"claude-opus-4-6": 1, "claude-haiku-4-5": 1}
+        assert result.num_turns == 2
+
     def test_missing_binary(self, tmp_path):
         ws = _workspace(tmp_path)
         result = _runner(tmp_path, binary=str(tmp_path / "no-such-fullsend")).execute(
@@ -545,6 +563,17 @@ class TestTranscriptCopyContainment:
         victim = tmp_path / "victim"
         victim.write_text("keep")
         (ws / "subagents" / "s1-agent-a1.jsonl").symlink_to(victim)
+        fullsend_mod._copy_subagent_transcripts(src, ws / "subagents", ws)
+        assert victim.read_text() == "keep"
+
+    def test_destination_directory_with_nested_symlink_not_followed(self, tmp_path):
+        src = self._transcripts(tmp_path)
+        ws = tmp_path / "ws"
+        dest_dir = ws / "subagents" / "s1-agent-a1.jsonl"
+        dest_dir.mkdir(parents=True)
+        victim = tmp_path / "victim"
+        victim.write_text("keep")
+        (dest_dir / "s1-agent-a1.jsonl").symlink_to(victim)
         fullsend_mod._copy_subagent_transcripts(src, ws / "subagents", ws)
         assert victim.read_text() == "keep"
 
