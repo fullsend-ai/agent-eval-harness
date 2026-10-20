@@ -74,7 +74,7 @@ are just two MCP files:
 
 Two judges score each run — an objective gate plus a quality rubric (the
 LLM judge's prompt is lightly tidied from the committed file: a numeric judge
-commits its verdict through the harness's `submit_score` tool, so the prompt
+commits its verdict through the verdict schema — a structured output, or the forced `submit_score` tool — so the prompt
 needs no "respond with JSON" instructions, and iterating `outputs.files` keeps
 each collected file fenced and labelled instead of dumping a dict):
 
