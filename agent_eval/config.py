@@ -773,7 +773,7 @@ def _parse_runner_config(runner_raw, *, context="runner"):
     # Local import: agent_eval.agent imports this module.
     from agent_eval.agent import RUNNERS
     runner_type = runner_raw.get("type", "claude-code")
-    if runner_type not in RUNNERS:
+    if not isinstance(runner_type, str) or runner_type not in RUNNERS:
         raise ValueError(
             f"{context}.type: unknown runner type {runner_type!r}; "
             f"expected one of {sorted(RUNNERS)}")

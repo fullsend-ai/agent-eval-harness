@@ -10,7 +10,9 @@ The run directory fullsend writes (``<output_dir>/<sandbox>/…``) is mapped
 back onto :class:`RunResult`: ``metrics.json`` for the headline numbers, the
 last iteration's ``output.jsonl`` (Claude Code stream-json) as ``stdout`` so
 events, traces and reasoning judges work unchanged, and the iteration's
-subagent transcripts copied into ``<workspace>/subagents/``.
+subagent transcripts copied into ``<workspace>/subagents/``. Each configured
+``outputs[*].path`` that fullsend exported under ``iteration-N/output/`` is
+copied back to the same workspace-relative path for ``collect.py``.
 """
 
 import json
@@ -26,6 +28,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
+from ..config import workspace_source_roots
 from .base import EvalRunner, RunResult
 from .claude_code import _per_model_turns
 from .stream_capture import extract_usage, message_ids_for_run
@@ -60,6 +63,8 @@ class FullsendRunner(EvalRunner):
             subagent_model=overrides.get("subagent_model"),
             effort=overrides.get("effort", runner.effort),
             log_prefix=log_prefix,
+            allowed_roots=workspace_source_roots(config),
+            output_paths=[o.path for o in config.outputs if o.path],
         )
 
     def __init__(
@@ -73,6 +78,8 @@ class FullsendRunner(EvalRunner):
         subagent_model: Optional[str] = None,
         effort: Optional[str] = None,
         log_prefix: Optional[str] = None,
+        allowed_roots: Optional[list] = None,
+        output_paths: Optional[list] = None,
         **_kwargs,
     ):
         if not agent or not isinstance(agent, str):
@@ -88,6 +95,14 @@ class FullsendRunner(EvalRunner):
         self._subagent_model = subagent_model or ""
         self._effort = effort or ""
         self._log_prefix = log_prefix
+        # Roots a workspace symlink may resolve into (project root + plugin
+        # dirs); None disables the containment check.
+        self._allowed_roots = (
+            None if allowed_roots is None
+            else [Path(r).resolve() for r in allowed_roots])
+        # Workspace-relative paths of the configured outputs[*].path, restored
+        # from fullsend's exported output after the run.
+        self._output_paths = [str(p) for p in (output_paths or [])]
 
     @property
     def name(self) -> str:
@@ -115,42 +130,35 @@ class FullsendRunner(EvalRunner):
                 "execution.skill")
 
         workspace = workspace.resolve()
-        materialize_symlinks(workspace)
-        output_dir = workspace / "output" / "fullsend"
-        output_dir.mkdir(parents=True, exist_ok=True)
+        materialize_symlinks(workspace, self._allowed_roots)
+        # A fresh output dir per invocation: a run that fails before fullsend
+        # creates its run directory must not pick up an earlier invocation's.
+        try:
+            output_dir = _fresh_output_dir(workspace)
+        except (OSError, ValueError) as e:
+            return RunResult(exit_code=-1, stdout="", stderr=str(e), duration_s=0.0)
 
         task = f"/{target} {args or ''}".rstrip()
         entries = self._env_entries(task, extra_env)
 
-        # The env file lives outside the workspace: fullsend uploads the
-        # target repository into the sandbox, and the file may carry secrets.
-        fd, env_file = tempfile.mkstemp(prefix="agent-eval-fullsend-", suffix=".env")
-        try:
-            with os.fdopen(fd, "w") as f:
-                f.write(format_env_file(entries))
+        # The variables travel through the inherited process environment, which
+        # fullsend reads for its ${VAR} references — no env file, so no dotenv
+        # quoting to match and no secrets written to disk.
+        cmd = [self._binary, "run", self._agent,
+               "--fullsend-dir", self._fullsend_dir,
+               "--target-repo", str(workspace)]
+        if model:
+            cmd += ["--model", model]
+        cmd += ["--output-dir", str(output_dir), *self._extra_args]
 
-            cmd = [self._binary, "run", self._agent,
-                   "--fullsend-dir", self._fullsend_dir,
-                   "--target-repo", str(workspace)]
-            if model:
-                cmd += ["--model", model]
-            cmd += ["--env-file", env_file,
-                    "--output-dir", str(output_dir),
-                    *self._extra_args]
+        if self._log_prefix:
+            with _print_lock:
+                print(f"  {self._log_prefix} | Running: {' '.join(cmd)[:120]}",
+                      flush=True)
 
-            if self._log_prefix:
-                with _print_lock:
-                    print(f"  {self._log_prefix} | Running: {' '.join(cmd)[:120]}",
-                          flush=True)
-
-            env = os.environ.copy()
-            env.update(entries)
-            result = self._run(cmd, workspace, env, timeout_s)
-        finally:
-            try:
-                os.unlink(env_file)
-            except OSError:
-                pass
+        env = os.environ.copy()
+        env.update(entries)
+        result = self._run(cmd, workspace, env, timeout_s)
 
         if isinstance(result, RunResult):  # timeout or launch failure
             return result
@@ -167,7 +175,7 @@ class FullsendRunner(EvalRunner):
     # ── Environment ──────────────────────────────────────────────────
 
     def _env_entries(self, task: str, extra_env: Optional[dict]) -> dict:
-        """Variables for both the env file and the fullsend process:
+        """Variables for the fullsend process:
         execution.env, runner.env, hook env (extra_env), then the harness's
         own keys, which always win."""
         entries = {}
@@ -188,7 +196,7 @@ class FullsendRunner(EvalRunner):
         for k in invalid:
             with _print_lock:
                 print(f"  WARNING: dropping invalid env var name {k!r} from the "
-                      f"fullsend env file", flush=True)
+                      f"fullsend environment", flush=True)
             del entries[k]
         return entries
 
@@ -224,24 +232,54 @@ class FullsendRunner(EvalRunner):
 
     # ── Run directory → RunResult ────────────────────────────────────
 
+    def _restore_outputs(self, exported: Path, workspace: Path) -> None:
+        """Copy the artifacts fullsend exported back into the eval workspace.
+
+        fullsend leaves ``--target-repo`` untouched and exports the agent's
+        outputs under ``iteration-N/output/`` keeping workspace-relative paths.
+        ``collect.py`` reads each configured ``outputs[*].path`` from the
+        workspace, so each such path found in the export is copied to the same
+        relative location. Symlinks are never copied and paths that escape the
+        workspace are ignored."""
+        if not exported.is_dir() or exported.is_symlink():
+            return
+        for rel in self._output_paths:
+            rel_path = Path(rel)
+            if rel_path.is_absolute() or ".." in rel_path.parts:
+                continue
+            src = exported / rel_path
+            if src.is_symlink() or not src.exists():
+                continue
+            dest = workspace / rel_path
+            if src.is_dir():
+                _copy_exported_tree(src, dest)
+            elif src.is_file():
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, dest)
+
     def _map_run_dir(self, output_dir, workspace, exit_code, stderr, duration):
         run_dir = _newest_run_dir(output_dir)
+        invocation_subagents = output_dir / "subagents"
         metrics = _read_json(run_dir / "metrics.json") if run_dir else {}
         iteration = _last_iteration(run_dir) if run_dir else None
 
         stdout = ""
         if iteration is not None:
             stream = iteration / "output.jsonl"
-            if stream.is_file():
+            if stream.is_file() and not stream.is_symlink():
                 try:
                     stdout = stream.read_text()
                 except OSError:
                     stdout = ""
+            # Stage this invocation's transcripts so per-model turns and message
+            # ids cover only this run, then add them to the shared workspace dir.
+            _copy_subagent_transcripts(iteration / "transcripts", invocation_subagents)
             _copy_subagent_transcripts(iteration / "transcripts", workspace / "subagents")
+            self._restore_outputs(iteration / "output", workspace)
 
         (token_usage, cost_usd, num_turns, stream_ids, models_seen,
          per_model_usage, stream_ids_by_model) = extract_usage(stdout.splitlines())
-        subagent_dir = workspace / "subagents"
+        subagent_dir = invocation_subagents
         per_model_turns = _per_model_turns(subagent_dir, stream_ids_by_model)
         message_ids = message_ids_for_run(stream_ids, subagent_dir)
 
@@ -286,49 +324,97 @@ class FullsendRunner(EvalRunner):
 
 # ── Helpers ──────────────────────────────────────────────────────────
 
-def materialize_symlinks(workspace: Path) -> None:
+def materialize_symlinks(workspace: Path, allowed_roots: Optional[list] = None) -> None:
     """Replace every symlink at the workspace top level and under ``.claude/``
     with a real copy.
 
     fullsend uploads the target repository as a tar that preserves symlinks,
     and an absolute link target does not exist inside the sandbox. Copies
-    follow nested links, drop dangling ones and exclude ``.git``; a dangling
-    top-level link is removed. Only the workspace is modified — link targets
-    (the project root) are read, never written.
+    follow nested links (resolved relative to the link's own directory), drop
+    dangling ones and exclude ``.git``; a dangling top-level link is removed.
+    With ``allowed_roots`` set, a link whose real target lies outside every
+    root is dropped instead of copied, so host files never reach the sandbox.
+    Only the workspace is modified — link targets are read, never written.
     """
     for entry in sorted(workspace.iterdir()):
-        _materialize_link(entry)
+        _materialize_link(entry, allowed_roots)
     claude_dir = workspace / ".claude"
     if claude_dir.is_dir():
         for entry in sorted(claude_dir.iterdir()):
-            _materialize_link(entry)
+            _materialize_link(entry, allowed_roots)
 
 
-def _materialize_link(path: Path) -> None:
+def _resolve_link(path: Path) -> Optional[Path]:
+    try:
+        return path.resolve()
+    except (OSError, RuntimeError):  # unreadable or looping link
+        return None
+
+
+def _within_roots(path: Path, allowed_roots: Optional[list]) -> bool:
+    if allowed_roots is None:
+        return True
+    return any(path == root or root in path.parents for root in allowed_roots)
+
+
+def _materialize_link(path: Path, allowed_roots: Optional[list] = None) -> None:
     if not path.is_symlink():
         return
-    target = path.resolve()
+    target = _resolve_link(path)
     path.unlink()
-    if path.name == ".git" or not target.exists():
+    if path.name == ".git" or target is None or not target.exists():
+        return
+    if not _within_roots(target, allowed_roots):
+        _warn_outside_roots(path)
         return
     if target.is_dir():
-        shutil.copytree(target, path, symlinks=False,
-                        ignore=shutil.ignore_patterns(".git"),
-                        ignore_dangling_symlinks=True)
+        _copy_tree(target, path, allowed_roots, (target,))
     else:
         shutil.copy2(target, path)
 
 
-def format_env_file(entries: dict) -> str:
-    """Render ``KEY="value"`` dotenv lines. Values are double-quoted with
-    backslash, double quote, ``$`` and newlines escaped, so arguments with
-    spaces, quotes or line breaks survive and nothing is expanded."""
-    lines = []
-    for k, v in entries.items():
-        escaped = (str(v).replace("\\", "\\\\").replace('"', '\\"')
-                   .replace("$", "\\$").replace("\r", "\\r").replace("\n", "\\n"))
-        lines.append(f'{k}="{escaped}"')
-    return "\n".join(lines) + "\n"
+def _copy_tree(src: Path, dest: Path, allowed_roots, active: tuple) -> None:
+    """Copy ``src`` into ``dest`` as real files, following symlinks.
+
+    Each nested link resolves relative to its own parent. Dangling links,
+    links leaving ``allowed_roots`` and links back into a directory already
+    being copied (cycles) are skipped; ``.git`` is excluded."""
+    dest.mkdir(parents=True, exist_ok=True)
+    for entry in sorted(src.iterdir()):
+        if entry.name == ".git":
+            continue
+        real = entry
+        if entry.is_symlink():
+            real = _resolve_link(entry)
+            if real is None or not real.exists():
+                continue
+            if not _within_roots(real, allowed_roots):
+                _warn_outside_roots(entry)
+                continue
+        if real.is_dir():
+            if real not in active:
+                _copy_tree(real, dest / entry.name, allowed_roots, active + (real,))
+        elif real.is_file():
+            shutil.copy2(real, dest / entry.name)
+
+
+def _warn_outside_roots(path: Path) -> None:
+    with _print_lock:
+        print(f"  WARNING: not copying symlink {path.name!r} into the fullsend "
+              f"workspace: its target is outside the project and plugin "
+              f"directories", flush=True)
+
+
+def _fresh_output_dir(workspace: Path) -> Path:
+    """A new empty ``<workspace>/output/fullsend/run-*`` directory for one
+    invocation. Refuses a base that resolves outside the workspace."""
+    base = workspace / "output" / "fullsend"
+    base.mkdir(parents=True, exist_ok=True)
+    real_base = base.resolve()
+    if workspace != real_base and workspace not in real_base.parents:
+        raise ValueError(
+            f"fullsend output directory {base} resolves outside the workspace")
+    return Path(tempfile.mkdtemp(prefix="run-", dir=str(real_base)))
 
 
 def _terminate(proc):
@@ -350,12 +436,18 @@ def _terminate(proc):
         except OSError:
             pass
 
+    kill = getattr(signal, "SIGKILL", signal.SIGTERM)
     _signal(signal.SIGTERM)
     try:
-        return proc.communicate(timeout=_TERM_GRACE_S)
+        captured = proc.communicate(timeout=_TERM_GRACE_S)
     except subprocess.TimeoutExpired:
         pass
-    _signal(getattr(signal, "SIGKILL", signal.SIGTERM))
+    else:
+        # The direct child exited, but a descendant in the group may have
+        # ignored SIGTERM and closed its pipes — finish the group off.
+        _signal(kill)
+        return captured
+    _signal(kill)
     try:
         return proc.communicate(timeout=5)
     except subprocess.TimeoutExpired:
@@ -375,9 +467,21 @@ def _last_iteration(run_dir: Path) -> Optional[Path]:
     best = None
     for d in run_dir.iterdir():
         m = _ITERATION_RE.match(d.name)
-        if m and d.is_dir() and (best is None or int(m.group(1)) > best[0]):
+        if m and d.is_dir() and not d.is_symlink() and (best is None or int(m.group(1)) > best[0]):
             best = (int(m.group(1)), d)
     return best[1] if best else None
+
+
+def _copy_exported_tree(src: Path, dest: Path) -> None:
+    """Copy regular files under ``src`` into ``dest``, skipping symlinks."""
+    dest.mkdir(parents=True, exist_ok=True)
+    for entry in sorted(src.iterdir()):
+        if entry.is_symlink():
+            continue
+        if entry.is_dir():
+            _copy_exported_tree(entry, dest / entry.name)
+        elif entry.is_file():
+            shutil.copy2(entry, dest / entry.name)
 
 
 def _copy_subagent_transcripts(src: Path, dest: Path) -> None:

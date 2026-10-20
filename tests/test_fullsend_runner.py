@@ -21,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from agent_eval.agent import RUNNERS
 from agent_eval.agent import fullsend as fullsend_mod
 from agent_eval.agent.base import EvalRunner
-from agent_eval.agent.fullsend import FullsendRunner, format_env_file
+from agent_eval.agent.fullsend import FullsendRunner, materialize_symlinks
 from agent_eval.config import EvalConfig
 
 SCRIPTS = Path(__file__).parent.parent / "skills" / "eval-run" / "scripts"
@@ -44,7 +44,7 @@ FAKE_FULLSEND = textwrap.dedent('''\
     record = {
         "argv": argv,
         "cwd": os.getcwd(),
-        "env_file": Path(flag("--env-file")).read_text(),
+        "env": dict(os.environ),
         "env_task": os.environ.get("FULLSEND_TASK"),
         "symlinks": symlinks,
         "scripts_is_dir": (target / "scripts").is_dir(),
@@ -57,6 +57,8 @@ FAKE_FULLSEND = textwrap.dedent('''\
     print("fullsend console stderr", file=sys.stderr)
     if os.environ.get("FAKE_FULLSEND_SLEEP"):
         time.sleep(float(os.environ["FAKE_FULLSEND_SLEEP"]))
+    if os.environ.get("FAKE_FULLSEND_NO_RUN"):
+        sys.exit(1)
 
     run = out / "fs-sandbox-1"
     it = run / "iteration-1"
@@ -105,8 +107,10 @@ FAKE_FULLSEND = textwrap.dedent('''\
     (run / "security" / "findings.jsonl").write_text("{}\\n")
 
     for i in range(1, int(os.environ.get("FAKE_FULLSEND_ARTIFACTS", "0")) + 1):
-        (target / "artifacts").mkdir(exist_ok=True)
-        (target / "artifacts" / f"report-{i}.md").write_text(f"report {i}")
+        # Like real fullsend, export under iteration-N/output and leave the
+        # target repository untouched.
+        (it / "output" / "artifacts").mkdir(exist_ok=True)
+        (it / "output" / "artifacts" / f"report-{i}.md").write_text(f"report {i}")
 
     sys.exit(int(os.environ.get("FAKE_FULLSEND_EXIT", "0")))
 ''')
@@ -128,28 +132,15 @@ def fake_fullsend(fake_bin, tmp_path, monkeypatch):
     record = tmp_path / "record.json"
     monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}")
     monkeypatch.setenv("FAKE_FULLSEND_RECORD", str(record))
-    for var in ("FAKE_FULLSEND_SLEEP", "FAKE_FULLSEND_EXIT", "FAKE_FULLSEND_ARTIFACTS"):
+    for var in ("FAKE_FULLSEND_SLEEP", "FAKE_FULLSEND_EXIT", "FAKE_FULLSEND_ARTIFACTS",
+                "FAKE_FULLSEND_NO_RUN"):
         monkeypatch.delenv(var, raising=False)
     return record
 
 
-def _parse_env_file(text):
-    """Inverse of format_env_file for the assertions."""
-    out = {}
-    for line in text.splitlines():
-        key, _, quoted = line.partition("=")
-        assert quoted.startswith('"') and quoted.endswith('"'), line
-        body, value, i = quoted[1:-1], "", 0
-        while i < len(body):
-            if body[i] == "\\":
-                nxt = body[i + 1]
-                value += {"n": "\n", "r": "\r"}.get(nxt, nxt)
-                i += 2
-            else:
-                value += body[i]
-                i += 1
-        out[key] = value
-    return out
+def _run_dirs(ws):
+    """Per-invocation output dirs fullsend was pointed at."""
+    return sorted((ws / "output" / "fullsend").glob("run-*"))
 
 
 def _runner(tmp_path, **kwargs):
@@ -204,6 +195,10 @@ class TestFullsendConfig:
     def test_unknown_runner_type_names_the_field(self, tmp_path):
         with pytest.raises(ValueError, match=r"runner\.type: unknown runner type 'nope'"):
             self._load(tmp_path, "runner:\n  type: nope\n")
+
+    def test_non_string_runner_type_names_the_field(self, tmp_path):
+        with pytest.raises(ValueError, match=r"runner\.type: unknown runner type"):
+            self._load(tmp_path, "runner:\n  type: [a, b]\n")
 
     def test_unknown_step_runner_type_names_the_field(self, tmp_path):
         p = tmp_path / "eval.yaml"
@@ -261,23 +256,19 @@ class TestFullsendExecute:
         assert result.exit_code == 0, result.stderr
         rec = json.loads(fake_fullsend.read_text())
         argv = rec["argv"]
-        env_file = argv[argv.index("--env-file") + 1]
+        (run_dir,) = _run_dirs(ws)
         assert argv == [
             "run", "rfe-creator-eval",
             "--fullsend-dir", str((tmp_path / "project" / ".fullsend").resolve()),
             "--target-repo", str(ws.resolve()),
             "--model", "opus",
-            "--env-file", env_file,
-            "--output-dir", str(ws.resolve() / "output" / "fullsend"),
+            "--output-dir", str(run_dir),
             "--keep-sandbox", "--debug",
         ]
-        assert os.path.isabs(env_file)
+        assert "--env-file" not in argv
         assert rec["cwd"] == str(ws.resolve())
-        # The env file lives outside the uploaded workspace and is removed.
-        assert not Path(env_file).is_relative_to(ws.resolve())
-        assert not Path(env_file).exists()
 
-    def test_env_file_content(self, tmp_path, fake_fullsend, monkeypatch):
+    def test_environment_content(self, tmp_path, fake_fullsend, monkeypatch):
         monkeypatch.setenv("CALLER_SECRET", "from-caller")
         ws = _workspace(tmp_path)
         runner = _runner(
@@ -290,7 +281,7 @@ class TestFullsendExecute:
         runner.execute(target="rfe.create", args=args, workspace=ws, model="opus",
                        timeout_s=60, extra_env={"HOOK_VAR": "hooked"})
         rec = json.loads(fake_fullsend.read_text())
-        env = _parse_env_file(rec["env_file"])
+        env = rec["env"]
         assert env["FULLSEND_TASK"] == f"/rfe.create {args}"
         assert env["AGENT_EVAL_SUBAGENT_MODEL"] == "claude-sonnet-4-6"
         assert env["AGENT_EVAL_EFFORT"] == "high"
@@ -299,14 +290,13 @@ class TestFullsendExecute:
         assert "MISSING" not in env
         assert env["GOOGLE_CLOUD_PROJECT"] == "proj"
         assert env["HOOK_VAR"] == "hooked"
-        # The process sees the same variables.
         assert rec["env_task"] == f"/rfe.create {args}"
 
-    def test_env_file_empty_model_and_effort(self, tmp_path, fake_fullsend):
+    def test_environment_empty_model_and_effort(self, tmp_path, fake_fullsend):
         ws = _workspace(tmp_path)
         _runner(tmp_path).execute(target="s", args="", workspace=ws, model="m",
                                   timeout_s=60)
-        env = _parse_env_file(json.loads(fake_fullsend.read_text())["env_file"])
+        env = json.loads(fake_fullsend.read_text())["env"]
         assert env["FULLSEND_TASK"] == "/s"
         assert env["AGENT_EVAL_SUBAGENT_MODEL"] == ""
         assert env["AGENT_EVAL_EFFORT"] == ""
@@ -350,8 +340,8 @@ class TestFullsendExecute:
         ws = _workspace(tmp_path)
         result = _runner(tmp_path).execute(target="s", args="", workspace=ws,
                                            model="opus", timeout_s=60)
-        stream = (ws / "output" / "fullsend" / "fs-sandbox-1" / "iteration-1"
-                  / "output.jsonl").read_text()
+        (run_dir,) = _run_dirs(ws)
+        stream = (run_dir / "fs-sandbox-1" / "iteration-1" / "output.jsonl").read_text()
         assert result.exit_code == 0
         assert result.stdout == stream
         assert "Running agent: rfe-creator-eval" in result.stderr
@@ -425,9 +415,106 @@ class TestFullsendExecute:
                                       workspace=_workspace(tmp_path), model="m")
 
 
-def test_format_env_file_escapes():
-    text = format_env_file({"A": 'x "y" $Z \\ w\nnext', "B": ""})
-    assert text == 'A="x \\"y\\" \\$Z \\\\ w\\nnext"\nB=""\n'
+class TestInvocationScoping:
+    def test_failed_invocation_does_not_inherit_previous_run(
+            self, tmp_path, fake_fullsend, monkeypatch):
+        ws = _workspace(tmp_path)
+        runner = _runner(tmp_path)
+        first = runner.execute(target="s", args="", workspace=ws, model="m", timeout_s=60)
+        assert first.cost_usd == 0.42
+        assert first.per_model_turns == {"claude-opus-4-6": 2, "claude-haiku-4-5": 1}
+
+        monkeypatch.setenv("FAKE_FULLSEND_NO_RUN", "1")
+        second = runner.execute(target="s", args="", workspace=ws, model="m", timeout_s=60)
+        assert second.exit_code == 1
+        assert second.stdout == ""
+        assert second.cost_usd is None
+        assert second.num_turns is None
+        assert second.models_used is None
+        assert second.message_ids == []
+        assert len(_run_dirs(ws)) == 2
+
+    def test_message_ids_do_not_accumulate_across_invocations(
+            self, tmp_path, fake_fullsend):
+        ws = _workspace(tmp_path)
+        runner = _runner(tmp_path)
+        runner.execute(target="s", args="", workspace=ws, model="m", timeout_s=60)
+        again = runner.execute(target="s", args="", workspace=ws, model="m", timeout_s=60)
+        assert again.message_ids == ["msg_1", "msg_2", "msg_sub_1"]
+
+
+class TestOutputRestore:
+    def test_configured_outputs_copied_back(self, tmp_path, fake_fullsend, monkeypatch):
+        monkeypatch.setenv("FAKE_FULLSEND_ARTIFACTS", "2")
+        ws = _workspace(tmp_path)
+        runner = _runner(tmp_path, output_paths=["artifacts", "missing"])
+        runner.execute(target="s", args="", workspace=ws, model="m", timeout_s=60)
+        assert (ws / "artifacts" / "report-1.md").read_text() == "report 1"
+        assert (ws / "artifacts" / "report-2.md").read_text() == "report 2"
+        assert not (ws / "missing").exists()
+
+    def test_unconfigured_and_escaping_paths_not_copied(
+            self, tmp_path, fake_fullsend, monkeypatch):
+        monkeypatch.setenv("FAKE_FULLSEND_ARTIFACTS", "1")
+        ws = _workspace(tmp_path)
+        runner = _runner(tmp_path, output_paths=["../escape", "/abs"])
+        runner.execute(target="s", args="", workspace=ws, model="m", timeout_s=60)
+        assert not (ws / "artifacts").exists()
+        assert not (tmp_path / "escape").exists()
+
+
+class TestMaterializeSymlinks:
+    def test_nested_relative_symlinks_preserved(self, tmp_path):
+        project = tmp_path / "project"
+        (project / "agent_eval").mkdir(parents=True)
+        (project / "agent_eval" / "mod.py").write_text("x = 1")
+        scripts = project / "skills" / "eval-run" / "scripts"
+        scripts.mkdir(parents=True)
+        (scripts / "run.py").write_text("print()")
+        (scripts / "agent_eval").symlink_to("../../../agent_eval")
+        (scripts / "dangling").symlink_to("../../../nope")
+
+        ws = _workspace(tmp_path)
+        (ws / "skills").symlink_to(project / "skills")
+        materialize_symlinks(ws, [project.resolve()])
+
+        copied = ws / "skills" / "eval-run" / "scripts"
+        assert not (ws / "skills").is_symlink()
+        assert not (copied / "agent_eval").is_symlink()
+        assert (copied / "agent_eval" / "mod.py").read_text() == "x = 1"
+        assert (copied / "run.py").is_file()
+        assert not (copied / "dangling").exists()
+
+    def test_symlink_cycle_terminates(self, tmp_path):
+        project = tmp_path / "project"
+        (project / "skills" / "a").mkdir(parents=True)
+        (project / "skills" / "a" / "f.txt").write_text("f")
+        (project / "skills" / "a" / "loop").symlink_to("..")
+        ws = _workspace(tmp_path)
+        (ws / "skills").symlink_to(project / "skills")
+        materialize_symlinks(ws, [project.resolve()])
+        assert (ws / "skills" / "a" / "f.txt").read_text() == "f"
+
+    def test_links_outside_allowed_roots_dropped(self, tmp_path):
+        secret = tmp_path / "home" / ".aws"
+        secret.mkdir(parents=True)
+        (secret / "credentials").write_text("hunter2")
+        project = tmp_path / "project"
+        (project / "scripts").mkdir(parents=True)
+        (project / "scripts" / "ok.sh").write_text("ok")
+        (project / "scripts" / "creds").symlink_to(secret)
+        (project / "scripts" / "cred-file").symlink_to(secret / "credentials")
+
+        ws = _workspace(tmp_path)
+        (ws / "scripts").symlink_to(project / "scripts")
+        (ws / "toplevel").symlink_to(secret)
+        materialize_symlinks(ws, [project.resolve()])
+
+        assert (ws / "scripts" / "ok.sh").is_file()
+        assert not (ws / "scripts" / "creds").exists()
+        assert not (ws / "scripts" / "cred-file").exists()
+        assert not (ws / "toplevel").exists() and not (ws / "toplevel").is_symlink()
+        assert not list(ws.rglob("credentials"))
 
 
 def _run_script(script_name, args, cwd, env):
@@ -492,7 +579,7 @@ def test_execute_py_batch_end_to_end(tmp_path, fake_bin):
     rec = json.loads(record.read_text())
     assert rec["argv"][:2] == ["run", "rfe-creator-eval"]
     assert rec["symlinks"] == []
-    envf = _parse_env_file(rec["env_file"])
+    envf = rec["env"]
     assert envf["FULLSEND_TASK"] == "/rfe.speedrun --input batch.yaml --headless"
     assert envf["EVAL_FLAG"] == "on"
 
@@ -502,8 +589,8 @@ def test_execute_py_batch_end_to_end(tmp_path, fake_bin):
     assert run_result["cost_usd"] == 0.42
     assert run_result["num_turns"] == 7
     assert run_result["model"] == "claude-opus-4-6"
-    stream = (workspace / "output" / "fullsend" / "fs-sandbox-1" / "iteration-1"
-              / "output.jsonl").read_text()
+    (run_dir,) = _run_dirs(workspace)
+    stream = (run_dir / "fs-sandbox-1" / "iteration-1" / "output.jsonl").read_text()
     assert (output_dir / "stdout.log").read_text() == stream
     assert (output_dir / "subagents" / "s1-agent-a1.jsonl").is_file()
 

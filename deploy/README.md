@@ -77,9 +77,10 @@ not **where** or **how** to run it. The same `eval.yaml` works unchanged across:
 
 The execution substrate is a CLI flag or env var, never in the eval config.
 
-The one exception is `runner.type: cursor`, which is **local-only**: the base
-image ships no `cursor-agent` CLI, so Harbor has no cursor agent and EvalHub
-rejects the config at load. Use `claude-code` or `codex` for Harbor/EvalHub.
+The exceptions are `runner.type: cursor` and `runner.type: fullsend`, which are
+**local-only**: the base image ships no `cursor-agent` CLI, so Harbor has no cursor
+agent and EvalHub rejects a cursor config at load; fullsend has no Harbor or
+EvalHub equivalent. Use `claude-code` or `codex` for Harbor/EvalHub.
 
 ## Task packages (Harbor path)
 

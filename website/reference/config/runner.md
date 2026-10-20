@@ -361,12 +361,14 @@ against the project root. `binary` defaults to `fullsend` on `PATH`. `extra_args
 
 ```text
 <binary> run <agent> --fullsend-dir <abs fullsend_dir> --target-repo <abs workspace>
-  --model <model> --env-file <file> --output-dir <workspace>/output/fullsend <extra_args>
+  --model <model> --output-dir <workspace>/output/fullsend/run-<id> <extra_args>
 ```
 
-The env file carries `FULLSEND_TASK="/<skill> <args>"`, `AGENT_EVAL_SUBAGENT_MODEL`,
-`AGENT_EVAL_EFFORT` (empty when unset), and every `execution.env`, `runner.env` and
-hook-output entry. The process also inherits the caller's environment. fullsend
+The process environment carries `FULLSEND_TASK="/<skill> <args>"`,
+`AGENT_EVAL_SUBAGENT_MODEL`, `AGENT_EVAL_EFFORT` (empty when unset), and every
+`execution.env`, `runner.env` and hook-output entry, on top of the caller's
+environment. Configured `outputs[*].path` entries that fullsend exports under
+`iteration-N/output/` are copied back into the workspace. fullsend
 aborts before the pre-script when a `${VAR}` the agent's harness references is unset
 on the host, so that harness may only reference these variables or ones from the
 caller's environment. Requires fullsend ≥ 0.48, a running OpenShell gateway with

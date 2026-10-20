@@ -8,7 +8,7 @@ runtime-agnostic.
 
 !!! important "Runner ≠ backend"
     A **runner** is *what agent runtime* runs a case (`claude-code`, `cursor`,
-    `codex`, `cli`, `responses-api`) — chosen in `eval.yaml` via `runner.type`. A **backend** is
+    `codex`, `fullsend`, `cli`, `responses-api`) — chosen in `eval.yaml` via `runner.type`. A **backend** is
     *where* the eval runs (Local, [Harbor](../guides/harbor.md),
     [EvalHub](../guides/evalhub.md)) — always chosen by a **CLI flag** (`--runner`),
     never in the config. The same `eval.yaml` runs unchanged across all three
@@ -393,7 +393,7 @@ runner:
   fullsend_dir: .fullsend   # default; resolved against the project root
   binary: fullsend          # default: fullsend on PATH
   extra_args: []            # appended verbatim to `fullsend run`
-  env: {}                   # extra variables for the process and the env file
+  env: {}                   # extra variables for the fullsend process
 ```
 
 **Prerequisites.** fullsend ≥ 0.48, a running OpenShell gateway with podman, and the
@@ -404,18 +404,23 @@ Per case (or once per batch) the runner:
 1. **Materialises the workspace.** fullsend uploads the target repository as a tar
    that keeps symlinks, and an absolute link target does not exist inside the
    sandbox. Every symlink at the workspace top level and under `.claude/` is
-   replaced by a real copy (nested links followed, dangling links dropped, `.git`
-   excluded). The project root is never modified.
-2. **Writes an env file** for `--env-file`, kept outside the workspace and deleted
-   after the run. It holds `FULLSEND_TASK="/<skill> <args>"`,
-   `AGENT_EVAL_SUBAGENT_MODEL` (the resolved subagent model) and `AGENT_EVAL_EFFORT`
-   (`runner.effort` / `--effort`), both empty when unset, plus every `execution.env`,
-   `runner.env` and hook-output entry (`$VAR` values resolve from the caller). The
-   fullsend process gets the same variables on top of the caller's environment.
+   replaced by a real copy (nested links followed relative to the link's own
+   directory, dangling links dropped, `.git` excluded). A link whose real target
+   lies outside the project root and the configured `runner.plugin_dirs` is
+   dropped with a warning, so host files never reach the sandbox. The project root
+   is never modified.
+2. **Sets the environment** of the fullsend process, on top of the caller's
+   environment (no env file is written, so no dotenv quoting applies). It holds
+   `FULLSEND_TASK="/<skill> <args>"`, `AGENT_EVAL_SUBAGENT_MODEL` (the resolved
+   subagent model) and `AGENT_EVAL_EFFORT` (`runner.effort` / `--effort`), both empty
+   when unset, plus every `execution.env`, `runner.env` and hook-output entry (`$VAR`
+   values resolve from the caller).
 3. **Invokes** `<binary> run <agent> --fullsend-dir <abs> --target-repo <workspace>
-   --model <model> --env-file <file> --output-dir <workspace>/output/fullsend
-   <extra_args>` from the workspace.
-4. **Maps the newest run directory** onto `RunResult`: `cost_usd`, `num_turns`,
+   --model <model> --output-dir <workspace>/output/fullsend/run-<id>
+   <extra_args>` from the workspace. Each invocation gets its own fresh `run-<id>`
+   directory, so a run that fails before fullsend writes anything never reuses an
+   earlier invocation's results.
+4. **Maps the run directory** onto `RunResult`: `cost_usd`, `num_turns`,
    `resolved_model` and `token_usage` (`input`/`output`) from `metrics.json`, with
    the cache counters, `tool_calls`, `iterations` and the count of `security/` files
    in `raw_output`. `stdout` is the last iteration's `output.jsonl` (Claude Code
@@ -424,7 +429,14 @@ Per case (or once per batch) the runner:
    message ids come from that stream. Subagent transcripts
    (`transcripts/*-agent-*.jsonl`) are copied into `<workspace>/subagents/`. Hook
    block events in `run-telemetry.jsonl` become `permission_denials` (best effort).
+   Per-model turns and message ids cover only the current invocation's transcripts.
    The exit code is fullsend's.
+5. **Restores the outputs.** fullsend leaves the target repository untouched and
+   exports the agent's outputs under `iteration-N/output/`. Each configured
+   `outputs[*].path` found there (workspace-relative layout) is copied back to the
+   same path in the eval workspace, where `collect.py` reads it. The agent's
+   harness must export those paths. Symlinks and paths escaping the workspace are
+   never copied.
 
 !!! warning "Timeouts, budget and env references"
     - Keep the fullsend harness's `timeout_minutes` **below** `execution.timeout`.
@@ -434,6 +446,8 @@ Per case (or once per batch) the runner:
     - fullsend aborts before the pre-script when a `${VAR}` the harness file
       references is unset on the host. An agent's eval harness may reference only
       the variables listed in step 2 or variables from the caller's environment.
+      (Variables travel through the process environment, so none of the values
+      are quoted or escaped.)
       fullsend 0.48 has no effort or subagent-model flag, which is why those two
       values travel as `${AGENT_EVAL_EFFORT}` / `${AGENT_EVAL_SUBAGENT_MODEL}`.
 
@@ -534,11 +548,12 @@ Runners are pluggable — the harness only ever talks to the ABC:
    `runner.type` key.
 3. Populate as many `RunResult` fields as your runtime can; leave the rest `None`.
 
-Once registered, that `runner.type` works across the Local and
-[EvalHub](../guides/evalhub.md) backends (which dispatch through `RUNNERS`
-directly). [Harbor](../guides/harbor.md) instead maps `runner.type` to a Harbor
-agent name, so a new opaque runtime is reached there via Harbor's own agent, not this
-registry.
+Once registered, that `runner.type` is accepted at config load (an unregistered type
+is rejected) and works on the Local backend. EvalHub dispatches through `RUNNERS`
+directly, but registration does not imply EvalHub support (`fullsend`, for one, is
+local-only). [Harbor](../guides/harbor.md) instead maps `runner.type` to a Harbor
+agent name, so a runtime that is not in that mapping is reached there with
+`--agent <harbor-agent>`, not through this registry.
 
 ## See also
 

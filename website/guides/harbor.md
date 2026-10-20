@@ -95,8 +95,9 @@ The output is the same `eval/runs/<id>/` layout as a local run (`summary.yaml`,
 !!! tip "eval.yaml portability"
     `eval.yaml` describes **what** to evaluate (agent, dataset, judges, thresholds) — not
     **where** it runs. The same file works locally, on Podman, on Kubernetes, and on
-    [EvalHub](evalhub.md). See [Backends](../concepts/backends.md). Exception:
-    `runner.type: cursor` is local-only — Harbor has no cursor agent.
+    [EvalHub](evalhub.md). See [Backends](../concepts/backends.md). Exceptions:
+    `runner.type: cursor` and `runner.type: fullsend` are local-only — Harbor has
+    no cursor or fullsend agent.
 
 !!! warning "Mounts are local-Podman only"
     Host bind mounts are implemented by the bundled Podman environment. Supplying

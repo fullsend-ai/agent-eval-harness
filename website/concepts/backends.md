@@ -17,10 +17,11 @@ OpenAI-compatible endpoint — is a separate axis, chosen by the model ids in
     EvalHub at invocation time with `--runner` — or, for EvalHub, via a
     platform-triggered job (see [EvalHub](../guides/evalhub.md)).
 
-    One exception: **`runner.type: cursor` is local-only.** The Harbor and
-    EvalHub base image ships no `cursor-agent` CLI, so Harbor has no cursor agent
-    and EvalHub rejects the config at load. Use `claude-code` or `codex` on those
-    backends.
+    Two exceptions: **`runner.type: cursor` and `runner.type: fullsend` are
+    local-only.** The Harbor and EvalHub base image ships no `cursor-agent` CLI, so
+    Harbor has no cursor agent and EvalHub rejects a cursor config at load;
+    fullsend has no Harbor or EvalHub equivalent either. Use `claude-code` or
+    `codex` on those backends.
 
 ## The three backends
 
@@ -47,7 +48,8 @@ flowchart TD
     This name is genuinely confusing. There are two distinct concepts:
 
     - **`runner.type`** *(in `eval.yaml`)* — the **agent runtime**: `claude-code`,
-      `cursor` (local backend only), `codex`, `cli`, or `responses-api`. See
+      `cursor` (local backend only), `codex`, `fullsend` (local backend only),
+      `cli`, or `responses-api`. See
       [Runners](runners.md).
     - **`--runner`** *(CLI flag on `/eval-run`)* — the **execution backend**:
       `local` (default), `harbor`, or `evalhub`.
@@ -148,7 +150,7 @@ regardless of backend. What differs is only *where* the judge engine runs.
 
 ## Related
 
-- [Runners](runners.md) — the `runner.type` agent runtimes (`claude-code`, `cursor`, `codex`, `cli`, `responses-api`)
+- [Runners](runners.md) — the `runner.type` agent runtimes (`claude-code`, `cursor`, `codex`, `fullsend`, `cli`, `responses-api`)
 - [Model providers](providers.md) — the third axis: which vendor serves the model ids in `models:`
 - [Architecture](architecture.md) — how the pieces fit together
 - [Container images](../reference/container-images.md) — the base and provider images
