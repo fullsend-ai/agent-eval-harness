@@ -67,6 +67,7 @@ agent_eval/              # Python package (config, runner, state)
     claude_code.py       # Claude Code CLI runner (claude --print)
     codex.py             # OpenAI Codex CLI runner (codex exec --json)
     cli_runner.py        # Opaque CLI runner (arbitrary command templates)
+    fullsend.py          # fullsend runner (fullsend run <agent>; run dir → RunResult)
     stream_capture.py    # Stream-json processing (events, timestamps, usage, hooks)
   harbor/                # Harbor integration (containerized execution)
     tasks.py             # Generate self-contained Harbor task packages from eval.yaml

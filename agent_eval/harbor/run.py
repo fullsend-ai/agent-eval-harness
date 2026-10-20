@@ -79,6 +79,7 @@ _RUNNER_TO_HARBOR_AGENT = {
     "codex": "codex",
     "cursor": None,         # no Harbor equivalent
     "cli": None,            # CLI runner is generic — user must pass --agent explicitly
+    "fullsend": None,       # no Harbor equivalent
     "responses-api": None,  # no Harbor equivalent
 }
 _DEFAULT_AGENT = "claude-code"

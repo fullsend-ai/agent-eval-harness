@@ -750,6 +750,14 @@ class RunnerConfig:
     # Passed as --permission-mode (a CLI flag), so it applies even in untrusted
     # isolated workspaces where settings-file permissions are trust-gated.
     permission_mode: Optional[str] = None
+    # fullsend: the agent name registered in <fullsend_dir>/config.yaml
+    # (required), the .fullsend directory (default ".fullsend", resolved
+    # against the project root), the binary (default "fullsend" on PATH) and
+    # extra arguments appended verbatim to `fullsend run`.
+    agent: Optional[str] = None
+    fullsend_dir: Optional[str] = None
+    binary: Optional[str] = None
+    extra_args: list = field(default_factory=list)
 
 
 def _parse_runner_config(runner_raw, *, context="runner"):
@@ -762,6 +770,26 @@ def _parse_runner_config(runner_raw, *, context="runner"):
     messages.
     """
     runner_raw = runner_raw or {}
+    # Local import: agent_eval.agent imports this module.
+    from agent_eval.agent import RUNNERS
+    runner_type = runner_raw.get("type", "claude-code")
+    if runner_type not in RUNNERS:
+        raise ValueError(
+            f"{context}.type: unknown runner type {runner_type!r}; "
+            f"expected one of {sorted(RUNNERS)}")
+    agent = runner_raw.get("agent")
+    if runner_type == "fullsend" and not (isinstance(agent, str) and agent.strip()):
+        raise ValueError(
+            f"{context}.agent is required when {context}.type is 'fullsend' "
+            "(an agent name registered in <fullsend_dir>/config.yaml)")
+    for key in ("agent", "fullsend_dir", "binary"):
+        value = runner_raw.get(key)
+        if value is not None and not isinstance(value, str):
+            raise ValueError(f"{context}.{key} must be a string")
+    extra_args = runner_raw.get("extra_args")
+    if extra_args is not None and not (
+            isinstance(extra_args, list) and all(isinstance(x, str) for x in extra_args)):
+        raise ValueError(f"{context}.extra_args must be a list of strings")
     command = runner_raw.get("command")
     if command is not None:
         valid_list = isinstance(command, list) and all(
@@ -786,7 +814,7 @@ def _parse_runner_config(runner_raw, *, context="runner"):
                 f'{context}.settings.enabledPlugins."*" must be a boolean, '
                 f'got: {enabled_plugins["*"]!r}')
     return RunnerConfig(
-        type=runner_raw.get("type", "claude-code"),
+        type=runner_type,
         command=command,
         workspace_mode=workspace_mode,
         settings=runner_raw.get("settings", {}) or {},
@@ -795,6 +823,10 @@ def _parse_runner_config(runner_raw, *, context="runner"):
         system_prompt=runner_raw.get("system_prompt"),
         effort=runner_raw.get("effort"),
         permission_mode=runner_raw.get("permission_mode"),
+        agent=agent,
+        fullsend_dir=runner_raw.get("fullsend_dir"),
+        binary=runner_raw.get("binary"),
+        extra_args=extra_args or [],
     )
 
 
