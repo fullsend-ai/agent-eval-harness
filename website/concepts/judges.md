@@ -158,7 +158,8 @@ parsing, so key names come straight from disk. Commonly available keys:
 | `modified_files` | In-place file edits collected during the run |
 | `exit_code`, `duration_s`, `token_usage`, `cost_usd`, `num_turns` | Execution metrics (when `traces.metrics`) |
 | `stdout`, `stderr` | Logs (when `traces.stdout` / `traces.stderr`) |
-| `hook_outputs` | Values emitted by `before_each` hooks |
+| `hook_outputs` | Values emitted by `before_each` / `after_each` hooks |
+| `hooks`, `hook_failures` | Per-case `before_each` / `after_each` results (exit code, timeout, log) and one-line summaries of the failed ones; present only when per-case hooks ran |
 
 !!! tip "LLM judge template variables"
     Inside a `prompt`/`prompt_file`/`llm_rubric` template you also get convenience

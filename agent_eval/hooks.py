@@ -10,7 +10,7 @@ import signal
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Optional
 
@@ -86,6 +86,7 @@ def run_hooks(
     log_dir: Path,
     phase_name: str,
     case_id: Optional[str] = None,
+    results: Optional[list] = None,
 ) -> list[HookResult]:
     """Run hooks sequentially. Returns results. Raises HookError on failure.
 
@@ -96,6 +97,9 @@ def run_hooks(
         log_dir: Directory to write hook log files.
         phase_name: Hook phase name (e.g., "before_all").
         case_id: Case ID for per-case hooks (used in log filenames).
+        results: Optional list to append each HookResult to as it is
+            produced, so a caller still sees the hooks that ran (including
+            the failing one) when HookError is raised.
 
     Returns:
         List of HookResult for each hook.
@@ -107,7 +111,8 @@ def run_hooks(
         return []
 
     log_dir.mkdir(parents=True, exist_ok=True)
-    results = []
+    if results is None:
+        results = []
 
     for i, hook in enumerate(entries):
         label = hook.description or hook.command.split("\n")[0][:60]
@@ -182,23 +187,73 @@ def run_hooks_safe(
 ) -> list[HookResult]:
     """Like run_hooks but never raises — all failures use continue semantics.
 
-    Used for after_all hooks which are guaranteed to run even on failure.
+    Used for guaranteed phases (after_each, after_all, ...) which must run
+    every entry even on failure. Each returned HookResult carries the entry
+    as configured (its own ``on_failure``), so a caller can apply that
+    setting with a narrower scope than the whole run.
     """
     if not entries:
         return []
 
-    override = []
-    for hook in entries:
-        patched = HookEntry(
-            command=hook.command,
-            timeout=hook.timeout,
-            description=hook.description,
-            on_failure="continue",
-            condition=hook.condition,
-        )
-        override.append(patched)
+    override = [replace(hook, on_failure="continue") for hook in entries]
+    results = run_hooks(override, env, cwd, log_dir, phase_name, case_id)
+    for result, hook in zip(results, entries):
+        result.hook = hook
+    return results
 
-    return run_hooks(override, env, cwd, log_dir, phase_name, case_id)
+
+def hook_failed(result: HookResult) -> bool:
+    """True when a hook ran and exited non-zero or timed out."""
+    return not result.skipped and (result.timed_out or result.exit_code != 0)
+
+
+def _hook_label(hook: HookEntry) -> str:
+    return hook.description or hook.command.split("\n")[0][:60]
+
+
+def describe_hook_failure(result: HookResult, index: int) -> str:
+    """One-line summary of a failed hook, e.g.
+    ``after_each[1]: Save the PR diff (timed out)``."""
+    detail = ("timed out" if result.timed_out
+              else f"exit code {result.exit_code}")
+    return f"{result.phase}[{index}]: {_hook_label(result.hook)} ({detail})"
+
+
+def hook_results_record(results_by_phase: dict, base_dir: Path) -> dict:
+    """Serialize per-phase HookResult lists for ``run_result.json``.
+
+    Returns ``{"hooks": {phase: [...]}, "hook_failures": [...]}``, or ``{}``
+    when no phase produced a result. Log paths are relative to *base_dir*
+    (the run directory).
+    """
+    hooks = {}
+    failures = []
+    for phase, results in results_by_phase.items():
+        if not results:
+            continue
+        entries = []
+        for i, r in enumerate(results):
+            log = None
+            if r.log_file is not None:
+                try:
+                    log = str(Path(r.log_file).relative_to(base_dir))
+                except ValueError:
+                    log = str(r.log_file)
+            entries.append({
+                "description": _hook_label(r.hook),
+                "exit_code": r.exit_code,
+                "timed_out": r.timed_out,
+                "skipped": r.skipped,
+                "duration_s": r.duration_s,
+                "on_failure": r.hook.on_failure,
+                "log": log,
+            })
+            if hook_failed(r):
+                failures.append(describe_hook_failure(r, i))
+        hooks[phase] = entries
+    if not hooks:
+        return {}
+    return {"hooks": hooks, "hook_failures": failures}
 
 
 def build_hook_env(
