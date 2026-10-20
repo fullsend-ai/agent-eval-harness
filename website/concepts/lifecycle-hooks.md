@@ -49,11 +49,16 @@ flowchart TD
 !!! note "try/finally guarantees"
     `after_each` and `after_all` are executed from a `finally` block, so they run even
     if `before_each`, the agent, or the skill under test raises. Internally they use
-    `run_hooks_safe`, which forces `on_failure: continue` — a cleanup hook can fail
-    without masking the original error or aborting the rest of the run.
+    `run_hooks_safe`, which runs every entry with continue semantics — a cleanup hook
+    can fail without masking the original error or aborting the rest of the run.
     `before_report` likewise runs via `run_hooks_safe`. The `before_all`,
     `before_each`, and `before_scoring` phases use the strict `run_hooks`, which
     raises on failure when `on_failure: fail`.
+
+    An `after_each` entry with an explicit `on_failure: fail` fails the **case**,
+    not the run: the remaining `after_each` hooks still run, then the case's
+    `run_result.json` gets a non-zero `exit_code` and an `error` naming the hook.
+    `on_failure` defaults to `continue` for `after_each`.
 
 ## Configuration
 
@@ -84,7 +89,7 @@ hooks:
 | `command` | string | `""` | Shell command, run via `bash -c` |
 | `timeout` | int (>0) | `120` | Wall-clock seconds; on timeout the process group is `SIGTERM`ed then `SIGKILL`ed and the hook counts as failed |
 | `description` | string | `""` | Label shown in logs (falls back to the first 60 chars of `command`) |
-| `on_failure` | `fail` \| `continue` | `fail` | `fail` aborts the phase; `continue` logs and proceeds. Both are validated at config load |
+| `on_failure` | `fail` \| `continue` | `fail` (`continue` for `after_each`) | `fail` aborts the phase (for `after_each`: fails the case); `continue` logs and proceeds. Both are validated at config load |
 | `condition` | string | `""` | Bash guard (30 s timeout). Exit `0` → run the hook; anything else → `SKIP` |
 
 Hooks in a phase run **sequentially** in list order.
@@ -144,6 +149,44 @@ deletes it. Two keys are recognized:
         actual = len(outputs.get("items", []))
         return actual == expected, f"{actual} vs {expected}"
     ```
+
+    `after_each` outputs are collected too and merged into the same
+    `hook_outputs.yaml`; on a key conflict the later phase (`after_each`) wins. Only
+    `data:` is used from `after_each` — the agent has already run, so `env:` is
+    ignored.
+
+## Hook results → run_result.json and judges
+
+Every per-case hook result (`before_each`, `after_each`) is written into the case's
+`cases/<id>/run_result.json`, so a capture hook that crashed or timed out no longer
+reads as a clean case:
+
+```json
+"hooks": {
+  "after_each": [
+    {"description": "Save the PR diff", "exit_code": -1, "timed_out": true,
+     "skipped": false, "duration_s": 120.0, "on_failure": "continue",
+     "log": "hooks/after_each.case-001.0.log"}
+  ]
+},
+"hook_failures": ["after_each[0]: Save the PR diff (timed out)"]
+```
+
+The run-level `run_result.json` carries `num_hook_failures`. Judges see the same
+fields as `outputs["hooks"]` and `outputs["hook_failures"]` (present only when
+per-case hooks ran), so a gate can be written once:
+
+```yaml title="eval.yaml"
+judges:
+  - name: capture_ok
+    check: |
+      failures = outputs.get("hook_failures") or []
+      return not failures, "; ".join(failures) or "hooks clean"
+  - name: tests_pass
+    if: "not outputs.get('hook_failures')"
+    check: |
+      return outputs["hook_outputs"].get("tests_passed") is True, "from after_each"
+```
 
 ## Gotchas
 

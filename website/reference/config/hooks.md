@@ -30,7 +30,7 @@ flowchart TD
 | --- | --- | --- | --- |
 | `before_all` | Once, before any case executes | Project root | Aborts the run |
 | `before_each` | Before each case invocation | Case workspace | Aborts the run |
-| `after_each` | After each case (guaranteed, even on error) | Case workspace | Always continues |
+| `after_each` | After each case (guaranteed, even on error) | Case workspace | Always continues; `on_failure: fail` fails the case |
 | `before_scoring` | Once, after all cases, before judges | Project root | Aborts scoring |
 | `after_all` | Once, after everything (guaranteed) | Project root | Always continues |
 | `before_report` | Once, during report generation (after `analysis.md`, before HTML render) | Project root | Always continues (`run_hooks_safe`) |
@@ -39,7 +39,10 @@ flowchart TD
     `after_each` and `after_all` run inside a `finally` block, so they fire even
     when the agent invocation or an earlier hook raised. They always use
     *continue* semantics — a failing cleanup hook is logged but never aborts the
-    run — so `on_failure` has no effect on them.
+    run, and every entry runs. `on_failure` has no effect on `after_all`. On
+    `after_each` it defaults to `continue`; an explicit `on_failure: fail` fails
+    the **case** once the remaining `after_each` hooks have run (non-zero
+    `exit_code` and an `error` naming the hook in `cases/<id>/run_result.json`).
 
 ## Hook entry fields
 
@@ -50,7 +53,7 @@ Each entry in a phase list is a mapping:
 | `command` | string | `""` | Shell command, run via `bash -c` |
 | `timeout` | int (seconds) | `120` | Must be a positive integer; on timeout the whole process group is killed |
 | `description` | string | `""` | Label shown in logs (falls back to the command's first line) |
-| `on_failure` | `fail` \| `continue` | `fail` | `fail` aborts the run; `continue` logs and proceeds |
+| `on_failure` | `fail` \| `continue` | `fail` (`continue` for `after_each`) | `fail` aborts the run (for `after_each`: fails the case); `continue` logs and proceeds |
 | `condition` | string | `""` | Guard command; the hook runs only if it exits `0` |
 
 ```yaml title="eval.yaml"
@@ -65,9 +68,12 @@ hooks:
       command: ./eval/scripts/reset_fixtures.sh "$CASE_ID"
 
   after_each:
+    - description: Capture the agent's PR for the judges
+      command: ./eval/scripts/capture_pr.sh "$CASE_ID"
+      on_failure: fail       # fails this case (not the run); later hooks still run
     - description: Best-effort per-case cleanup
       command: ./eval/scripts/cleanup_case.sh "$CASE_ID"
-      on_failure: continue   # redundant here — after_each always continues
+      on_failure: continue   # the default for after_each
 
   after_all:
     - description: Tear down the fake API server
@@ -119,7 +125,7 @@ hooks:
 
 ## Hook outputs
 
-A `before_all` or `before_each` hook can hand data back to the harness by
+A `before_all`, `before_each` or `after_each` hook can hand data back to the harness by
 writing a `.hook-outputs.yaml` (or `.hook-outputs.json`) file with `env` and/or
 `data` keys. The file is read and then deleted.
 
@@ -155,10 +161,12 @@ writing a `.hook-outputs.yaml` (or `.hook-outputs.json`) file with `env` and/or
 
 !!! tip "Where to write the file"
     Outputs are collected from the **workspace** (`before_all`) or the **case
-    workspace** (`before_each`). Write to `$AGENT_EVAL_WORKSPACE` /
-    `$CASE_WORKSPACE` respectively. Outputs from `after_each`, `before_scoring`,
-    and `after_all` are **not** collected — those phases are for side effects and
-    cleanup only.
+    workspace** (`before_each`, `after_each`). Write to `$AGENT_EVAL_WORKSPACE` /
+    `$CASE_WORKSPACE` respectively. From `after_each` only `data` is used (the
+    agent has already run); it is merged into the same `hook_outputs.yaml`, and on
+    a key conflict `after_each` wins over `before_each`. Outputs from
+    `before_scoring` and `after_all` are **not** collected — those phases are for
+    side effects and cleanup only.
 
 ## Failure, timeout, and logs
 
@@ -168,6 +176,14 @@ writing a `.hook-outputs.yaml` (or `.hook-outputs.json`) file with `env` and/or
 - Each hook runs in its own process session; on `timeout` the harness sends
   `SIGTERM` (then `SIGKILL`) to the whole process group, so background children
   are cleaned up too.
+- Per-case hook results (`before_each`, `after_each`) are recorded in
+  `cases/<id>/run_result.json` as `hooks` (per phase: `description`,
+  `exit_code`, `timed_out`, `skipped`, `duration_s`, `on_failure`, `log`) and
+  `hook_failures` (one line per failed hook, e.g.
+  `after_each[1]: Save the PR diff (timed out)`). The run-level
+  `run_result.json` carries `num_hook_failures`, and judges read the same fields
+  as `outputs["hooks"]` / `outputs["hook_failures"]` (present only when per-case
+  hooks ran).
 - Every hook's combined stdout/stderr is written to a log file under the run's
   `hooks/` directory:
 

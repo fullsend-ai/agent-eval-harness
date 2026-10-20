@@ -484,7 +484,7 @@ def load_case_record(case_dir, config, run_id=None, runs_dir=None,
                 record["tool_calls"] = _extract_tool_calls(
                     stdout_text, tool_outputs)
 
-    # --- Hook outputs (from before_each hooks via .hook-outputs.yaml) ---
+    # --- Hook outputs (before_each/after_each hooks via .hook-outputs.yaml) ---
     hook_outputs_path = case_dir / "hook_outputs.yaml"
     if hook_outputs_path.exists():
         try:
@@ -492,6 +492,20 @@ def load_case_record(case_dir, config, run_id=None, runs_dir=None,
                 record["hook_outputs"] = yaml.safe_load(f) or {}
         except (yaml.YAMLError, OSError):
             record["hook_outputs"] = {}
+
+    # --- Per-case hook results (written by execute.py into run_result.json) ---
+    # Exposed as outputs["hooks"] / outputs["hook_failures"] so a judge or an
+    # `if:` condition can gate on a before_each/after_each hook that failed.
+    case_rr_path = case_dir / "run_result.json"
+    if case_rr_path.is_file() and not case_rr_path.is_symlink():
+        try:
+            with open(case_rr_path) as f:
+                case_rr = json.load(f)
+            if isinstance(case_rr, dict) and "hooks" in case_rr:
+                record["hooks"] = case_rr.get("hooks") or {}
+                record["hook_failures"] = case_rr.get("hook_failures") or []
+        except (json.JSONDecodeError, OSError):
+            pass
 
     # --- Per-step sub-records (multi-step execution) ---
     # For a step-scoped judge (JudgeConfig.step), expose each step's own
