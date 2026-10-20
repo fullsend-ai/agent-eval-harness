@@ -1601,3 +1601,64 @@ def test_bare_write_tool_in_a_deny_list_does_not_warn(tmp_path, rule):
         warnings.simplefilter("always")
         EvalConfig.from_yaml(_tool_list_config(tmp_path, "denied_tools", f"[{rule}]"))
     assert not [w for w in caught if "any path on the host" in str(w.message)]
+
+
+def _no_write_rule_warnings(caught):
+    return [w for w in caught if "has no write rule" in str(w.message)]
+
+
+@pytest.mark.parametrize("rules", ["[Read, Grep, Glob]", "['Read(**)']",
+                                   "['Write(output/**)']"])
+def test_allow_list_without_a_write_rule_warns(tmp_path, rules):
+    """Under the forced deny-by-default mode the verdict file needs a write
+    rule. A written list without one degrades the judge to the stdout fallback
+    (2-3x the cost); warn and name `Edit(output/**)`, never rewrite the list.
+    A path-scoped `Write(...)` is a dead rule and does not count."""
+    with pytest.warns(UserWarning, match=r"no write rule.*Edit\(output/\*\*\)"):
+        EvalConfig.from_yaml(
+            _tool_list_config(tmp_path, "allowed_tools", rules))
+
+
+@pytest.mark.parametrize("rules", ["['Read(**)', 'Edit(output/**)']",
+                                   "[Read(**), Edit]", "[]"])
+def test_allow_list_with_a_write_rule_or_empty_does_not_warn(tmp_path, rules):
+    import warnings
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        EvalConfig.from_yaml(
+            _tool_list_config(tmp_path, "allowed_tools", rules))
+    assert not _no_write_rule_warnings(caught)
+
+
+def test_no_write_rule_warning_is_not_raised_for_a_deny_list(tmp_path):
+    import warnings
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        EvalConfig.from_yaml(
+            _tool_list_config(tmp_path, "denied_tools", "[Bash]"))
+    assert not _no_write_rule_warnings(caught)
+
+
+@pytest.mark.parametrize("runner_type,warns", [("claude-code", True),
+                                               ("cursor", False),
+                                               ("codex", False)])
+def test_no_write_rule_warning_is_scoped_to_claude_code_runner(
+        tmp_path, runner_type, warns):
+    """The forced deny-by-default mode is claude-code-only."""
+    import warnings
+    path = _write(tmp_path, f"""
+name: t
+execution:
+  skill: s
+judges:
+  - name: j
+    prompt: grade
+    feedback_type: bool
+    agent:
+      runner: {{type: {runner_type}}}
+      allowed_tools: ['Read(**)']
+""")
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        EvalConfig.from_yaml(path)
+    assert bool(_no_write_rule_warnings(caught)) is warns

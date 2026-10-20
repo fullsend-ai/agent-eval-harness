@@ -1130,6 +1130,32 @@ def _warn_unknown_tool_names(rules, context, is_allow=False):
               "has no effect.")
 
 
+def _warn_allow_without_write_rule(rules, context):
+    """Warn when a judge's written allow list can't grant the verdict write.
+
+    Under the agent judge's forced deny-by-default mode (claude-code only) the
+    Write tool is governed by ``Edit(<path>)`` rules, so an allow list with no
+    write rule (e.g. the formerly documented ``[Read, Grep, Glob]``) cannot
+    create ``./output/score.json``. The judge degrades rather than breaks —
+    the stdout fallback still yields a verdict, at roughly 2-3x the turns and
+    cost. The written list is the author's, so it is never rewritten: warn and
+    name the fix. A path-scoped ``Write(...)`` rule is dead on this runner and
+    does not count as a write rule.
+    """
+    for rule in rules:
+        if not isinstance(rule, str):
+            continue
+        name = rule.split("(", 1)[0].strip()
+        if name in _UNSCOPED_WRITE_TOOLS and not (
+                name == "Write" and "(" in rule):
+            return
+    _warn(f"{context} has no write rule, so under the deny-by-default mode "
+          "the judge cannot create ./output/score.json and falls back to "
+          "returning the verdict on stdout, at roughly 2-3x the turns and "
+          "cost. Add 'Edit(output/**)' to allow just the verdict file — the "
+          "Write tool follows 'Edit(<path>)' rules, not 'Write(<path>)'.")
+
+
 def _env_var_name(value, context):
     """A ``*_env`` setting names an environment variable — never holds a value.
     The error text never echoes the value."""
@@ -2384,6 +2410,15 @@ class EvalConfig:
                     tools_val, f"Judge '{j.get('name', '')}': "
                                f"'agent.{tools_key}'",
                     is_allow=(tools_key == "allowed_tools"))
+                # The forced deny-by-default mode is claude-code-only; a judge
+                # on another runner never hits it.
+                judge_runner = agent_val.get("runner")
+                if (tools_key == "allowed_tools" and tools_val
+                        and (judge_runner is None
+                             or judge_runner.type == "claude-code")):
+                    _warn_allow_without_write_rule(
+                        tools_val, f"Judge '{j.get('name', '')}': "
+                                   f"'agent.{tools_key}'")
             score_range_val = j.get("score_range")
             if score_range_val is not None:
                 jname = j.get("name", "")

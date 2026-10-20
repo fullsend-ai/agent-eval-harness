@@ -1413,6 +1413,7 @@ def _judge_semaphore(cfg):
 def _reset_judge_call_meta():
     _JUDGE_CALL_META.tool_choice_mode = None
     _JUDGE_CALL_META.usage = None
+    _JUDGE_CALL_META.denials = None
 
 
 def _pop_judge_call_meta():
@@ -2195,8 +2196,10 @@ def _judge_tool_policy(allowed=None, denied=None):
     An allow list only pre-approves tools; on a headless Claude Code runner the
     unlisted ones stay callable *unless* the judge runs under
     ``_JUDGE_PERMISSION_MODE``/``_JUDGE_PERMISSION_PROMPTS``, so the deny list
-    is what confines a judge on any other runner (#239). Two rules govern how
-    the two lists interact:
+    is what confines a judge on Cursor, which maps the rules (#239). Codex
+    ignores tool-level permission rules entirely (it warns that they are not
+    enforced) and relies on its ``workspace-write`` filesystem sandbox
+    instead. Two rules govern how the two lists interact:
 
     - With no ``denied`` list, the default applies, minus any tool the author
       explicitly allowed — and minus the rest of that tool's capability group

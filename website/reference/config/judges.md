@@ -304,7 +304,7 @@ Every sub-key is optional.
 | --- | --- | --- | --- |
 | `runner` | mapping | `{type: claude-code}` | Per-judge runner block, parsed exactly like the top-level [`runner`](runner.md) (`type`, `effort`, `command`, `env`, …). Lets the judge use a different runner/model stack than the skill-under-test. |
 | `allowed_tools` | list | `[Read(**), Edit(output/**)]` | Tool allowlist for the judge: read anywhere in the staged workspace, write nothing but the verdict file. Authoritative on the Claude Code runner, which runs judges deny-by-default. Use `Read(**)` not bare `Read` (bare *widens* past the working directory) and `Edit(<path>)` not `Write(<path>)` (the latter matches nothing). Add `Bash` only under sandboxing (see below). `[]` is treated as unset. |
-| `denied_tools` | list | `[Bash, WebFetch, WebSearch, Agent, Edit, MultiEdit, NotebookEdit]` | Tools the judge may never use: defence in depth behind the deny-by-default mode, and the only control on runners with no equivalent of it. Keep `Bash` denied — merely unlisted it is weaker, since a built-in classifier still auto-approves `cat`/`grep`/`echo`, while a deny de-registers the tool. **The default** has anything `allowed_tools` names subtracted from it — along with the rest of that tool's capability group (`Write`/`Edit`/`MultiEdit`/`NotebookEdit`, and `Agent`/`Task`) — since a deny beats an allow and `Bash` left denied would take away the tool `allowed_tools: [Bash(pytest:*)]` asks for; **a list you write** replaces the default outright, with no subtraction. `[]` disables it entirely. `Write` is absent on purpose — see the note below. |
+| `denied_tools` | list | `[Bash, WebFetch, WebSearch, Agent, Edit, MultiEdit, NotebookEdit]` | Tools the judge may never use: defence in depth behind the deny-by-default mode, and the tool-level control on Cursor, which maps the rules (Codex ignores tool-level rules entirely and relies on its `workspace-write` filesystem sandbox). Keep `Bash` denied — merely unlisted it is weaker, since a built-in classifier still auto-approves `cat`/`grep`/`echo`, while a deny de-registers the tool. **The default** has anything `allowed_tools` names subtracted from it — along with the rest of that tool's capability group (`Write`/`Edit`/`MultiEdit`/`NotebookEdit`, and `Agent`/`Task`) — since a deny beats an allow and `Bash` left denied would take away the tool `allowed_tools: [Bash(pytest:*)]` asks for; **a list you write** replaces the default outright, with no subtraction. `[]` disables it entirely. `Write` is absent on purpose — see the note below. |
 | `context` | list of paths | `[]` | Dirs/files copied under `./.context/<name>` for the agent to consult (a copy, so nothing the judge writes reaches the originals). Distinct from the top-level `context:`, which is appended to the prompt text. |
 | `inputs` | list | all output dirs | Which collected output dirs (by `outputs[].path` name) to stage as files. Use `[.]` to stage everything. |
 | `timeout` | int | `execution.timeout` or `600` | Per-run wall-clock budget in seconds. |
@@ -355,8 +355,18 @@ Per case, the harness:
     and every build since. On an older CLI the judge fails with `unknown option`
     rather than running unconfined.
 
-    `denied_tools` still applies, as defence in depth and because it is the only
-    control on runners with no equivalent mode. `Bash` in particular must stay
+    **Upgrading.** A written `allowed_tools` list with no write rule — the
+    previously documented `[Read, Grep, Glob]` is exactly that shape — can no longer
+    create `./output/score.json` under the forced deny-by-default mode. The judge
+    degrades rather than breaks: the stdout fallback still produces a verdict, at
+    roughly 2-3x the turns and cost. The harness warns at config load for a judge on
+    the `claude-code` runner (or with no judge runner set) and does **not** rewrite
+    your list, since a written rule is yours. To fix it, add `Edit(output/**)` — the
+    Write tool follows `Edit(<path>)` rules, not `Write(<path>)`.
+
+    `denied_tools` still applies, as defence in depth and because it is the
+    tool-level control on Cursor, which maps the rules. Codex ignores tool-level
+    rules entirely and relies on its `workspace-write` filesystem sandbox. `Bash` in particular must stay
     denied: merely *unlisted*, a built-in classifier still auto-approves a set of
     commands (`cat`, `grep`, `echo`, `whoami` …), and a judge denied `Grep` has been
     observed routing around it via `Bash grep`. A deny de-registers the tool
