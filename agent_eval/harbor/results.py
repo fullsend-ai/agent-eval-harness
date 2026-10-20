@@ -19,6 +19,21 @@ from pathlib import Path
 _WHOLE_TASK = "(whole task)"
 
 
+def _add_verdict_counters(record: dict, sidecar: dict) -> None:
+    """Fold a judges.json sidecar's spec 015 judge-usage counters
+    (``verdict_transports`` per transport, ``verdict_fallbacks``) into
+    ``record``, summing when several steps report them."""
+    transports = sidecar.get("verdict_transports")
+    if isinstance(transports, dict):
+        into = record.setdefault("verdict_transports", {})
+        for name, n in transports.items():
+            if isinstance(n, int) and not isinstance(n, bool):
+                into[name] = into.get(name, 0) + n
+    fallbacks = sidecar.get("verdict_fallbacks")
+    if isinstance(fallbacks, int) and not isinstance(fallbacks, bool):
+        record["verdict_fallbacks"] = record.get("verdict_fallbacks", 0) + fallbacks
+
+
 def _case_id_from_dir(trial_dir: Path) -> str:
     """Recover the full task case ID, falling back to Harbor's trial slug.
 
@@ -362,7 +377,9 @@ def parse_trial(trial_dir: Path) -> dict | None:
     judges_path = trial_dir / "verifier" / "judges.json"
     if judges_path.is_file():
         try:
-            record["per_judge"] = json.loads(judges_path.read_text()).get("per_judge", {})
+            sidecar = json.loads(judges_path.read_text())
+            record["per_judge"] = sidecar.get("per_judge", {})
+            _add_verdict_counters(record, sidecar)
         except (json.JSONDecodeError, OSError, UnicodeDecodeError):
             pass
 
@@ -386,6 +403,7 @@ def _parse_multi_step_trial(trial_dir: Path, steps_dir: Path) -> dict | None:
 
     rewards = []
     per_judge: dict = {}
+    counters: dict = {}             # spec 015 verdict-transport counters, summed over steps
     infra_error_steps: list[str] = []
     unjudged_steps: list[str] = []
     total_cost = 0.0
@@ -518,6 +536,7 @@ def _parse_multi_step_trial(trial_dir: Path, steps_dir: Path) -> dict | None:
             try:
                 jdata = json.loads(judges_path.read_text())
                 engine_judges = jdata.get("per_judge", {})
+                _add_verdict_counters(counters, jdata)
                 if engine_judges:
                     per_judge.update(engine_judges)
                     engine_reward = jdata.get("reward")
@@ -533,6 +552,7 @@ def _parse_multi_step_trial(trial_dir: Path, steps_dir: Path) -> dict | None:
         "reward": mean_reward,
         "metrics": {s.name: per_judge[s.name]["value"] for s in step_dirs},
         "per_judge": per_judge,
+        **counters,
         "errored": (trial_dir / "exception.txt").is_file(),
         "infra_error_steps": infra_error_steps,
         "unjudged_steps": unjudged_steps,

@@ -1641,9 +1641,9 @@ class ModelsConfig:
 VERDICT_POLICIES = ("auto", "json_schema", "tool")
 
 
-def _check_verdict_policy(value, label):
+def _check_verdict_policy(value, label, default="auto"):
     if value is None or value == "":
-        return "auto"
+        return default
     if not isinstance(value, str) or value not in VERDICT_POLICIES:
         raise ValueError(f"{label} must be one of {', '.join(VERDICT_POLICIES)}; got {value!r}")
     return value
@@ -2513,9 +2513,9 @@ class EvalConfig:
                     examples=examples_val,
                     agent=agent_val,
                     provider_options=j.get("provider_options") or {},
-                    verdict=_check_verdict_policy(j.get("verdict"),
-                                                  f"judge '{j.get('name', '')}' verdict")
-                    if j.get("verdict") not in (None, "") else "",
+                    verdict=_check_verdict_policy(
+                        j.get("verdict"), f"Judge '{j.get('name', '')}': 'verdict'",
+                        default=""),
                 )
             )
 

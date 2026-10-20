@@ -214,7 +214,7 @@ Read the full results:
 python3 ${CLAUDE_SKILL_DIR}/scripts/agent_eval/state.py read $AGENT_EVAL_RUNS_DIR/<eval-name>/<id>/summary.yaml
 ```
 
-`summary.yaml` has three sections: `judges` (per-judge `mean` and `pass_rate`), `per_case` (per-case `{value, rationale}` per judge), and `pairwise` (only if `--baseline` was used: `run_a`, `run_b`, `wins_a`, `wins_b`, `ties`).
+`summary.yaml` has these sections: `judges` (per-judge `mean` and `pass_rate`), `per_case` (per-case `{value, rationale}` per judge), `judge_usage` (judge cost and token totals, plus `verdict_transports` and `verdict_fallbacks` — absent when no judge produced usage), `total_cost_usd`, and `pairwise` (only if `--baseline` was used: `run_a`, `run_b`, `wins_a`, `wins_b`, `ties`).
 
 ## Step 7: Interpret and Report
 

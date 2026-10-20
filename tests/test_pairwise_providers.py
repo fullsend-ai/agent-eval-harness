@@ -433,3 +433,80 @@ def test_cmd_pairwise_passes_the_selected_judges_verdict_policy(tmp_path, monkey
     args.judge = "other"
     score.cmd_pairwise(args)
     assert captured["verdict"] is None
+
+
+def _anthropic_scripted(*script):
+    calls = []
+
+    def create(**kw):
+        calls.append(kw)
+        step = script[min(len(calls) - 1, len(script) - 1)]
+        if isinstance(step, BaseException):
+            raise step
+        return step
+
+    client = SimpleNamespace(messages=SimpleNamespace(create=create))
+    client.calls = calls
+    return client
+
+
+class _Refusal(Exception):
+    status_code = 400
+
+    def __init__(self, message):
+        super().__init__(message)
+        self.message = message
+
+
+def _anthropic_reply(content, stop_reason="end_turn"):
+    return SimpleNamespace(id="m", model="claude-opus-5-5", content=content,
+                           stop_reason=stop_reason,
+                           usage=SimpleNamespace(input_tokens=1, output_tokens=1))
+
+
+def test_pairwise_anthropic_auto_rung_rejects_prose_and_invalid_tool_calls():
+    """Under `tool_choice: auto` (a model that rejects forcing) a reply without
+    a valid submit_comparison call is an error — prose is never parsed."""
+    refusals = (_Refusal("output_config: Extra inputs are not permitted"),
+                _Refusal('tool_choice: type "tool" and "any" are not supported for this model.'))
+    prose = _anthropic_reply([SimpleNamespace(
+        type="text", text='{"reasoning": "r", "preferred": "A"}')])
+    verdict, err = score._call_judge("anthropic", _anthropic_scripted(*refusals, prose),
+                                     "sys", "msg", "claude-opus-5-5")
+    assert verdict is None and "No submit_comparison tool_use" in err
+    score._reset_verdict_state()
+    invalid = _anthropic_reply([SimpleNamespace(
+        type="tool_use", name="submit_comparison", input={"reasoning": "r", "preferred": "maybe"})])
+    verdict, err = score._call_judge("anthropic", _anthropic_scripted(*refusals, invalid),
+                                     "sys", "msg", "claude-opus-5-5")
+    assert verdict is None and "No submit_comparison tool_use" in err
+    score._reset_verdict_state()
+    valid = _anthropic_reply([SimpleNamespace(
+        type="tool_use", name="submit_comparison", input={"reasoning": "r", "preferred": "B"})])
+    verdict, err = score._call_judge("anthropic", _anthropic_scripted(*refusals, valid),
+                                     "sys", "msg", "claude-opus-5-5")
+    assert err is None and verdict["preferred"] == "B"
+
+
+@pytest.mark.parametrize("payload", [
+    '{"reasoning": "r", "preferred": "C"}',
+    '{"reasoning": "r"}',
+    '{"reasoning": 3, "preferred": "A"}'])
+def test_pairwise_structured_output_validates_the_verdict_object(payload):
+    reply = _anthropic_reply([SimpleNamespace(type="text", text=payload)])
+    verdict, err = score._call_judge("anthropic", _anthropic_scripted(reply),
+                                     "sys", "msg", "claude-opus-5-5")
+    assert verdict is None and "does not match the submit_comparison" in err
+    client = _raw_client(_pw_response(tool_name=None, content=payload))
+    verdict, err = score._call_pairwise_openai(client, "compare", "A vs B", "gpt-4o")
+    assert verdict is None and "does not match the submit_comparison" in err
+
+
+def test_structured_verdict_rejects_boolean_scores_and_missing_rationale():
+    bounds = (1, 5, True)
+    assert score._verdict_from_data({"rationale": "r", "score": True}, False, bounds) is None
+    assert score._verdict_from_data({"rationale": "r", "score": 4}, False, bounds) == (4, "r")
+    assert score._verdict_from_data({"score": 4}, False, bounds) == (4, "(no rationale provided)")
+    assert score._verdict_from_data({"score": 4}, False, bounds, strict=True) is None
+    assert score._verdict_from_data({"rationale": 1, "passed": True}, True, bounds,
+                                    strict=True) is None

@@ -132,6 +132,7 @@ models:
   skill: claude-opus-4-6         # Default for eval runs (or pass --model)
   # subagent: claude-sonnet-4-6  # Defaults to skill model
   judge: claude-opus-4-6         # LLM and pairwise judges need a strong model
+  # judge_verdict: auto          # verdict transport: auto | json_schema | tool (a judge's own `verdict:` overrides)
   # hook: claude-sonnet-4-6      # For AskUserQuestion answering (fast, cheaper than Opus)
 
 # Permissions for headless execution
@@ -399,6 +400,9 @@ judges:
     #                               # needs feedback_type: float (never with bool,
     #                               # never fractional with int — both rejected at
     #                               # load).
+    # verdict: auto                   # optional: auto | json_schema | tool — how this
+    #                                 # judge carries its verdict; overrides
+    #                                 # models.judge_verdict
     # arguments:                      # optional, available as {{ arguments }} in prompt
     #   focus: completeness
     # context:                        # optional supplementary files

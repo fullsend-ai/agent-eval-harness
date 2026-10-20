@@ -1699,7 +1699,7 @@ execution:
 models:
   judge_verdict: forced
 """))
-    with pytest.raises(ValueError, match="judge 'a' verdict must be one of"):
+    with pytest.raises(ValueError, match="Judge 'a': 'verdict' must be one of"):
         EvalConfig.from_yaml(_write(tmp_path, """
 name: t
 execution:

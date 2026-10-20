@@ -188,7 +188,14 @@ def _check_key(key, roles, spec, judge_pinned, variant, known, catalog, snapshot
                                         "forced tool there (spec 015)")
             if verdict in ("auto", "tool") and function_reported:
                 lacking = [t for t in entry["eligible"] if t not in function_capable]
-                if not function_capable:
+                if not function_capable and verdict == "auto" and structured_capable:
+                    # `auto` sends json_schema first; an endpoint that serves it
+                    # keeps the run viable without forced-tool support.
+                    res.warnings.append(f"{label}{who}: no pinned endpoint supports "
+                                        "tool_choice: function; the judge runs on the "
+                                        "json_schema transport only (a forced-tool "
+                                        "fallback would answer 404, Decision 25)")
+                elif not function_capable:
                     res.failures.append(f"{label}{who}: no pinned endpoint supports tool_choice: "
                                         "function — a pinned judge's forced tool call answers 404 "
                                         "(Decision 25)")

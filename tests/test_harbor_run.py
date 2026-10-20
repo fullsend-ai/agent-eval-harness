@@ -591,6 +591,20 @@ def test_build_summary_carries_judge_usage(tmp_path):
     assert summary["judge_usage"]["by_model"]["z-ai/glm-5.2"]["requests"] == 2
 
 
+def test_build_summary_aggregates_verdict_counters_across_trials(tmp_path):
+    """Spec 015: the verifier's transport tally (judges.json sidecar → trial
+    record) is summed into summary.judge_usage like the local scorer's."""
+    job = _parsed_job()
+    job["trials"][0]["verdict_transports"] = {"json_schema": 2}
+    job["trials"][1]["verdict_transports"] = {"json_schema": 1, "tool": 1}
+    job["trials"][1]["verdict_fallbacks"] = 1
+
+    summary = run_mod.build_summary(job, _config(tmp_path))
+
+    assert summary["judge_usage"]["verdict_transports"] == {"json_schema": 3, "tool": 1}
+    assert summary["judge_usage"]["verdict_fallbacks"] == 1
+
+
 def test_build_summary_without_usage_has_no_judge_usage(tmp_path):
     summary = run_mod.build_summary(_parsed_job(), _config(tmp_path))
     assert "judge_usage" not in summary

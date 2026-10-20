@@ -214,6 +214,29 @@ def test_pinned_judges_are_checked_for_structured_outputs_per_verdict_policy(fak
     assert not any("tool_choice: function" in w for w in res.warnings + res.failures)
 
 
+def test_auto_accepts_a_structured_outputs_endpoint_that_cannot_force_a_tool(fake, tmp_path, monkeypatch):
+    """Under `auto` the first transport is json_schema, so an endpoint that
+    advertises structured_outputs keeps the run viable even though it cannot
+    force a tool call (WARN); `tool` still fails, `json_schema` passes."""
+    import openrouter_fakes
+
+    monkeypatch.setitem(openrouter_fakes.ENDPOINTS, "qwen/qwen3-8b", [
+        {"provider_name": "Novita", "tag": "novita/qwen", "quantization": "bf16", "status": 0,
+         "supported_parameters": ["tools", "tool_choice", "response_format", "structured_outputs"],
+         "supports_tool_choice": {"none": True, "auto": True, "required": False, "function": False},
+         "max_completion_tokens": 16384}])
+    table = RoutingTable.from_dict({"models": {"qwen/qwen3-8b": {"only": ["novita"]}}})
+    qwen = make_plan(fake.base_url, routing=table, skill=parse_agent_model("openrouter:/qwen/qwen3-8b"),
+                     subagent=parse_agent_model("openrouter:/qwen/qwen3-8b"))
+    res = run_preflight(qwen, level="strict", judges={"qwen/qwen3-8b": True})
+    assert res.failures == []
+    assert any("json_schema transport only" in w for w in res.warnings)
+    res = run_preflight(qwen, level="strict", judges={"qwen/qwen3-8b": True}, verdict="json_schema")
+    assert res.failures == []
+    with pytest.raises(ConfigError, match="tool_choice: function"):
+        run_preflight(qwen, level="strict", judges={"qwen/qwen3-8b": True}, verdict="tool")
+
+
 def test_preflight_checks_each_judge_under_its_own_verdict_policy(fake, tmp_path):
     """A judge's own `verdict:` decides which capability its pinned endpoints need
     (spec 015): a `json_schema` judge fails on a set without structured_outputs

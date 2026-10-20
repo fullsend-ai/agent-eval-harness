@@ -452,7 +452,16 @@ def build_summary(parsed_job: dict, config: EvalConfig) -> dict:
             judges[name] = {"mean": None, "pass_rate": None}
 
     summary = {"judges": judges, "per_case": per_case}
-    judge_usage = _load_score_module().aggregate_judge_usage(per_case)
+    # Spec 015 counters ride each trial's judges.json sidecar (the engine ran
+    # in the verifier container); sum them across trials.
+    verdict_transports: dict = {}
+    verdict_fallbacks = 0
+    for trial in parsed_job["trials"]:
+        for name, n in (trial.get("verdict_transports") or {}).items():
+            verdict_transports[name] = verdict_transports.get(name, 0) + n
+        verdict_fallbacks += trial.get("verdict_fallbacks") or 0
+    judge_usage = _load_score_module().aggregate_judge_usage(
+        per_case, verdict_transports=verdict_transports, verdict_fallbacks=verdict_fallbacks)
     if judge_usage:
         summary["judge_usage"] = judge_usage
     return summary

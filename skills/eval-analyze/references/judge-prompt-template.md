@@ -127,13 +127,14 @@ definitions:
 
 ## What NOT to put in the prompt
 
-- **JSON or response-format boilerplate.** The harness forces a tool call —
-  `submit_evaluation` (pass/fail + rationale) for boolean judges,
-  `submit_score` (score + rationale) for numeric ones — so structured output
-  and a rationale are already enforced. "Respond with JSON {...}" fights the
-  forced tool schema and is ignored at best.
+- **JSON or response-format boilerplate.** The harness hands the provider the
+  verdict schema itself — `submit_evaluation` (pass/fail + rationale) for
+  boolean judges, `submit_score` (score + rationale) for numeric ones, as a
+  structured output or a forced tool call — so the shape and a rationale are
+  already enforced. "Respond with JSON {...}" fights that schema and is
+  ignored at best.
 - **The numeric bounds.** A declared `score_range` is stated in the judge's
-  system prompt and tool schema automatically. The prompt's job is defining
+  system prompt and verdict schema automatically. The prompt's job is defining
   what each level *means*, not restating the scale.
 - **Your own untrusted-data guard.** The harness fences the rendered artifact
   variables and carries the guard in every LLM judge's system prompt (and in

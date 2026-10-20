@@ -234,7 +234,7 @@ The harness supports five judge kinds, each discriminated by which field is set 
 - All prompts are Jinja2 rendered with variables: `{{ outputs }}`, `{{ conversation }}`, `{{ reasoning }}`, `{{ inputs }}`, `{{ evidence }}`, `{{ tool_trace }}`, `{{ annotations }}`, `{{ arguments }}`
 - `context` files are appended to the prompt
 - `arguments:` field makes prompts parameterizable without editing the prompt text
-- Returns `{"rationale": "...", "score": N}` or `{"rationale": "...", "passed": bool}` — the tool schemas elicit the rationale *before* the verdict so the model reasons before committing. Anthropic and OpenAI judges use a structured API response; runner-backed judges (`runner:/…` models) must emit exactly that one JSON object on stdout, without a conversational preamble. The `output/score.json` file contract applies only to `agent:` judges
+- Returns `{"rationale": "...", "score": N}` or `{"rationale": "...", "passed": bool}` — the verdict schema (a structured output or the forced tool, whichever transport carries it) elicits the rationale *before* the verdict so the model reasons before committing. Anthropic and OpenAI judges use a structured API response; runner-backed judges (`runner:/…` models) must emit exactly that one JSON object on stdout, without a conversational preamble. The `output/score.json` file contract applies only to `agent:` judges
 
 #### External code judge (`module` + `function` field)
 - Imported via `importlib` from the project

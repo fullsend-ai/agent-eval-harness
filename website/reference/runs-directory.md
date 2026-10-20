@@ -171,7 +171,8 @@ every one of its ids has a row).
 `judge`, `key-usage`), `source` (`generation`, `key-usage`, `judge`), `gen_id`,
 `message_index`, the requested/echoed/served model ids, `provider`, `quantization`,
 `audit`, `status` (`ok`, `backfill_failed`, `partial`), `cost_usd`, native token
-counts, latency and `backfill_lag_s`. Never request bodies, headers or keys.
+counts, latency and `backfill_lag_s`, plus `tool_choice_mode` and `verdict_transport`
+for judge rows (see the [verdict transport](config/judges.md#verdict-transport)). Never request bodies, headers or keys.
 
 !!! note "Adjusted, not raw, per-case values"
     For the claude-code runner, per-case `exit_code` is `1` (not `0`) when the

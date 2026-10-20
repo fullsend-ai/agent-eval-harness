@@ -25,7 +25,9 @@ tool call as the fallback. Claude Opus 5.5 and Sonnet 5.5 reject forced tool use
 this is what makes them usable as judges — directly and through OpenRouter — and it
 lets every judge think before it writes its rationale. Pin `models.judge_verdict: tool`
 to keep the previous contract on a judge model that still accepts it, and re-judge a
-baseline before comparing across the boundary.
+baseline before comparing across the boundary. The `anthropic[vertex]` SDK floor rises
+from `>=0.40` to `>=0.77` (structured outputs need it; an older SDK degrades to the
+tool transport), so a project pinning an older `anthropic` will hit a resolver conflict.
 See [Verdict transport](reference/config/judges.md#verdict-transport).
 
 ### [1.56.0](https://github.com/opendatahub-io/agent-eval-harness/releases/tag/v1.56.0) — Post-hoc level contrasts
