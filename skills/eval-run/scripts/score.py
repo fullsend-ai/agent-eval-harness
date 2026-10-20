@@ -48,6 +48,7 @@ from agent_eval.prompt_backends import (
 )
 from agent_eval.providers import JudgeProviderError
 from agent_eval.providers.openrouter.errors import is_structured_output_400, is_tool_choice_400
+from agent_eval.providers.openrouter.routing import routing_sha
 
 # Log (don't silently blank) any undefined variable a judge template references.
 _TEMPLATE_LOGGER = logging.getLogger("agent_eval.judge_template")
@@ -1455,7 +1456,7 @@ def _anthropic_json_verdict(response, tool, model):
         raise JudgeProviderError(
             f"{model} refused the judge request (stop_reason=refusal): {text[:200]}",
             error_type="refusal", retryable=False, verdict_transport="json_schema")
-    data = _loads_json_object(text) if text else None
+    data = _loads_strict_json_object(text) if text else None
     if data is None:
         if stop == "max_tokens":
             raise JudgeProviderError(
@@ -1669,7 +1670,7 @@ def _reset_tool_choice_fallbacks():
 # structured output: Anthropic `output_config.format`, OpenAI-shaped
 # `response_format`) or `tool` (the forced tool call, with the Decision 25
 # ladder). The policy (`models.judge_verdict`, per-judge `verdict`) picks the
-# rungs; the first transport that returns a verdict for a (backend, model)
+# rungs; the first transport that returns a verdict for a (backend, model, routing)
 # becomes the start rung for the rest of the run, so a fallback is paid once.
 
 _VERDICT_TRANSPORTS = ("json_schema", "tool")
@@ -1716,29 +1717,39 @@ def _nominal_verdict_rung(backend, model, policy):
     return "json_schema"
 
 
-def _verdict_rungs(backend, model, policy):
+def _verdict_route(extra_body):
+    """The routing component of the sticky-rung key: the `routing_sha` of the
+    request's provider body, empty when there is none — a pinned and an
+    unpinned judge on one slug can be served by different endpoints, so they
+    learn separately."""
+    provider = (extra_body or {}).get("provider")
+    return routing_sha(provider) if provider else ""
+
+
+def _verdict_rungs(backend, model, policy, route=""):
     """The ordered transports for one judge call: an explicit policy is a
     single rung (no cross-transport fallback); `auto` is `json_schema → tool`,
-    shortened to the rung already known to work for (backend, model)."""
+    shortened to the rung already known to work for (backend, model, route)."""
     nominal = _nominal_verdict_rung(backend, model, policy)
     if policy in _VERDICT_TRANSPORTS or nominal == "tool":
         return (nominal,)
     with _JUDGE_STATE_LOCK:
-        start = _VERDICT_START.get((backend, model))
+        start = _VERDICT_START.get((backend, model, route))
     return ("tool",) if start == "tool" else ("json_schema", "tool")
 
 
-def _record_verdict_transport(backend, model, transport, *, fell_back, learn=True):
+def _record_verdict_transport(backend, model, transport, *, fell_back, learn=True,
+                              route=""):
     """Note the transport a verdict came over: on the thread-local call meta
     (the per-case record), the run counters (`judge_usage`) and — under
-    `auto` only (`learn`) — the sticky start rung for (backend, model)."""
+    `auto` only (`learn`) — the sticky start rung for (backend, model, route)."""
     _JUDGE_CALL_META.verdict_transport = transport
     with _JUDGE_STATE_LOCK:
         _VERDICT_COUNTS[transport] = _VERDICT_COUNTS.get(transport, 0) + 1
         if fell_back:
             _VERDICT_COUNTS["fallbacks"] += 1
         if learn:
-            _VERDICT_START.setdefault((backend, model), transport)
+            _VERDICT_START.setdefault((backend, model, route), transport)
 
 
 def _verdict_transport_counts():
@@ -2254,7 +2265,8 @@ def _openai_judge_request(client, cfg, *, model, messages, tool, max_tokens,
     semaphore = _judge_semaphore(cfg)
     token_kwargs = _token_limit_kwargs(model, max_tokens, token_param)
     nominal = _nominal_verdict_rung(backend, model, policy)
-    rungs = _verdict_rungs(backend, model, policy)
+    route = _verdict_route(extra_body)
+    rungs = _verdict_rungs(backend, model, policy, route)
 
     def _send(**kwargs):
         if semaphore is None:
@@ -2289,7 +2301,7 @@ def _openai_judge_request(client, cfg, *, model, messages, tool, max_tokens,
         else:
             _record_verdict_transport(backend, model, "json_schema",
                                       fell_back=("json_schema" != nominal),
-                                      learn=(policy == "auto"))
+                                      learn=(policy == "auto"), route=route)
             _record_judge_usage(_usage_from_openai_response(response, model))
             return response, "json_schema", None
 
@@ -2309,7 +2321,7 @@ def _openai_judge_request(client, cfg, *, model, messages, tool, max_tokens,
             continue
         _record_tool_choice_mode(mode)
         _record_verdict_transport(backend, model, "tool", fell_back=("tool" != nominal),
-                                  learn=(policy == "auto"))
+                                  learn=(policy == "auto"), route=route)
         _record_judge_usage(_usage_from_openai_response(response, model))
         return response, "tool", mode
     pins = (extra_body or {}).get("provider") or {}
@@ -2452,7 +2464,7 @@ def _openai_json_verdict(response, model):
             f"{model} refused the judge request: {str(refusal)[:200]}",
             error_type="refusal", retryable=False, verdict_transport="json_schema")
     text = (message.content or "").strip() if isinstance(message.content, str) else ""
-    data = _loads_json_object(text) if text else None
+    data = _loads_strict_json_object(text) if text else None
     if data is None:
         finish = getattr(choice, "finish_reason", None)
         if finish == "length":
@@ -2814,6 +2826,27 @@ def _parse_score_response(text, bounds=None):
     raise ValueError(
         f"could not parse a score in [{_fmt_bound(lo)}, {_fmt_bound(hi)}] "
         f"from judge response: {text.strip() or '(empty)'}")
+
+
+_WHOLE_REPLY_FENCE = re.compile(r'\A```(?:json)?[ \t]*\r?\n(.*)\r?\n?```\Z',
+                                re.DOTALL | re.IGNORECASE)
+
+
+def _loads_strict_json_object(text):
+    """Strict parse of a structured-output reply: the whole reply is one JSON
+    object, optionally wrapped in a single ```json fence that spans the entire
+    reply. Never scans for an embedded fragment or slices between braces, so a
+    fenced snippet quoted inside the rationale cannot displace the verdict.
+    Returns a dict or None."""
+    t = (text or "").strip()
+    fence = _WHOLE_REPLY_FENCE.match(t)
+    if fence:
+        t = fence.group(1).strip()
+    try:
+        obj = json.loads(t, strict=False)
+    except json.JSONDecodeError:
+        return None
+    return obj if isinstance(obj, dict) else None
 
 
 def _loads_json_object(text):
@@ -4541,12 +4574,15 @@ def _call_judge(backend, client, system_prompt, user_message, model,
                        if getattr(b, "type", None) == "text")
         parsed = _extract_judge_json(text) if text and _mode == "function" else None
         if parsed is not None:
-            return {**parsed, "_usage": usage}, None
+            err = _pairwise_verdict_error(parsed)
+            if err is None:
+                return {**parsed, "_usage": usage}, None
+            invalid = invalid or f"text verdict: {err}"
         # Retry once with a larger budget if the response was truncated.
         if response.stop_reason == "max_tokens" and max_tokens < 32768:
             return _call_judge(backend, client, system_prompt, user_message, model,
                                max_tokens=max_tokens * 2, verdict=verdict)
-        detail = f"; the tool_use input is invalid: {invalid}" if invalid else ""
+        detail = f"; the verdict is invalid: {invalid}" if invalid else ""
         return None, (f"No submit_comparison tool_use in response "
                       f"(stop_reason={response.stop_reason}){detail}")
     except Exception as e:
@@ -4598,13 +4634,16 @@ def _call_pairwise_openai(client, system_prompt, user_message, model,
         text = message.content or ""
         parsed = _extract_judge_json(text) if text else None
         if parsed is not None:
-            return {**parsed, "_usage": usage}, None
+            err = _pairwise_verdict_error(parsed)
+            if err is None:
+                return {**parsed, "_usage": usage}, None
+            invalid = invalid or f"text verdict: {err}"
         finish = response.choices[0].finish_reason
         if finish == "length" and max_tokens < 32768:
             return _call_pairwise_openai(client, system_prompt, user_message,
                                          model, max_tokens=max_tokens * 2,
                                          **binding)
-        detail = f"; the tool call is invalid: {invalid}" if invalid else ""
+        detail = f"; the verdict is invalid: {invalid}" if invalid else ""
         return None, (f"No submit_comparison tool call in response "
                       f"(finish_reason={finish}){detail}")
     except Exception as e:

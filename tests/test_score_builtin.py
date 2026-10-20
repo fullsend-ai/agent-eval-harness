@@ -1,5 +1,6 @@
 """Integration tests for builtin judge resolution in the scoring pipeline."""
 
+import json
 from types import SimpleNamespace
 import sys
 from pathlib import Path
@@ -2433,6 +2434,34 @@ class TestVerdictTransportAnthropic:
         assert exc.value.error_type == error_type
         assert exc.value.verdict_transport == "json_schema"
 
+    def test_an_inline_fenced_fragment_in_the_rationale_does_not_displace_the_verdict(self):
+        import score
+        rationale = 'The output contained ```json\n{"passed": false}\n``` verbatim.'
+        reply = _anthropic_text(json.dumps({"rationale": rationale, "passed": True}))
+        with patch("score._get_anthropic_client", return_value=_anthropic_client(reply)):
+            assert score._call_structured_judge("p", "claude-opus-5-5", "bool") == (
+                True, rationale)
+
+    def test_a_single_fence_around_the_whole_reply_is_accepted(self):
+        import score
+        reply = _anthropic_text('```json\n{"rationale": "r", "passed": true}\n```')
+        with patch("score._get_anthropic_client", return_value=_anthropic_client(reply)):
+            assert score._call_structured_judge("p", "claude-opus-5-5", "bool") == (True, "r")
+
+    @pytest.mark.parametrize("text", [
+        'Here is my verdict: {"rationale": "r", "passed": true}',
+        '{"rationale": "r", "passed": true} Hope that helps.',
+        'Result:\n```json\n{"rationale": "r", "passed": true}\n```',
+        '["rationale", "passed"]'])
+    def test_prose_around_the_object_or_a_non_object_is_a_bad_verdict(self, text):
+        import score
+        with patch("score._get_anthropic_client",
+                   return_value=_anthropic_client(_anthropic_text(text))), \
+                pytest.raises(JudgeProviderError) as exc:
+            score._call_structured_judge("p", "claude-opus-5-5", "bool")
+        assert exc.value.error_type == "bad_verdict"
+        assert exc.value.verdict_transport == "json_schema"
+
     def test_a_pre_4_5_claude_starts_on_the_forced_tool(self):
         import score
         client = _anthropic_client(
@@ -2579,6 +2608,45 @@ class TestVerdictTransportOpenRouter:
             assert exc.value.error_type == error_type, error_type
             assert exc.value.verdict_transport == "json_schema"
             assert len(client.calls) == 1
+
+    def test_an_inline_fenced_fragment_in_the_rationale_does_not_displace_the_verdict(
+            self, or_env, monkeypatch):
+        rationale = 'The output contained ```json\n{"passed": false}\n``` verbatim.'
+        client = _or_client(_or_response(
+            tool_name=None, content=json.dumps({"rationale": rationale, "passed": True})))
+        assert self._score(_or_config(verdict="auto"), client, monkeypatch) == (
+            True, rationale)
+
+    def test_a_single_fence_around_the_whole_reply_is_accepted(self, or_env, monkeypatch):
+        client = _or_client(_or_response(
+            tool_name=None, content='```json\n{"rationale": "r", "passed": true}\n```'))
+        assert self._score(_or_config(verdict="auto"), client, monkeypatch) == (True, "r")
+
+    @pytest.mark.parametrize("content", [
+        'Here is my verdict: {"rationale": "r", "passed": true}',
+        '{"rationale": "r", "passed": true} Hope that helps.',
+        '["rationale", "passed"]'])
+    def test_prose_around_the_object_or_a_non_object_is_a_bad_verdict(
+            self, content, or_env, monkeypatch):
+        client = _or_client(_or_response(tool_name=None, content=content))
+        with pytest.raises(JudgeProviderError) as exc:
+            self._score(_or_config(verdict="auto"), client, monkeypatch)
+        assert exc.value.error_type == "bad_verdict"
+        assert exc.value.verdict_transport == "json_schema"
+
+    def test_a_pinned_and_an_unpinned_judge_on_one_slug_learn_separately(
+            self, or_env, monkeypatch):
+        import score
+        client = _or_client(_response_format_refusal(), _or_ok(), self._json_ok())
+        # the unpinned judge falls to the tool rung and remembers it for its routing ...
+        assert self._score(_or_config(verdict="auto"), client, monkeypatch) == (True, "solid")
+        assert "response_format" in client.calls[0] and "tools" in client.calls[1]
+        # ... which does not shorten the pinned judge's ladder on the same slug
+        pinned = _or_config(verdict="auto", inherit_pins=True)
+        assert self._score(pinned, client, monkeypatch) == (True, "solid")
+        assert "response_format" in client.calls[2] and len(client.calls) == 3
+        assert {key[:2] for key in score._VERDICT_START} == {("openrouter", _OR_SLUG)}
+        assert len(score._VERDICT_START) == 2
 
     def test_an_explicit_json_schema_policy_is_a_config_error_when_refused(
             self, or_env, monkeypatch):

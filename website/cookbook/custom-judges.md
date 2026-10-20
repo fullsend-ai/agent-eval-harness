@@ -393,7 +393,7 @@ the levels or decompose into tiered booleans); and `score_range` declared on the
   ones, as a structured output or a forced tool call — so the shape and a rationale are
   already enforced. "Respond with JSON {...}" fights that schema and is ignored at best.
 - **The numeric bounds.** A declared `score_range` is stated in the system prompt and
-  tool schema automatically. The prompt defines what each level *means*.
+  verdict schema automatically. The prompt defines what each level *means*.
 - **Your own untrusted-data guard.** The harness fences the artifact variables and puts
   the guard in every LLM judge's system prompt — see
   [How the judge prompt is assembled](../concepts/judges.md#how-the-judge-prompt-is-assembled).

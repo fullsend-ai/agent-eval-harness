@@ -556,3 +556,82 @@ def test_structured_verdict_rejects_boolean_scores_and_missing_rationale():
     assert score._verdict_from_data({"score": 4}, False, bounds, strict=True) is None
     assert score._verdict_from_data({"rationale": 1, "passed": True}, True, bounds,
                                     strict=True) is None
+
+
+def test_pairwise_anthropic_invalid_tool_call_and_invalid_text_verdict_is_an_error():
+    """The forced rung's text fallback is validated like the tool call: an
+    invalid text verdict is never returned, and the error names the field."""
+    invalid_call = SimpleNamespace(type="tool_use", name="submit_comparison",
+                                   input=_INVALID_PAIRWISE_ARGS)
+    invalid_text = SimpleNamespace(type="text", text='{"reasoning": "r", "preferred": "C"}')
+    client = _anthropic_scripted(_anthropic_reply([invalid_call, invalid_text]))
+    verdict, err = score._call_judge("anthropic", client, "sys", "msg", "claude-opus-5-5",
+                                     verdict="tool")
+    assert verdict is None and "preferred must be A, B or tie" in err
+    score._reset_verdict_state()
+    client = _anthropic_scripted(_anthropic_reply([invalid_text]))
+    verdict, err = score._call_judge("anthropic", client, "sys", "msg", "claude-opus-5-5",
+                                     verdict="tool")
+    assert verdict is None and "text verdict: preferred must be A, B or tie" in err
+
+
+def test_pairwise_anthropic_invalid_text_verdict_still_takes_the_truncation_retry():
+    invalid_text = SimpleNamespace(type="text", text='{"reasoning": "r", "preferred": "C"}')
+    valid = SimpleNamespace(type="tool_use", name="submit_comparison",
+                            input={"reasoning": "r", "preferred": "B"})
+    client = _anthropic_scripted(_anthropic_reply([invalid_text], stop_reason="max_tokens"),
+                                 _anthropic_reply([valid]))
+    verdict, err = score._call_judge("anthropic", client, "sys", "msg", "claude-opus-5-5",
+                                     max_tokens=1024, verdict="tool")
+    assert err is None and verdict["preferred"] == "B"
+    assert client.calls[1]["max_tokens"] == 2048
+
+
+def test_pairwise_openai_invalid_tool_call_and_invalid_text_verdict_is_an_error():
+    client = _raw_client(_pw_response(arguments=_INVALID_PAIRWISE_ARGS,
+                                      content='{"reasoning": "r", "preferred": "C"}'))
+    verdict, err = score._call_pairwise_openai(client, "compare", "A vs B", "gpt-4o",
+                                               verdict="tool")
+    assert client.calls[0]["tool_choice"]["type"] == "function"
+    assert verdict is None and "preferred must be A, B or tie" in err
+    client = _raw_client(_pw_response(tool_name=None,
+                                      content='{"reasoning": "r", "preferred": "C"}'))
+    verdict, err = score._call_pairwise_openai(client, "compare", "A vs B", "gpt-4o",
+                                               verdict="tool")
+    assert verdict is None and "text verdict: preferred must be A, B or tie" in err
+
+
+def test_pairwise_openai_invalid_text_verdict_still_takes_the_truncation_retry():
+    client = _raw_client(
+        _pw_response(tool_name=None, content='{"reasoning": "r", "preferred": "C"}',
+                     finish_reason="length"),
+        _pw_response(arguments='{"reasoning": "r", "preferred": "B"}'))
+    verdict, err = score._call_pairwise_openai(client, "compare", "A vs B", "gpt-4o",
+                                               max_tokens=1024, verdict="tool")
+    assert err is None and verdict["preferred"] == "B"
+    assert client.calls[1]["max_tokens"] == 2048
+
+
+@pytest.mark.parametrize("text", [
+    'Here is my verdict: {"reasoning": "r", "preferred": "A"}',
+    '["reasoning", "preferred"]'])
+def test_pairwise_structured_output_rejects_prose_around_the_object(text):
+    reply = _anthropic_reply([SimpleNamespace(type="text", text=text)])
+    verdict, err = score._call_judge("anthropic", _anthropic_scripted(reply),
+                                     "sys", "msg", "claude-opus-5-5")
+    assert verdict is None and "no JSON object under structured output" in err
+    client = _raw_client(_pw_response(tool_name=None, content=text))
+    verdict, err = score._call_pairwise_openai(client, "compare", "A vs B", "gpt-4o")
+    assert verdict is None and "no JSON object under structured output" in err
+
+
+def test_pairwise_structured_output_outer_verdict_wins_over_an_inline_fence():
+    reasoning = 'Quoted ```json\n{"preferred": "B"}\n``` in the output.'
+    payload = json.dumps({"reasoning": reasoning, "preferred": "A"})
+    reply = _anthropic_reply([SimpleNamespace(type="text", text=payload)])
+    verdict, err = score._call_judge("anthropic", _anthropic_scripted(reply),
+                                     "sys", "msg", "claude-opus-5-5")
+    assert err is None and verdict["preferred"] == "A"
+    client = _raw_client(_pw_response(tool_name=None, content=payload))
+    verdict, err = score._call_pairwise_openai(client, "compare", "A vs B", "gpt-4o")
+    assert err is None and verdict["preferred"] == "A"

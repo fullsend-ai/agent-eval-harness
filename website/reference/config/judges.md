@@ -304,10 +304,13 @@ The contract travels over one of two transports, chosen per call by
 `auto` (the default) sends `json_schema` first and falls back to `tool` when the
 provider refuses the structured-output parameter itself (a `400` naming it, or an
 Anthropic SDK older than 0.77); a Claude id older than the 4.5 generation starts on
-`tool`. The rung that worked is remembered per model for the run. `json_schema` and
-`tool` pin one transport: no cross-transport fallback, and a model that cannot serve
-it is a config error (`verdict_unsupported`). Claude Opus 5.5, Sonnet 5.5, Fable 5.1
-and Mythos 5.1 reject forced tool use outright, so `tool` cannot serve them.
+`tool`. The rung that worked is remembered per model and routing (a pinned and an
+unpinned judge on one slug learn separately) for the run. `json_schema` and
+`tool` pin one transport: no cross-transport fallback. A `json_schema` pin on a model
+that refuses structured outputs is a config error (`verdict_unsupported`); that error
+applies to the `json_schema` pin only. Claude Opus 5.5, Sonnet 5.5, Fable 5.1
+and Mythos 5.1 reject forced tool use, but the `tool` pin still reaches them through
+the strict `tool_choice: auto` rung.
 
 The schema the provider constrains on is the verdict tool's, made strict: every
 object closes `additionalProperties`, every field is required, and the numeric

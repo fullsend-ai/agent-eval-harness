@@ -100,15 +100,19 @@ A refusal of the request itself — any other 400, auth, 429/5xx — never chang
 it propagates through the existing retry policy (`_with_judge_retries` S:1712-1726) as
 today. Rung changes are not backed off (a 400 and a 404 do not heal).
 
-**Sticky rung.** The first rung that returns a verdict for a `(backend, model)` becomes
-the starting rung for every later call of that pair in the process (a small locked dict,
+**Sticky rung.** The first rung that returns a verdict for a `(backend, model, routing)`
+(`routing` = the `routing_sha` of the request's provider body, empty when there is none, so
+a pinned and an unpinned judge on one slug learn separately) becomes
+the starting rung for every later call of that key in the process (a small locked dict,
 reset with the other judge-side counters in `score_cases` S:2610). With `auto` on Opus
 5.5 through OpenRouter this means one request per verdict instead of three.
 
 **Explicit policy.** `json_schema` or `tool` pins the transport: no cross-transport
 fallback (the Decision 25 ladder inside `tool` still runs), so an operator holding a
-baseline on the forced-tool contract can keep it (`models.judge_verdict: tool`) and gets
-a clear config error when the judge model cannot serve it.
+baseline on the forced-tool contract can keep it (`models.judge_verdict: tool`). The `tool`
+pin reaches models that reject forcing (Claude Opus 5.5, Sonnet 5.5) through the strict
+`tool_choice: auto` rung; `verdict_unsupported` (a config error) applies to the
+`json_schema` pin only, when the model refuses structured outputs.
 
 ### The verdict schema, strict
 
@@ -147,10 +151,12 @@ system prompt gets the same two variants.
   retry, S:3755-3757, keyed on this error instead of on a failed parse).
 - OpenAI-shaped: `message.refusal` → `refusal`; `finish_reason == "length"` →
   `truncated`; otherwise `message.content`.
-- The text goes through the tolerant object extraction the harness already has
-  (`_loads_json_object` S:2239-2255 for single, `_extract_judge_json` S:3800-3874 for
-  pairwise — a provider that only treats the schema as a hint may fence the JSON), then
-  **strict validation**: the object must carry the verdict key with the right type and
+- The text goes through a **strict parse** (`_loads_strict_json_object`): the whole
+  reply is one JSON object, optionally inside a single ```json fence that wraps the entire
+  reply. It never scans for an embedded fragment or slices between braces, so a fenced
+  snippet quoted in the rationale cannot displace the verdict, and prose around the object
+  is `bad_verdict`. The tolerant extraction (`_loads_json_object`, `_extract_judge_json`)
+  stays for the forced-tool text fallback only. Then **strict validation**: the object must carry the verdict key with the right type and
   the rationale key; anything else is `JudgeProviderError(error_type="bad_verdict")`.
   There is no prose fallback on this transport: a constrained reply that does not parse
   is a truncation, a refusal or a provider that ignored the schema, and each of those
@@ -160,13 +166,13 @@ system prompt gets the same two variants.
 
 - Per judge call: `verdict_transport: json_schema | tool`, next to the existing
   `tool_choice_mode` (which keeps its meaning — the forcing mode of a `tool` call — and is
-  absent on `json_schema`). Surfaced on the per-case record (S:2710-2714), the ledger row
-  (`agent_eval/providers/ledger.py:34`), `JudgeProviderError` (`agent_eval/providers/base.py`),
-  the Harbor summary copy (`agent_eval/harbor/run.py:435`).
+  absent on `json_schema`). Surfaced on the per-case record (S:2710-2714),
+  `JudgeProviderError` (`agent_eval/providers/base.py`), the Harbor summary copy
+  (`agent_eval/harbor/run.py:435`).
 - `summary.yaml` `judge_usage.verdict_transports: {json_schema: N, tool: N}` and
-  `judge_usage.verdict_fallbacks: N` (calls that did not run on the policy's first rung;
-  includes the Decision 25 fallbacks, which stay counted under `tool_choice_fallbacks` as
-  well). MLflow logs `judge/verdict_fallbacks` next to `judge/tool_choice_fallbacks`
+  `judge_usage.verdict_fallbacks: N` (cross-transport fallbacks only: calls that ran on a
+  different transport than the policy's first rung; the Decision 25 `tool_choice` steps
+  inside the `tool` rung are counted under `tool_choice_fallbacks`, not here). MLflow logs `judge/verdict_fallbacks` next to `judge/tool_choice_fallbacks`
   (`skills/eval-mlflow/scripts/log_results.py:275`).
 
 ### Preflight (OpenRouter, pinned judges)
