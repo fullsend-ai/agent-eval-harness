@@ -2182,10 +2182,10 @@ _DEFAULT_JUDGE_ALLOWED_TOOLS = ("Read(**)", "Edit(output/**)")
 # Agent judges run deny-by-default. `manual` makes an unlisted tool prompt
 # rather than run, and `--permission-prompts none` turns a prompt nobody can
 # answer into an automatic denial — together they are what make a call the
-# allow list above does not cover a refusal rather than a silent success. The
-# harness's previous posture was no `--permission-mode`
-# flag at all, which is the most permissive setting there is: measured, a judge
-# in that posture wrote outside its workspace and read an out-of-tree file with
+# allow list above does not cover a refusal rather than a silent success.
+# The harness's previous posture was no `--permission-mode` flag at all,
+# which is the most permissive setting there is: measured, a judge in that
+# posture wrote outside its workspace and read an out-of-tree file with
 # `permission_denials: []`.
 _JUDGE_PERMISSION_MODE = "manual"
 _JUDGE_PERMISSION_PROMPTS = "none"
@@ -2268,12 +2268,12 @@ def _call_structured_judge_via_runner(prompt, model, feedback_type, config, jc,
         # best-effort ceiling only and `timeout_s` is the effective bound.
         max_budget_usd=2.0,
         # Same deny-by-default posture as an agent judge: the mode is what
-        # makes a call the allow list does not cover a refusal, the deny list
-        # is defence in
-        # depth on runners without one. Neither is configurable on this path —
-        # it has no `agent:` block — so the full default deny always applies.
-        # No write grant either: this contract takes the verdict from stdout,
-        # so the judge has nothing legitimate to write.
+        # makes a call the allow list does not cover a refusal, and the deny
+        # list is defence in depth on runners without one. Neither is
+        # configurable on this path — it has no `agent:` block — so the full
+        # default deny always applies. No write grant either: this contract
+        # takes the verdict from stdout, so the judge has nothing legitimate
+        # to write.
         permissions=_judge_tool_policy(["Read(**)"]),
         permission_mode=_JUDGE_PERMISSION_MODE,
         permission_prompts=_JUDGE_PERMISSION_PROMPTS,
