@@ -488,6 +488,52 @@ def test_pairwise_anthropic_auto_rung_rejects_prose_and_invalid_tool_calls():
     assert err is None and verdict["preferred"] == "B"
 
 
+def test_pairwise_anthropic_forced_rung_rejects_an_invalid_tool_call():
+    """An invalid submit_comparison input on the forced rung is no longer
+    returned as-is: it falls through to the text fallback, then to an error."""
+    invalid = SimpleNamespace(type="tool_use", name="submit_comparison",
+                              input={"reasoning": "r", "preferred": "maybe"})
+    verdict, err = score._call_judge("anthropic",
+                                     _anthropic_scripted(_anthropic_reply([invalid])),
+                                     "sys", "msg", "claude-opus-5-5", verdict="tool")
+    assert verdict is None and "preferred must be A, B or tie" in err
+    score._reset_verdict_state()
+    text = SimpleNamespace(type="text", text='{"reasoning": "r", "preferred": "B"}')
+    verdict, err = score._call_judge("anthropic",
+                                     _anthropic_scripted(_anthropic_reply([invalid, text])),
+                                     "sys", "msg", "claude-opus-5-5", verdict="tool")
+    assert err is None and verdict["preferred"] == "B"
+
+
+_INVALID_PAIRWISE_ARGS = {"reasoning": "r", "preferred": "maybe"}
+
+
+def test_pairwise_openai_forced_mode_rejects_an_invalid_tool_call():
+    client = _raw_client(_pw_response(arguments=_INVALID_PAIRWISE_ARGS))
+    verdict, err = score._call_pairwise_openai(client, "compare", "A vs B", "gpt-4o",
+                                               verdict="tool")
+    assert client.calls[0]["tool_choice"]["type"] == "function"
+    assert verdict is None and "preferred must be A, B or tie" in err
+    # the forced mode falls through to the text fallback
+    client = _raw_client(_pw_response(arguments=_INVALID_PAIRWISE_ARGS,
+                                      content='{"reasoning": "r", "preferred": "A"}'))
+    verdict, err = score._call_pairwise_openai(client, "compare", "A vs B", "gpt-4o",
+                                               verdict="tool")
+    assert err is None and verdict["preferred"] == "A"
+
+
+@pytest.mark.parametrize("mode, steps_down", [("required", 1), ("auto", 2)])
+def test_pairwise_openai_degraded_modes_reject_an_invalid_tool_call(mode, steps_down):
+    client = _raw_client(*[_NotFound()] * steps_down,
+                         _pw_response(arguments=_INVALID_PAIRWISE_ARGS,
+                                      content='{"reasoning": "r", "preferred": "A"}'))
+    verdict, err = score._call_pairwise_openai(client, "compare", "A vs B", "z-ai/glm-5.2",
+                                               verdict="tool")
+    assert client.calls[steps_down]["tool_choice"] == mode
+    # a degraded mode never falls back to the text, valid or not
+    assert verdict is None and "preferred must be A, B or tie" in err
+
+
 @pytest.mark.parametrize("payload", [
     '{"reasoning": "r", "preferred": "C"}',
     '{"reasoning": "r"}',

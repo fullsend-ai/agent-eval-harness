@@ -4524,14 +4524,17 @@ def _call_judge(backend, client, system_prompt, user_message, model,
             _check_pairwise_verdict(data, model)
             return {**data, "_usage": usage}, None
         # Preferred path: read the tool_use block directly — no text parsing,
-        # no improvised keys. Under `tool_choice: auto` (a model that rejects
-        # forcing) a call without a valid verdict is rejected, as in the
-        # single-judge path.
+        # no improvised keys. A call without a valid verdict is never returned
+        # as-is on any rung; on the forced rung it falls through to the text
+        # fallback below.
+        invalid = None
         for block in response.content:
             if getattr(block, "type", None) == "tool_use" and block.name == "submit_comparison":
                 data = dict(block.input)
-                if _mode == "function" or _pairwise_verdict_error(data) is None:
+                err = _pairwise_verdict_error(data)
+                if err is None:
                     return {**data, "_usage": usage}, None
+                invalid = invalid or err
         # Fallback (forced tool only): model emitted text despite tool_choice
         # (rare) — parse it.
         text = "".join(getattr(b, "text", "") for b in response.content
@@ -4543,8 +4546,9 @@ def _call_judge(backend, client, system_prompt, user_message, model,
         if response.stop_reason == "max_tokens" and max_tokens < 32768:
             return _call_judge(backend, client, system_prompt, user_message, model,
                                max_tokens=max_tokens * 2, verdict=verdict)
+        detail = f"; the tool_use input is invalid: {invalid}" if invalid else ""
         return None, (f"No submit_comparison tool_use in response "
-                      f"(stop_reason={response.stop_reason})")
+                      f"(stop_reason={response.stop_reason}){detail}")
     except Exception as e:
         return None, str(e)
 
@@ -4580,8 +4584,17 @@ def _call_pairwise_openai(client, system_prompt, user_message, model,
                 raise
             _check_pairwise_verdict(data, model)
             return {**data, "_usage": usage}, None
+        invalid = None
         for data in _judge_tool_calls(message, "submit_comparison", mode=mode):
-            return {**data, "_usage": usage}, None
+            err = _pairwise_verdict_error(data)
+            if err is None:
+                return {**data, "_usage": usage}, None
+            if mode != "function":
+                # A degraded mode never falls back to text.
+                return None, (f"No submit_comparison tool call in response "
+                              f"under tool_choice={mode!r}; the tool call is "
+                              f"invalid: {err}")
+            invalid = invalid or err
         text = message.content or ""
         parsed = _extract_judge_json(text) if text else None
         if parsed is not None:
@@ -4591,8 +4604,9 @@ def _call_pairwise_openai(client, system_prompt, user_message, model,
             return _call_pairwise_openai(client, system_prompt, user_message,
                                          model, max_tokens=max_tokens * 2,
                                          **binding)
+        detail = f"; the tool call is invalid: {invalid}" if invalid else ""
         return None, (f"No submit_comparison tool call in response "
-                      f"(finish_reason={finish})")
+                      f"(finish_reason={finish}){detail}")
     except Exception as e:
         return None, str(e)
 
