@@ -776,7 +776,8 @@ def _parse_runner_config(runner_raw, *, context="runner"):
     if not isinstance(runner_type, str) or runner_type not in RUNNERS:
         raise ValueError(
             f"{context}.type: unknown runner type {runner_type!r}; "
-            f"expected one of {sorted(RUNNERS)}")
+            f"expected one of {sorted(RUNNERS)}. To run on a Harbor-only agent "
+            f"(e.g. opencode), drop {context}.type and pass --agent <harbor-agent>")
     agent = runner_raw.get("agent")
     if runner_type == "fullsend" and not (isinstance(agent, str) and agent.strip()):
         raise ValueError(

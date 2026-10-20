@@ -462,6 +462,52 @@ class TestOutputRestore:
         assert not (ws / "artifacts").exists()
         assert not (tmp_path / "escape").exists()
 
+    def test_intermediate_exported_symlink_rejected(self, tmp_path):
+        secret = tmp_path / "secret"
+        secret.mkdir()
+        (secret / "credentials").write_text("hunter2")
+        (secret / "nested").mkdir()
+        (secret / "nested" / "token").write_text("tok")
+        exported = tmp_path / "exported"
+        exported.mkdir()
+        (exported / "artifacts").symlink_to(secret)
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        runner = _runner(tmp_path, output_paths=["artifacts/credentials", "artifacts/nested"])
+        runner._restore_outputs(exported, ws)
+        assert not (ws / "artifacts").exists()
+
+    def test_destination_symlink_not_followed(self, tmp_path):
+        exported = tmp_path / "exported"
+        (exported / "artifacts" / "sub").mkdir(parents=True)
+        (exported / "artifacts" / "report.md").write_text("report")
+        (exported / "artifacts" / "sub" / "a.md").write_text("a")
+        (exported / "flat.md").write_text("flat")
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        (ws / "artifacts").symlink_to(outside)
+        (ws / "flat.md").symlink_to(outside / "victim")
+        runner = _runner(tmp_path, output_paths=["artifacts", "flat.md"])
+        runner._restore_outputs(exported, ws)
+        assert list(outside.iterdir()) == []
+
+    def test_nested_destination_symlink_not_followed(self, tmp_path):
+        exported = tmp_path / "exported"
+        (exported / "artifacts" / "sub").mkdir(parents=True)
+        (exported / "artifacts" / "sub" / "a.md").write_text("a")
+        (exported / "artifacts" / "report.md").write_text("report")
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        ws = tmp_path / "ws"
+        (ws / "artifacts").mkdir(parents=True)
+        (ws / "artifacts" / "sub").symlink_to(outside)
+        (ws / "artifacts" / "report.md").symlink_to(outside / "victim")
+        runner = _runner(tmp_path, output_paths=["artifacts"])
+        runner._restore_outputs(exported, ws)
+        assert list(outside.iterdir()) == []
+
 
 class TestMaterializeSymlinks:
     def test_nested_relative_symlinks_preserved(self, tmp_path):

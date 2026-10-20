@@ -28,10 +28,11 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from ..config import workspace_source_roots
+from agent_eval.config import workspace_source_roots
 from .base import EvalRunner, RunResult
-from .claude_code import _per_model_turns
-from .stream_capture import extract_usage, message_ids_for_run
+from .stream_capture import (
+    extract_usage, message_ids_for_run, per_model_turns as combine_per_model_turns,
+)
 
 _print_lock = threading.Lock()
 
@@ -239,8 +240,9 @@ class FullsendRunner(EvalRunner):
         outputs under ``iteration-N/output/`` keeping workspace-relative paths.
         ``collect.py`` reads each configured ``outputs[*].path`` from the
         workspace, so each such path found in the export is copied to the same
-        relative location. Symlinks are never copied and paths that escape the
-        workspace are ignored."""
+        relative location. Symlinks are never copied or followed — a source or
+        destination with a symlink at any component is skipped — and paths that
+        escape the workspace are ignored."""
         if not exported.is_dir() or exported.is_symlink():
             return
         for rel in self._output_paths:
@@ -248,9 +250,11 @@ class FullsendRunner(EvalRunner):
             if rel_path.is_absolute() or ".." in rel_path.parts:
                 continue
             src = exported / rel_path
-            if src.is_symlink() or not src.exists():
-                continue
             dest = workspace / rel_path
+            if _has_symlink_component(exported, src) or not src.exists():
+                continue
+            if _has_symlink_component(workspace, dest):
+                continue
             if src.is_dir():
                 _copy_exported_tree(src, dest)
             elif src.is_file():
@@ -280,7 +284,7 @@ class FullsendRunner(EvalRunner):
         (token_usage, cost_usd, num_turns, stream_ids, models_seen,
          per_model_usage, stream_ids_by_model) = extract_usage(stdout.splitlines())
         subagent_dir = invocation_subagents
-        per_model_turns = _per_model_turns(subagent_dir, stream_ids_by_model)
+        per_model_turns = combine_per_model_turns(subagent_dir, stream_ids_by_model)
         message_ids = message_ids_for_run(stream_ids, subagent_dir)
 
         resolved_model = None
@@ -472,16 +476,35 @@ def _last_iteration(run_dir: Path) -> Optional[Path]:
     return best[1] if best else None
 
 
+def _has_symlink_component(root: Path, path: Path) -> bool:
+    """True when ``path`` or any ancestor between ``root`` (exclusive) and
+    ``path`` is a symlink, so reading or writing it could leave ``root``."""
+    try:
+        parts = path.relative_to(root).parts
+    except ValueError:
+        return True
+    current = root
+    for part in parts:
+        current = current / part
+        if current.is_symlink():
+            return True
+    return False
+
+
 def _copy_exported_tree(src: Path, dest: Path) -> None:
-    """Copy regular files under ``src`` into ``dest``, skipping symlinks."""
+    """Copy regular files under ``src`` into ``dest``, skipping symlinks on
+    either side."""
+    if dest.is_symlink():
+        return
     dest.mkdir(parents=True, exist_ok=True)
     for entry in sorted(src.iterdir()):
-        if entry.is_symlink():
+        target = dest / entry.name
+        if entry.is_symlink() or target.is_symlink():
             continue
         if entry.is_dir():
-            _copy_exported_tree(entry, dest / entry.name)
+            _copy_exported_tree(entry, target)
         elif entry.is_file():
-            shutil.copy2(entry, dest / entry.name)
+            shutil.copy2(entry, target)
 
 
 def _copy_subagent_transcripts(src: Path, dest: Path) -> None:

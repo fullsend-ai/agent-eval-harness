@@ -47,11 +47,11 @@ Not every runner reads every field. The matrix below shows where each field land
 | Field | Type | `claude-code` | `cursor` | `codex` | `cli` | `responses-api` | `fullsend` |
 | --- | --- | :---: | :---: | :---: | :---: | :---: | :---: |
 | `type` | `str` | discriminator | discriminator | discriminator | discriminator | discriminator | discriminator |
-| `effort` | `str` (enum) | `--effort` flag | appended to a base `--model` as `[effort=…]`; existing Cursor effort variants pass through | `model_reasoning_effort` | `{effort}` placeholder | — | `AGENT_EVAL_EFFORT` in the env file |
+| `effort` | `str` (enum) | `--effort` flag | appended to a base `--model` as `[effort=…]`; existing Cursor effort variants pass through | `model_reasoning_effort` | `{effort}` placeholder | — | `AGENT_EVAL_EFFORT` in the process env |
 | `permission_mode` | `str` (enum) | `--permission-mode` flag (also accepts `manual`, claude-code-only) | `plan` → `--mode plan`; `bypassPermissions` → `--force` | mapped to Codex sandbox mode | — | — | — |
 | `settings` | `dict` | merged into workspace `.claude/settings.json` | `binary` only; other keys warn and are ignored | `-c` config overrides for `codex exec` | — | connection settings (see below) | — |
 | `plugin_dirs` | `list[str]` | one `--plugin-dir` per entry (workspace-staged copy for out-of-workspace paths) | one `--plugin-dir` per entry (workspace-staged copy for out-of-workspace paths) | skills copied into `.agents/skills` | — | — | — |
-| `env` | `dict` | injected on the safe allowlist | injected into the subprocess env | injected on the safe allowlist | — (uses `execution.env`) | — | env file + process env |
+| `env` | `dict` | injected on the safe allowlist | injected into the subprocess env | injected on the safe allowlist | — (uses `execution.env`) | — | injected into the subprocess env |
 | `system_prompt` | `str` | `--append-system-prompt` | prepended to the prompt | prepended to the prompt | `{system_prompt}` placeholder | `developer` message | — (the agent definition replaces it) |
 | `command` | `str` \| `list[str]` | — | — | — | **required** — command template | — | — |
 | `workspace_mode` | `None` \| `"repo"` | harness-level (all runners) | harness-level | rejected | harness-level | harness-level | — |
