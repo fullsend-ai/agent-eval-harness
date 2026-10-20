@@ -47,7 +47,7 @@ Not every runner reads every field. The matrix below shows where each field land
 | Field | Type | `claude-code` | `cursor` | `codex` | `cli` | `responses-api` | `fullsend` |
 | --- | --- | :---: | :---: | :---: | :---: | :---: | :---: |
 | `type` | `str` | discriminator | discriminator | discriminator | discriminator | discriminator | discriminator |
-| `effort` | `str` (enum) | `--effort` flag | appended to a base `--model` as `[effort=…]`; existing Cursor effort variants pass through | `model_reasoning_effort` | `{effort}` placeholder | — | `AGENT_EVAL_EFFORT` in the process env |
+| `effort` | `str` (enum) | `--effort` flag | appended to a base `--model` as `[effort=…]`; existing Cursor effort variants pass through | `model_reasoning_effort` | `{effort}` placeholder | — | `--effort` flag on `fullsend run` |
 | `permission_mode` | `str` (enum) | `--permission-mode` flag (also accepts `manual`, claude-code-only) | `plan` → `--mode plan`; `bypassPermissions` → `--force` | mapped to Codex sandbox mode | — | — | — |
 | `settings` | `dict` | merged into workspace `.claude/settings.json` | `binary` only; other keys warn and are ignored | `-c` config overrides for `codex exec` | — | connection settings (see below) | — |
 | `plugin_dirs` | `list[str]` | one `--plugin-dir` per entry (workspace-staged copy for out-of-workspace paths) | one `--plugin-dir` per entry (workspace-staged copy for out-of-workspace paths) | skills copied into `.agents/skills` | — | — | — |
@@ -59,6 +59,7 @@ Not every runner reads every field. The matrix below shows where each field land
 | `fullsend_dir` | `str` | — | — | — | — | — | `--fullsend-dir` (default `.fullsend`) |
 | `binary` | `str` | — | — | — | — | — | executable (default `fullsend` on PATH) |
 | `extra_args` | `list[str]` | — | — | — | — | — | appended to `fullsend run` |
+| `term_grace_s` | `float` | — | — | — | — | — | seconds from SIGTERM to SIGKILL on timeout (default 30) |
 
 !!! warning "Unset ≠ empty behavior"
     A field ignored by the active runner is harmless — it just does nothing. But two
@@ -351,24 +352,33 @@ runner:
     Claude-Code-only and do not work with `cli`. See the
     [cross-runner cookbook](../../cookbook/cross-runner-opencode.md).
 
-### `agent`, `fullsend_dir`, `binary`, `extra_args`
+### `agent`, `fullsend_dir`, `binary`, `extra_args`, `term_grace_s`
 
 `fullsend` only. `agent` is **required** with `type: fullsend` (a missing value fails
 config validation naming `runner.agent`): the name of an agent registered in
 `<fullsend_dir>/config.yaml`. `fullsend_dir` defaults to `.fullsend` and resolves
-against the project root. `binary` defaults to `fullsend` on `PATH`. `extra_args`
-(a list of strings) is appended verbatim to the command:
+against the project root. `binary` defaults to `fullsend` on `PATH`; a relative
+value containing a path separator resolves against the project root. `extra_args`
+(a list of strings) is appended verbatim to the command; `--no-post-script` is
+rejected, because the project's post-script is what copies the agent's outputs into
+the workspace. `term_grace_s` (positive number, default 30) is the time between
+SIGTERM and SIGKILL when the eval timeout expires. `type: fullsend` is rejected at
+load time on `execution.prompt` configs and on an agent judge's `agent.runner`
+(prompt mode is unsupported):
 
 ```text
 <binary> run <agent> --fullsend-dir <abs fullsend_dir> --target-repo <abs workspace>
-  --model <model> --output-dir <workspace>/output/fullsend/run-<id> <extra_args>
+  [--model <model>] [--effort <effort>] --output-dir <workspace>/.fullsend-runs <extra_args>
 ```
 
 The process environment carries `FULLSEND_TASK="/<skill> <args>"`,
-`AGENT_EVAL_SUBAGENT_MODEL`, `AGENT_EVAL_EFFORT` (empty when unset), and every
-`execution.env`, `runner.env` and hook-output entry, on top of the caller's
-environment. Configured `outputs[*].path` entries that fullsend exports under
-`iteration-N/output/` are copied back into the workspace. fullsend
+`AGENT_EVAL_SUBAGENT_MODEL` (only when a subagent model is set; the agent definition
+must reference it, or the runner warns), and every `execution.env`, `runner.env` and
+hook-output entry, on top of the caller's environment. The workspace
+`.claude/settings.json` is stripped of `env`, hooks and
+`permissions.additionalDirectories` before the upload. Artifacts reach the workspace
+through the project's post-script copy into `--target-repo`; `iteration-N/output/`
+is not read. All iterations' streams and subagent transcripts are mapped. fullsend
 aborts before the pre-script when a `${VAR}` the agent's harness references is unset
 on the host, so that harness may only reference these variables or ones from the
 caller's environment. Requires fullsend ≥ 0.48, a running OpenShell gateway with
@@ -382,7 +392,7 @@ runner:
   type: fullsend
   agent: rfe-creator-eval
   fullsend_dir: .fullsend
-  extra_args: [--no-post-script]
+  extra_args: [--keep-sandbox]
 ```
 
 ### `workspace_mode`

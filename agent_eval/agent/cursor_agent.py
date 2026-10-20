@@ -32,7 +32,7 @@ from typing import Optional
 
 from agent_eval.config import resolve_plugin_dir, resolve_plugin_skill_roots
 
-from .base import EvalRunner, RunResult
+from .base import EvalRunner, RunResult, resolve_env_value
 from .claude_code import stage_plugin_dir
 
 
@@ -661,12 +661,9 @@ class CursorAgentRunner(EvalRunner):
                     continue
                 if value is None:
                     continue
-                if isinstance(value, str) and value.startswith("$"):
-                    resolved = os.environ.get(value[1:])
-                    if resolved is not None:
-                        env[key] = resolved
-                else:
-                    env[key] = str(value)
+                resolved = resolve_env_value(value)
+                if resolved is not None:
+                    env[key] = resolved
 
         apply(self._env)
         # Hook-produced variables are intentionally additive, as with Claude

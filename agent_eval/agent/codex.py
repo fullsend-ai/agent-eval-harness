@@ -13,7 +13,7 @@ from typing import Optional
 
 from agent_eval.config import resolve_plugin_dir, resolve_plugin_skill_roots
 
-from .base import EvalRunner, RunResult
+from .base import EvalRunner, RunResult, resolve_env_value
 
 _print_lock = threading.Lock()
 CODEX_EFFORTS = frozenset({"minimal", "low", "medium", "high", "xhigh"})
@@ -497,12 +497,9 @@ class CodexRunner(EvalRunner):
         for key, value in self._env.items():
             if value is None:
                 continue
-            if isinstance(value, str) and value.startswith("$"):
-                resolved = os.environ.get(value[1:])
-                if resolved is not None:
-                    env[key] = resolved
-            else:
-                env[key] = str(value)
+            resolved = resolve_env_value(value)
+            if resolved is not None:
+                env[key] = resolved
         if extra_env:
             for key, value in extra_env.items():
                 if value is not None:

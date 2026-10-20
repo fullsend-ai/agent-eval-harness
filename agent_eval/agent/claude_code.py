@@ -13,7 +13,7 @@ import urllib.parse
 from pathlib import Path
 from typing import Optional
 
-from .base import EvalRunner, RunResult
+from .base import EvalRunner, RunResult, resolve_env_value
 from .stream_capture import (
     make_prompt_event, inject_timestamp, extract_usage,
     count_subagent_turns, per_model_turns as combine_per_model_turns,
@@ -874,12 +874,9 @@ class ClaudeCodeRunner(EvalRunner):
         for k, v in self._env.items():
             if v is None:
                 continue
-            if isinstance(v, str) and v.startswith("$"):
-                resolved = os.environ.get(v[1:])
-                if resolved is not None:
-                    env[k] = resolved
-            else:
-                env[k] = str(v)
+            resolved = resolve_env_value(v)
+            if resolved is not None:
+                env[k] = resolved
         if extra_env:
             for k, v in extra_env.items():
                 env[k] = str(v)
