@@ -152,7 +152,7 @@ models:
 # subprocess reads (e.g. `python3 -c "open('eval/x')"`, awk) — for a hard boundary
 # use OS sandboxing (sandbox.filesystem.denyRead), not permissions.deny.
 permissions:
-  allow: []     # Tool patterns to allow (e.g., "Skill", "Write(artifacts/**)")
+  allow: []     # Tool patterns to allow (e.g., "Skill", "Edit(artifacts/**)")
   # deny: []    # ONLY for prompt-mode evals - see note above
   
   # Example deny rules for PROMPT-MODE evaluations (workspace_mode: repo):

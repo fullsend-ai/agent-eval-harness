@@ -292,7 +292,12 @@ def run_prompt_via_runner(
     # which makes judges explore the workspace instead of emitting a verdict.
     # A caller may still ask for a specific mode (an agent judge asks for
     # deny-by-default); that is an explicit argument, never an inheritance.
-    cfg.runner.permission_mode = permission_mode
+    #
+    # Only Claude Code accepts the deny-by-default modes (`manual`); the Cursor
+    # and Codex constructors reject them with ValueError, so a runner-backed
+    # judge on those runners would fail before running. Keep None there.
+    cfg.runner.permission_mode = (
+        permission_mode if cfg.runner.type == "claude-code" else None)
     cfg.runner.settings = dict(cfg.runner.settings or {})
     # Strip `add_dirs`: a prompt-only judge/generation call grades untrusted,
     # model-generated content in an isolated workspace and must not inherit

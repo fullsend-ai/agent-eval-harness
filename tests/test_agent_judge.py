@@ -61,7 +61,7 @@ def test_default_tool_policy_matches_the_pinned_expectation():
 # Fake runner: records how it was constructed/invoked and produces a verdict
 # ---------------------------------------------------------------------------
 
-def _make_fake_runner(verdicts, *, mode="file", capture=None):
+def _make_fake_runner(verdicts, *, mode="file", capture=None, denials=None):
     """Build a fake runner class for patching into RUNNERS.
 
     Args:
@@ -72,6 +72,8 @@ def _make_fake_runner(verdicts, *, mode="file", capture=None):
               "stdout" -> return the verdict as JSON embedded in stdout.
         capture: optional dict; the fake records from_config/execute details
             into it for assertions.
+        denials: optional list of per-call ``permission_denials`` lists (one
+            per execute() call; ``None`` means the runner reports none).
     """
     state = {"calls": 0}
 
@@ -108,7 +110,9 @@ def _make_fake_runner(verdicts, *, mode="file", capture=None):
             elif verdict is not None and mode == "stdout":
                 stdout = "thinking...\nHere is my verdict:\n" + json.dumps(verdict)
             return RunResult(exit_code=0, stdout=stdout, stderr="",
-                             duration_s=0.01, cost_usd=0.02)
+                             duration_s=0.01, cost_usd=0.02,
+                             permission_denials=(denials[i] if denials
+                                                 and i < len(denials) else None))
 
     FakeRunner._state = state
     return FakeRunner
@@ -954,6 +958,64 @@ class TestAgentJudgeHardening:
         ]) == {"count": 4, "tools": {"Write": 2, "Read": 1, "unknown": 1}}
         assert _summarize_denials([]) == {"count": 0, "tools": {}}
         assert _summarize_denials(None) == {"count": 0, "tools": {}}
+
+    def _score_with_denials(self, tmp_path, verdicts, denials, *, cases=1,
+                            samples=1):
+        from score import score_cases
+        judge = _agent_judge(feedback_type="int", score_range=[0, 5],
+                             samples=samples)
+        config = _config(judge)
+        case_dirs = []
+        for i in range(cases):
+            d = tmp_path / f"case-{i + 1:03d}"
+            d.mkdir()
+            case_dirs.append(d)
+        fake = _make_fake_runner(verdicts, denials=denials)
+        with _patched_runners(fake):
+            return score_cases(load_judges(config), case_dirs, config)["per_case"]
+
+    def test_runner_denials_reach_the_scored_case_and_stderr(self, tmp_path,
+                                                             capsys):
+        """`RunResult.permission_denials` must survive the thread-local
+        handoff into the per-case result, not just `_summarize_denials`."""
+        per_case = self._score_with_denials(
+            tmp_path, {"score": 1, "rationale": "x"},
+            [[{"tool_name": "Bash"}, {"tool_name": "Write"}]])
+        cell = per_case["case-001"]["arch_score"]
+        assert cell["permission_denials"] == {
+            "count": 2, "tools": {"Bash": 1, "Write": 1}}
+        assert "2 tool call(s) refused by policy" in capsys.readouterr().err
+
+    def test_denials_accumulate_across_samples(self, tmp_path):
+        per_case = self._score_with_denials(
+            tmp_path, [{"score": 1, "rationale": "a"},
+                       {"score": 1, "rationale": "b"}],
+            [[{"tool_name": "Bash"}], [{"tool_name": "Bash"},
+                                       {"tool_name": "WebFetch"}]],
+            samples=2)
+        assert per_case["case-001"]["arch_score"]["permission_denials"] == {
+            "count": 3, "tools": {"Bash": 2, "WebFetch": 1}}
+
+    def test_denials_are_kept_when_the_judge_errors(self, tmp_path):
+        """A judge that was refused and then produced no verdict is the case
+        where the evidence matters most."""
+        per_case = self._score_with_denials(
+            tmp_path, None, [[{"tool_name": "Bash"}]])
+        cell = per_case["case-001"]["arch_score"]
+        assert cell["value"] is None and "error" in cell
+        assert cell["permission_denials"] == {"count": 1, "tools": {"Bash": 1}}
+
+    def test_denials_do_not_leak_into_a_later_case(self, tmp_path):
+        per_case = self._score_with_denials(
+            tmp_path, {"score": 1, "rationale": "x"},
+            [[{"tool_name": "Bash"}], None], cases=2)
+        # Cases are scored on a thread pool, so which case makes the first
+        # runner call is not fixed: exactly one case carries the refusal.
+        with_denials = [c for c in per_case.values()
+                        if "permission_denials" in c["arch_score"]]
+        assert len(with_denials) == 1
+        assert with_denials[0]["arch_score"]["permission_denials"] == {
+            "count": 1, "tools": {"Bash": 1}}
 
     def test_staging_problem_report_is_bounded(self):
         from score import _format_staging_problems

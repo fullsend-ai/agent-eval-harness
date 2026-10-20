@@ -160,7 +160,7 @@ policy Claude Code enforces in headless (`--print`) mode. The two are complement
 permissions:
   allow:
     - "Skill"                 # nested sub-skills silently fail without this
-    - "Write(artifacts/**)"
+    - "Edit(artifacts/**)"
   deny:
     - "mcp__*"                # block all MCP tools during the eval
 ```
