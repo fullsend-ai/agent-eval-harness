@@ -864,6 +864,13 @@ class TestSharedHelpers:
         assert resolve_env_value(3) == "3"
         assert resolve_env_value(None) is None
 
+    def test_env_ref_name_recognises_both_reference_forms(self):
+        from agent_eval.agent.base import env_ref_name
+        assert env_ref_name("$NAME") == "NAME"
+        assert env_ref_name("${NAME}") == "NAME"
+        for not_a_ref in ("NAME", "$NAME suffix", "${NAME", "$", "${}", 3, None):
+            assert env_ref_name(not_a_ref) is None
+
     def test_terminate_process_group_sigterm_then_reaps(self):
         from agent_eval.agent.base import terminate_process_group
         proc = subprocess.Popen(
@@ -900,3 +907,201 @@ class TestSharedHelpers:
             materialize_symlinks(ws)
         assert (ws / "link").is_symlink()
         assert sorted(p.name for p in ws.iterdir()) == ["link"]
+
+
+# ── Review hardening ─────────────────────────────────────────────────
+
+def _assistant(msg_id, model="claude-opus-4-6", inp=1, out=1):
+    return {"type": "assistant", "message": {
+        "id": msg_id, "model": model, "role": "assistant",
+        "content": [{"type": "text", "text": "x"}],
+        "usage": {"input_tokens": inp, "output_tokens": out}}}
+
+
+def _result(cost, model_usage):
+    return {"type": "result", "subtype": "success", "total_cost_usd": cost,
+            "modelUsage": model_usage}
+
+
+def _write_iteration(run, number, events):
+    it = run / f"iteration-{number}"
+    it.mkdir(parents=True)
+    (it / "output.jsonl").write_text("\n".join(json.dumps(e) for e in events) + "\n")
+    return it
+
+
+def _killpg_permitted():
+    """False in sandboxes that refuse group signalling (the helper then falls
+    back to signalling the leader only)."""
+    probe = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"],
+                             start_new_session=True)
+    try:
+        os.killpg(probe.pid, 0)
+        return True
+    except OSError:
+        return False
+    finally:
+        probe.kill()
+        probe.wait()
+
+
+def _alive(pid):
+    try:
+        state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+    except (OSError, IndexError):
+        return False
+    return state != "Z"
+
+
+class TestPerIterationUsage:
+    def test_two_completed_iterations_are_summed(self, tmp_path):
+        ws = _workspace(tmp_path)
+        run = ws / ".fullsend-runs" / "fs-sandbox-1"
+        _write_iteration(run, 1, [
+            _assistant("m1"),
+            _result(0.10, {"claude-opus-4-6": {
+                "inputTokens": 100, "outputTokens": 50,
+                "cacheReadInputTokens": 7, "costUSD": 0.10}})])
+        _write_iteration(run, 2, [
+            _assistant("m2", "claude-haiku-4-5"),
+            _result(0.20, {
+                "claude-opus-4-6": {"inputTokens": 10, "outputTokens": 5, "costUSD": 0.15},
+                "claude-haiku-4-5": {"inputTokens": 3, "outputTokens": 2, "costUSD": 0.05}})])
+        result = _runner(tmp_path)._map_run_dir(
+            ws / ".fullsend-runs", ws, exit_code=0, stderr="", duration=1.0)
+        assert result.cost_usd == pytest.approx(0.30)
+        assert result.token_usage == {
+            "input": 113, "output": 57, "cache_read": 7, "cache_create": 0}
+        opus = result.per_model_usage["claude-opus-4-6"]
+        assert (opus["input"], opus["output"]) == (110, 55)
+        assert opus["cost_usd"] == pytest.approx(0.25)
+        assert result.per_model_usage["claude-haiku-4-5"]["cost_usd"] == pytest.approx(0.05)
+        assert result.num_turns == 2
+        assert result.models_used == ["claude-haiku-4-5", "claude-opus-4-6"]
+
+    def test_timed_out_partial_iteration_still_counts_its_tokens(self, tmp_path):
+        ws = _workspace(tmp_path)
+        run = ws / ".fullsend-runs" / "fs-sandbox-1"
+        _write_iteration(run, 1, [
+            _assistant("m1"),
+            _result(0.10, {"claude-opus-4-6": {
+                "inputTokens": 100, "outputTokens": 50, "costUSD": 0.10}})])
+        # The later iteration never reached a result event.
+        _write_iteration(run, 2, [_assistant("m2", inp=4, out=2)])
+        result = _runner(tmp_path)._map_run_dir(
+            ws / ".fullsend-runs", ws, exit_code=-1, stderr="", duration=1.0)
+        assert result.cost_usd == pytest.approx(0.10)
+        assert result.token_usage["input"] == 104
+        assert result.token_usage["output"] == 52
+        assert result.per_model_usage["claude-opus-4-6"]["input"] == 100
+        assert result.num_turns == 2
+
+
+class TestInterruptCleanup:
+    def test_keyboard_interrupt_stops_group_and_reraises(self, tmp_path, monkeypatch):
+        ws = _workspace(tmp_path)
+        pidfile = tmp_path / "pids.json"
+        code = (
+            "import json, os, subprocess, sys, time\n"
+            "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+            f"open({str(pidfile)!r}, 'w').write(json.dumps([os.getpid(), child.pid]))\n"
+            "time.sleep(60)\n")
+
+        real_popen = subprocess.Popen
+        interrupted = []
+
+        class InterruptingPopen(real_popen):
+            def communicate(self, *args, **kwargs):
+                if not interrupted:
+                    interrupted.append(True)
+                    deadline = __import__("time").monotonic() + 10
+                    while not pidfile.exists() and __import__("time").monotonic() < deadline:
+                        __import__("time").sleep(0.05)
+                    raise KeyboardInterrupt
+                return super().communicate(*args, **kwargs)
+
+        monkeypatch.setattr(fullsend_mod.subprocess, "Popen", InterruptingPopen)
+        runner = _runner(tmp_path, term_grace_s=2)
+        with pytest.raises(KeyboardInterrupt):
+            runner._run([sys.executable, "-c", code], ws, dict(os.environ), 60)
+        leader, child = json.loads(pidfile.read_text())
+        deadline = __import__("time").monotonic() + 5
+        while (_alive(leader) or _alive(child)) and __import__("time").monotonic() < deadline:
+            __import__("time").sleep(0.05)
+        assert not _alive(leader)
+        if _killpg_permitted():
+            assert not _alive(child)
+
+
+class TestSettingsFailClosed:
+    def test_malformed_settings_with_env_secret_refuses_the_run(
+            self, tmp_path, fake_fullsend):
+        ws = _workspace(tmp_path)
+        (ws / ".claude").mkdir()
+        (ws / ".claude" / "settings.json").write_text(
+            '{"env": {"API_TOKEN": "literal-secret-value"}, ')
+        result = _runner(tmp_path).execute(
+            target="s", args="", workspace=ws, model="m", timeout_s=60)
+        assert result.exit_code == -1
+        assert "settings.json" in result.stderr
+        assert "literal-secret-value" not in result.stderr
+        assert not fake_fullsend.exists()  # fullsend never launched
+
+
+class TestRunDirContainment:
+    def _run_dir(self, tmp_path):
+        ws = _workspace(tmp_path)
+        run = ws / ".fullsend-runs" / "fs-sandbox-1"
+        (run / "iteration-1").mkdir(parents=True)
+        return ws, run
+
+    def _map(self, tmp_path, ws):
+        return _runner(tmp_path)._map_run_dir(
+            ws / ".fullsend-runs", ws, exit_code=0, stderr="", duration=1.0)
+
+    def test_symlinked_metrics_json_not_read(self, tmp_path):
+        ws, run = self._run_dir(tmp_path)
+        outside = tmp_path / "outside-metrics.json"
+        outside.write_text(json.dumps({"total_cost_usd": 9.9, "num_turns": 99}))
+        (run / "metrics.json").symlink_to(outside)
+        result = self._map(tmp_path, ws)
+        assert result.cost_usd is None
+        assert result.num_turns is None
+
+    def test_oversize_metrics_json_not_read(self, tmp_path, monkeypatch):
+        ws, run = self._run_dir(tmp_path)
+        (run / "metrics.json").write_text(json.dumps({"total_cost_usd": 9.9}))
+        monkeypatch.setattr(fullsend_mod, "_MAX_JSON_BYTES", 5)
+        assert self._map(tmp_path, ws).cost_usd is None
+
+    def test_symlinked_telemetry_not_read(self, tmp_path):
+        ws, run = self._run_dir(tmp_path)
+        outside = tmp_path / "outside-telemetry.jsonl"
+        outside.write_text(json.dumps({"attributes": {
+            "decision": "block", "gen_ai.tool.name": "Bash"}}) + "\n")
+        (run / "run-telemetry.jsonl").symlink_to(outside)
+        assert self._map(tmp_path, ws).permission_denials == []
+
+    def test_oversize_telemetry_read_is_bounded(self, tmp_path, monkeypatch):
+        ws, run = self._run_dir(tmp_path)
+        line = json.dumps({"attributes": {"decision": "block", "gen_ai.tool.name": "Bash"}})
+        (run / "run-telemetry.jsonl").write_text((line + "\n") * 3)
+        monkeypatch.setattr(fullsend_mod, "_MAX_TELEMETRY_BYTES", len(line) + 1)
+        assert len(self._map(tmp_path, ws).permission_denials) == 1
+
+    def test_symlinked_security_dir_not_walked(self, tmp_path):
+        ws, run = self._run_dir(tmp_path)
+        outside = tmp_path / "outside-security"
+        outside.mkdir()
+        (outside / "a.jsonl").write_text("{}\n")
+        (run / "security").symlink_to(outside, target_is_directory=True)
+        assert self._map(tmp_path, ws).raw_output["security_files"] == 0
+
+    def test_symlinked_files_inside_security_not_counted(self, tmp_path):
+        ws, run = self._run_dir(tmp_path)
+        (run / "security").mkdir()
+        (run / "security" / "real.jsonl").write_text("{}\n")
+        outside = tmp_path / "outside.jsonl"
+        outside.write_text("{}\n")
+        (run / "security" / "link.jsonl").symlink_to(outside)
+        assert self._map(tmp_path, ws).raw_output["security_files"] == 1

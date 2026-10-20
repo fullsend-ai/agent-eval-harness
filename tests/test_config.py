@@ -1462,6 +1462,11 @@ def test_non_empty_anthropic_api_key_under_a_plan_warns(tmp_path):
     ("  skill: sonnet\n", "    OPENROUTER_API_KEY: $OPENROUTER_API_KEY\n"),   # no plan at all
     (_OR_AGENT, "    MY_KEY: $OPENROUTER_MANAGEMENT_KEY\n"),
     ("  skill: sonnet\n  providers:\n    openrouter: {api_key_env: OR_KEY}\n", "    OR_KEY: literal\n"),
+    # braced references resolve at runtime, so they are rejected like $NAME
+    ("  skill: sonnet\n", "    MY_KEY: ${OPENROUTER_API_KEY}\n"),
+    (_OR_AGENT, "    MY_KEY: ${OPENROUTER_MANAGEMENT_KEY}\n"),
+    ("  skill: sonnet\n  providers:\n    openrouter: {api_key_env: OR_KEY}\n", "    MY_KEY: '${OR_KEY}'\n"),
+    ("  skill: sonnet\n  providers:\n    openrouter: {management_key_env: OR_MGMT}\n", "    MY_KEY: '${OR_MGMT}'\n"),
 ])
 def test_openrouter_keys_are_env_only_on_every_surface(tmp_path, models, env):
     body = ("name: t\nexecution:\n  skill: s\n  env:\n" + env + "models:\n" + models

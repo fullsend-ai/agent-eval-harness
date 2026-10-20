@@ -458,7 +458,9 @@ Per case (or once per batch) the runner:
       (fullsend then tears its sandbox down), waits `runner.term_grace_s` (default
       30 s, above a podman sandbox teardown), signals SIGKILL to the group only while
       the leader is still unreaped, and records exit `-1` ("Timed out"). Raise
-      `term_grace_s` if your sandbox needs longer to stop.
+      `term_grace_s` if your sandbox needs longer to stop. The run directory is
+      still mapped after a timeout: usage, stream stdout, subagent transcripts and
+      artifacts already copied into the workspace are kept.
     - `max_budget_usd` is a hint only. The fullsend harness enforces its own budget.
     - fullsend aborts before the pre-script when a `${VAR}` the harness file
       references is unset on the host. An agent's eval harness may reference only
@@ -564,11 +566,13 @@ Runners are pluggable — the harness only ever talks to the ABC:
 1. Subclass `EvalRunner` and implement `from_config()`, `name`, and `execute()`,
    returning a normalized `RunResult`.
 2. Register it in the `RUNNERS` dict in `agent_eval/agent/__init__.py` under a new
-   `runner.type` key.
+   `runner.type` key, and add the same key to the `RUNNER_TYPES` frozenset in
+   `agent_eval/config.py`, which is what config load checks.
 3. Populate as many `RunResult` fields as your runtime can; leave the rest `None`.
 
-Once registered, that `runner.type` is accepted at config load (an unregistered type
-is rejected) and works on the Local backend. EvalHub dispatches through `RUNNERS`
+Once registered in both places, that `runner.type` is accepted at config load (a type
+missing from `RUNNER_TYPES` is rejected, even if it is in `RUNNERS`) and works on the
+Local backend. EvalHub dispatches through `RUNNERS`
 directly, but registration does not imply EvalHub support (`fullsend`, for one, is
 local-only). [Harbor](../guides/harbor.md) instead maps `runner.type` to a Harbor
 agent name, so a runtime that is not in that mapping is reached there with

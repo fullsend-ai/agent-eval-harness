@@ -58,6 +58,9 @@ _ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _ITERATION_RE = re.compile(r"^iteration-(\d+)$")
 _BLOCK_VALUES = {"block", "blocked", "deny", "denied"}
 _SUBAGENT_MODEL_VAR = "AGENT_EVAL_SUBAGENT_MODEL"
+# Read bounds for files the sandboxed agent's run directory contains.
+_MAX_JSON_BYTES = 1_000_000
+_MAX_TELEMETRY_BYTES = 10_000_000
 
 
 class FullsendRunner(EvalRunner):
@@ -286,6 +289,11 @@ class FullsendRunner(EvalRunner):
             timeout_err = "\n".join(
                 s for s in (f"Timed out after {timeout_s}s", out, err) if s)
             return -1, "", timeout_err, time.monotonic() - start
+        except BaseException:
+            # fullsend runs in its own session, so the terminal's SIGINT never
+            # reaches it: stop the group (and its sandbox) before re-raising.
+            terminate_process_group(proc, self._term_grace_s)
+            raise
         return proc.returncode, out or "", err or "", time.monotonic() - start
 
     # ── Run directory → RunResult ────────────────────────────────────
@@ -318,8 +326,11 @@ class FullsendRunner(EvalRunner):
                 invocation_subagents, workspace / "subagents", workspace)
             stdout = "".join(streams)
 
+            # extract_usage describes one invocation (each result event
+            # overwrites the last), so read every iteration's stream on its own
+            # and sum the iterations.
             (token_usage, cost_usd, num_turns, stream_ids, models_seen,
-             per_model_usage, stream_ids_by_model) = extract_usage(stdout.splitlines())
+             per_model_usage, stream_ids_by_model) = _sum_iteration_usage(streams)
             # Transcript-only subagent turns count toward num_turns too (a valid
             # metrics.json num_turns still overrides below).
             subagent_turns = count_subagent_turns(
@@ -377,6 +388,55 @@ class FullsendRunner(EvalRunner):
 
 # ── Helpers ──────────────────────────────────────────────────────────
 
+_TOKEN_KEYS = ("input", "output", "cache_read", "cache_create")
+
+
+def _add_tokens(total: Optional[dict], part: Optional[dict]) -> Optional[dict]:
+    if not part:
+        return total
+    total = total or dict.fromkeys(_TOKEN_KEYS, 0)
+    for key in _TOKEN_KEYS:
+        total[key] += part.get(key) or 0
+    return total
+
+
+def _sum_iteration_usage(streams: list) -> tuple:
+    """:func:`extract_usage` over each iteration's stream, summed.
+
+    Returns the same tuple shape as ``extract_usage``. Token totals, cost and
+    the per-model breakdown add up across iterations; a partly finished
+    iteration (no ``result`` event) still contributes the tokens of its
+    assistant events. Message ids, models and per-model ids are unions, so
+    turn counting and subagent-transcript deduplication span the whole
+    invocation."""
+    token_usage = None
+    cost_usd = None
+    per_model_usage = None
+    stream_ids = set()
+    models_seen = set()
+    ids_by_model = {}
+    for text in streams:
+        (tokens, cost, _turns, ids, models, per_model,
+         by_model) = extract_usage(text.splitlines())
+        token_usage = _add_tokens(token_usage, tokens)
+        if cost is not None:
+            cost_usd = (cost_usd or 0) + cost
+        if per_model:
+            per_model_usage = per_model_usage or {}
+            for model, stats in per_model.items():
+                merged = per_model_usage.setdefault(
+                    model, {**dict.fromkeys(_TOKEN_KEYS, 0), "cost_usd": None})
+                _add_tokens(merged, stats)
+                if stats.get("cost_usd") is not None:
+                    merged["cost_usd"] = (merged["cost_usd"] or 0) + stats["cost_usd"]
+        stream_ids |= ids
+        models_seen |= models
+        for model, model_ids in (by_model or {}).items():
+            ids_by_model.setdefault(model, set()).update(model_ids)
+    return (token_usage, cost_usd, len(stream_ids) or None, stream_ids,
+            models_seen, per_model_usage, ids_by_model or None)
+
+
 def _sanitize_settings(workspace: Path) -> None:
     """Drop the host-only parts of the workspace ``.claude/settings.json``.
 
@@ -385,16 +445,19 @@ def _sanitize_settings(workspace: Path) -> None:
     sandbox) and ``permissions.additionalDirectories`` (host directories) for
     the other runners. fullsend uploads the settings file with the repository,
     and the agent definition owns the sandbox's environment and hooks, so those
-    keys are removed here."""
+    keys are removed here. Raises ``ValueError`` when the file exists but cannot
+    be parsed, so the run is refused instead of uploading it unsanitised."""
     path = workspace / ".claude" / "settings.json"
     if _has_symlink_component(workspace, path) or not path.is_file():
         return
     try:
         settings = json.loads(path.read_text())
     except (OSError, ValueError) as exc:
-        with _print_lock:
-            print(f"  WARNING: not sanitising {path}: {exc}", flush=True)
-        return
+        # Fail closed: an unreadable file may still carry literal env
+        # credentials, and fullsend would upload it unchanged.
+        raise ValueError(
+            f"cannot sanitise {path} before upload to the fullsend sandbox "
+            f"({exc}); fix or remove the file") from exc
     if not isinstance(settings, dict):
         return
     changed = False
@@ -580,8 +643,22 @@ def _copy_subagent_transcripts(src: Path, dest: Path, workspace: Path,
             shutil.copy2(f, target)
 
 
+def _regular_file(path: Path, max_bytes: int) -> bool:
+    """True for a regular file (never a symlink) of at most ``max_bytes``.
+
+    The run directory is written by the sandboxed agent's post-script, so its
+    files are untrusted: a link could point at a host file and a huge file
+    could exhaust memory."""
+    try:
+        if path.is_symlink() or not path.is_file():
+            return False
+        return path.stat().st_size <= max_bytes
+    except OSError:
+        return False
+
+
 def _read_json(path: Path) -> dict:
-    if not path.is_file():
+    if not _regular_file(path, _MAX_JSON_BYTES):
         return {}
     try:
         data = json.loads(path.read_text())
@@ -597,9 +674,13 @@ def _is_number(value) -> bool:
 
 
 def _count_files(path: Path) -> int:
-    if not path.is_dir():
+    """Regular files under ``path``; a symlinked directory or file is not
+    followed or counted."""
+    if path.is_symlink() or not path.is_dir():
         return 0
-    return sum(1 for f in path.rglob("*") if f.is_file())
+    return sum(
+        1 for _root, _dirs, names in os.walk(path, followlinks=False)
+        for name in names if not (Path(_root) / name).is_symlink())
 
 
 def _telemetry_denials(path: Path) -> list:
@@ -608,11 +689,13 @@ def _telemetry_denials(path: Path) -> list:
     A line counts as a block when a ``decision``/``action``/``outcome``/
     ``result`` field (top level or under ``attributes``) is block/deny, or a
     ``blocked`` field is true. Returns ``[]`` when the file is absent."""
-    if not path.is_file():
+    if path.is_symlink() or not path.is_file():
         return []
     denials = []
     try:
-        lines = path.read_text().splitlines()
+        # Bounded read; a line cut at the limit simply fails to parse.
+        with open(path, "r", errors="replace") as fh:
+            lines = fh.read(_MAX_TELEMETRY_BYTES).splitlines()
     except OSError:
         return []
     for line in lines:

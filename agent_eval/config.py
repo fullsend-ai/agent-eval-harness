@@ -1511,11 +1511,14 @@ def validate_openrouter_roles(config):
     # authored env entries (they would be baked into task packages/settings).
     effective = orc or OpenRouterConfig()
     secret_names = {effective.api_key_env, effective.management_key_env}
-    secret_refs = {f"${name}" for name in secret_names}
+    # Recognise both $NAME and ${NAME} with the parser the runners resolve
+    # values with, so a braced alias cannot forward a managed key unnoticed.
+    from agent_eval.agent.base import env_ref_name
     leaks = []
     for label, env in _env_surfaces(config, include_judges=True):
         for key, value in env.items():
-            if key in secret_names or (isinstance(value, str) and value.strip() in secret_refs):
+            if key in secret_names or (
+                    isinstance(value, str) and env_ref_name(value.strip()) in secret_names):
                 leaks.append(f"{label}.{key}")
     if leaks:
         level = effective.routing.enforcement

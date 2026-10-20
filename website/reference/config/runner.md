@@ -85,8 +85,10 @@ Reasoning-effort level for the agent. The accepted values are runner-specific:
 | `claude-code` | `low`, `medium`, `high`, `xhigh`, `max` |
 | `codex` | `minimal`, `low`, `medium`, `high`, `xhigh` |
 | `cursor` | Passed as the Cursor model's `effort` parameter; accepted values depend on the selected model |
+| `fullsend` | Forwarded as `--effort` to `fullsend run`; fullsend validates the accepted values |
 
-An invalid value raises at construction time for `claude-code` and `codex`. Cursor
+An invalid value raises at construction time for `claude-code` and `codex`; for
+`fullsend` the harness does not validate it and leaves that to `fullsend run`. Cursor
 does not have a standalone `--effort` flag; it appends the value to the model ID,
 for example `gpt-5.4[effort=high]`. If the model is already a Cursor catalog
 variant such as `gpt-5.4-medium`, the runner passes that ID through unchanged

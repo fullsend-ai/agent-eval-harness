@@ -20,6 +20,18 @@ from typing import Optional
 _ENV_REF_RE = re.compile(r"^\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))$")
 
 
+def env_ref_name(value) -> Optional[str]:
+    """Variable name a configured env value references (``$NAME`` or
+    ``${NAME}``), or ``None`` when ``value`` is not a whole-string reference.
+
+    The single parser behind both runtime resolution (:func:`resolve_env_value`)
+    and load-time secret-reference validation, so the two cannot disagree."""
+    if not isinstance(value, str):
+        return None
+    m = _ENV_REF_RE.match(value)
+    return (m.group(1) or m.group(2)) if m else None
+
+
 def resolve_env_value(value) -> Optional[str]:
     """Resolve one configured env value against the caller's environment.
 
@@ -30,8 +42,7 @@ def resolve_env_value(value) -> Optional[str]:
     if value is None:
         return None
     if isinstance(value, str) and value.startswith("$"):
-        m = _ENV_REF_RE.match(value)
-        name = (m.group(1) or m.group(2)) if m else value[1:]
+        name = env_ref_name(value) or value[1:]
         return os.environ.get(name)
     return str(value)
 
