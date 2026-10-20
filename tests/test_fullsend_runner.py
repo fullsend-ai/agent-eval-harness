@@ -112,6 +112,11 @@ FAKE_FULLSEND = textwrap.dedent('''\
         (it / "output" / "artifacts").mkdir(exist_ok=True)
         (it / "output" / "artifacts" / f"report-{i}.md").write_text(f"report {i}")
 
+    if os.environ.get("FAKE_FULLSEND_HANG_AFTER_RUN"):
+        sys.stdout.flush()
+        sys.stderr.flush()
+        time.sleep(float(os.environ["FAKE_FULLSEND_HANG_AFTER_RUN"]))
+
     sys.exit(int(os.environ.get("FAKE_FULLSEND_EXIT", "0")))
 ''')
 
@@ -133,7 +138,7 @@ def fake_fullsend(fake_bin, tmp_path, monkeypatch):
     monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}")
     monkeypatch.setenv("FAKE_FULLSEND_RECORD", str(record))
     for var in ("FAKE_FULLSEND_SLEEP", "FAKE_FULLSEND_EXIT", "FAKE_FULLSEND_ARTIFACTS",
-                "FAKE_FULLSEND_NO_RUN"):
+                "FAKE_FULLSEND_NO_RUN", "FAKE_FULLSEND_HANG_AFTER_RUN"):
         monkeypatch.delenv(var, raising=False)
     return record
 
@@ -387,6 +392,23 @@ class TestFullsendExecute:
         assert "Timed out" in result.stderr
         assert result.duration_s < 20
 
+    def test_timeout_keeps_run_data_already_on_disk(
+            self, tmp_path, fake_fullsend, monkeypatch):
+        monkeypatch.setenv("FAKE_FULLSEND_HANG_AFTER_RUN", "30")
+        monkeypatch.setenv("FAKE_FULLSEND_ARTIFACTS", "1")
+        monkeypatch.setattr(fullsend_mod, "_TERM_GRACE_S", 2)
+        ws = _workspace(tmp_path)
+        runner = _runner(tmp_path, output_paths=["artifacts"])
+        result = runner.execute(target="s", args="", workspace=ws,
+                                model="m", timeout_s=3)
+        assert result.exit_code == -1
+        assert "Timed out" in result.stderr
+        assert result.cost_usd == 0.42
+        assert result.num_turns == 7
+        assert "Working" in result.stdout
+        assert (ws / "artifacts" / "report-1.md").read_text() == "report 1"
+        assert (ws / "subagents" / "s1-agent-a1.jsonl").is_file()
+
     def test_missing_binary(self, tmp_path):
         ws = _workspace(tmp_path)
         result = _runner(tmp_path, binary=str(tmp_path / "no-such-fullsend")).execute(
@@ -507,6 +529,50 @@ class TestOutputRestore:
         runner = _runner(tmp_path, output_paths=["artifacts"])
         runner._restore_outputs(exported, ws)
         assert list(outside.iterdir()) == []
+
+
+class TestTranscriptCopyContainment:
+    def _transcripts(self, tmp_path):
+        src = tmp_path / "transcripts"
+        src.mkdir()
+        (src / "s1-agent-a1.jsonl").write_text("new")
+        return src
+
+    def test_destination_file_symlink_not_followed(self, tmp_path):
+        src = self._transcripts(tmp_path)
+        ws = tmp_path / "ws"
+        (ws / "subagents").mkdir(parents=True)
+        victim = tmp_path / "victim"
+        victim.write_text("keep")
+        (ws / "subagents" / "s1-agent-a1.jsonl").symlink_to(victim)
+        fullsend_mod._copy_subagent_transcripts(src, ws / "subagents", ws)
+        assert victim.read_text() == "keep"
+
+    def test_destination_directory_symlink_not_followed(self, tmp_path):
+        src = self._transcripts(tmp_path)
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (ws / "subagents").symlink_to(outside)
+        fullsend_mod._copy_subagent_transcripts(src, ws / "subagents", ws)
+        assert list(outside.iterdir()) == []
+
+    def test_source_directory_symlink_not_followed(self, tmp_path):
+        real = self._transcripts(tmp_path)
+        link = tmp_path / "linked"
+        link.symlink_to(real)
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        fullsend_mod._copy_subagent_transcripts(link, ws / "subagents", ws)
+        assert not (ws / "subagents").exists()
+
+    def test_regular_copy_still_works(self, tmp_path):
+        src = self._transcripts(tmp_path)
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        fullsend_mod._copy_subagent_transcripts(src, ws / "subagents", ws)
+        assert (ws / "subagents" / "s1-agent-a1.jsonl").read_text() == "new"
 
 
 class TestMaterializeSymlinks:

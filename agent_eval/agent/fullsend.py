@@ -161,7 +161,7 @@ class FullsendRunner(EvalRunner):
         env.update(entries)
         result = self._run(cmd, workspace, env, timeout_s)
 
-        if isinstance(result, RunResult):  # timeout or launch failure
+        if isinstance(result, RunResult):  # launch failure
             return result
         returncode, console_out, console_err, duration = result
 
@@ -223,12 +223,11 @@ class FullsendRunner(EvalRunner):
             out, err = proc.communicate(timeout=timeout_s)
         except subprocess.TimeoutExpired:
             out, err = _terminate(proc)
-            return RunResult(
-                exit_code=-1,
-                stdout="",
-                stderr="\n".join(s for s in (f"Timed out after {timeout_s}s", out, err) if s),
-                duration_s=time.monotonic() - start,
-            )
+            # Exit code -1 with a "Timed out" stderr; the caller still maps
+            # whatever the run directory holds (usage, stream, artifacts).
+            timeout_err = "\n".join(
+                s for s in (f"Timed out after {timeout_s}s", out, err) if s)
+            return -1, "", timeout_err, time.monotonic() - start
         return proc.returncode, out or "", err or "", time.monotonic() - start
 
     # ── Run directory → RunResult ────────────────────────────────────
@@ -277,8 +276,10 @@ class FullsendRunner(EvalRunner):
                     stdout = ""
             # Stage this invocation's transcripts so per-model turns and message
             # ids cover only this run, then add them to the shared workspace dir.
-            _copy_subagent_transcripts(iteration / "transcripts", invocation_subagents)
-            _copy_subagent_transcripts(iteration / "transcripts", workspace / "subagents")
+            _copy_subagent_transcripts(
+                iteration / "transcripts", invocation_subagents, workspace)
+            _copy_subagent_transcripts(
+                iteration / "transcripts", workspace / "subagents", workspace)
             self._restore_outputs(iteration / "output", workspace)
 
         (token_usage, cost_usd, num_turns, stream_ids, models_seen,
@@ -507,13 +508,21 @@ def _copy_exported_tree(src: Path, dest: Path) -> None:
             shutil.copy2(entry, target)
 
 
-def _copy_subagent_transcripts(src: Path, dest: Path) -> None:
-    if not src.is_dir():
+def _copy_subagent_transcripts(src: Path, dest: Path, workspace: Path) -> None:
+    """Copy subagent transcripts from ``src`` into ``dest`` (under
+    ``workspace``), never following a symlink at the source directory, any
+    destination component, or an existing destination file."""
+    if src.is_symlink() or not src.is_dir():
+        return
+    if _has_symlink_component(workspace, dest):
         return
     for f in sorted(src.glob("*-agent-*.jsonl")):
         if f.is_file() and not f.is_symlink():
+            target = dest / f.name
+            if target.is_symlink():
+                continue
             dest.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(f, dest / f.name)
+            shutil.copy2(f, target)
 
 
 def _read_json(path: Path) -> dict:
