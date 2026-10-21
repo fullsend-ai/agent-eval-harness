@@ -98,6 +98,7 @@ one `judge`.
           <span class="sd-f">subagent</span>
           <span class="sd-f">judge</span>
           <span class="sd-f">hook</span>
+          <span class="sd-f">judge_verdict<span class="sd-badge llm">LLM</span></span>
           <span class="sd-f">providers</span>
         </div>
       </div>
@@ -151,6 +152,7 @@ one `judge`.
           <span class="sd-f">examples</span>
           <span class="sd-f">score_range</span>
           <span class="sd-f">feedback_type</span>
+          <span class="sd-f">verdict<span class="sd-badge llm">LLM</span></span>
         </div>
       </div>
       <div class="sd-card">

@@ -1627,13 +1627,13 @@ class ModelsConfig:
     subagent: Optional[str] = None
     judge: Optional[str] = None
     hook: Optional[str] = None
+    # Provider registry for `<provider>:/<model>` URIs on the roles above
+    # (spec 014). Readers address it as `config.models.providers`.
+    providers: ProvidersConfig = field(default_factory=ProvidersConfig)
     # How SDK-backed LLM judges carry their verdict (spec 015): `auto` tries the
     # provider's structured output first and the forced tool call second,
     # `json_schema` / `tool` pin one transport. A judge's own `verdict:` wins.
     judge_verdict: str = "auto"
-    # Provider registry for `<provider>:/<model>` URIs on the roles above
-    # (spec 014). Readers address it as `config.models.providers`.
-    providers: ProvidersConfig = field(default_factory=ProvidersConfig)
 
 
 # The verdict transport policies of spec 015 (`models.judge_verdict`, per-judge
