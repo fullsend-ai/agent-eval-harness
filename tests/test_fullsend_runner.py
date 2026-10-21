@@ -281,6 +281,31 @@ class TestFullsendConfig:
                                    "judges:\n  - name: j\n    prompt: grade\n")
         assert cfg.runner.type == "fullsend"
 
+    def test_runner_backed_default_overridden_by_every_llm_judge_loads(self, tmp_path):
+        cfg = self._load(tmp_path, "runner:\n  type: fullsend\n  agent: a\n"
+                                   "models:\n  judge: runner:/opus\n"
+                                   "judges:\n"
+                                   "  - name: j\n    prompt: grade\n"
+                                   "    model: anthropic:/claude-opus-4-1\n"
+                                   "  - name: c\n    check: return True, 'ok'\n")
+        assert cfg.runner.type == "fullsend"
+        assert cfg.models.judge == "runner:/opus"
+
+    def test_runner_backed_default_with_only_check_judges_loads(self, tmp_path):
+        cfg = self._load(tmp_path, "runner:\n  type: fullsend\n  agent: a\n"
+                                   "models:\n  judge: runner:/opus\n"
+                                   "judges:\n  - name: c\n    check: return True, 'ok'\n")
+        assert cfg.runner.type == "fullsend"
+
+    def test_runner_backed_default_rejected_when_one_judge_inherits(self, tmp_path):
+        with pytest.raises(ValueError, match=r"models\.judge.*SDK-backed"):
+            self._load(tmp_path, "runner:\n  type: fullsend\n  agent: a\n"
+                                 "models:\n  judge: runner:/opus\n"
+                                 "judges:\n"
+                                 "  - name: j\n    prompt: grade\n"
+                                 "    model: anthropic:/claude-opus-4-1\n"
+                                 "  - name: k\n    prompt: grade again\n")
+
     def test_fullsend_rejected_with_execution_prompt(self, tmp_path):
         p = tmp_path / "eval.yaml"
         p.write_text("name: t\nexecution:\n  prompt: hello\n"
@@ -467,6 +492,37 @@ class TestFullsendExecute:
         assert result.exit_code == -1
         assert settings.read_text() == original
 
+    def test_restore_reapplies_original_mode_not_post_run_mode(
+            self, tmp_path, monkeypatch):
+        """The run leaves a world-readable settings file; the restored one
+        must carry the mode it had before the run, not the loosened one."""
+        ws = _workspace(tmp_path)
+        (ws / ".claude").mkdir()
+        settings = ws / ".claude" / "settings.json"
+        settings.write_text(json.dumps({"env": {"SECRET": "x"}}))
+        settings.chmod(0o600)
+        original_mode = settings.stat().st_mode & 0o777
+
+        def loosen(self, *args, **kwargs):
+            settings.chmod(0o644)
+            return fullsend_mod.RunResult(
+                exit_code=0, stdout="", stderr="", duration_s=0.0)
+
+        monkeypatch.setattr(FullsendRunner, "_launch", loosen)
+        _runner(tmp_path).execute(target="s", args="", workspace=ws, model="m",
+                                  timeout_s=60)
+        assert json.loads(settings.read_text()) == {"env": {"SECRET": "x"}}
+        assert settings.stat().st_mode & 0o777 == original_mode == 0o600
+
+    def test_restore_falls_back_to_owner_only_when_mode_unknown(self, tmp_path):
+        ws = _workspace(tmp_path)
+        (ws / ".claude").mkdir()
+        settings = ws / ".claude" / "settings.json"
+        settings.write_text("{}")
+        settings.chmod(0o644)  # post-run mode must not leak into the restore
+        fullsend_mod._restore_settings(ws, (b'{"env": {}}', None))
+        assert settings.stat().st_mode & 0o777 == 0o600
+
     def test_restore_does_not_write_through_a_settings_symlink(self, tmp_path):
         ws = _workspace(tmp_path)
         (ws / ".claude").mkdir()
@@ -474,7 +530,7 @@ class TestFullsendExecute:
         artifact.write_text("artifact")
         settings = ws / ".claude" / "settings.json"
         settings.symlink_to(artifact)
-        fullsend_mod._restore_settings(ws, b'{"env": {"K": "literal-secret"}}')
+        fullsend_mod._restore_settings(ws, (b'{"env": {"K": "literal-secret"}}', 0o600))
         assert artifact.read_text() == "artifact"
         assert not settings.is_symlink()
         assert settings.read_bytes() == b'{"env": {"K": "literal-secret"}}'
@@ -484,14 +540,14 @@ class TestFullsendExecute:
         outside = tmp_path / "outside"
         outside.mkdir()
         (ws / ".claude").symlink_to(outside)
-        fullsend_mod._restore_settings(ws, b'{"env": {"K": "literal-secret"}}')
+        fullsend_mod._restore_settings(ws, (b'{"env": {"K": "literal-secret"}}', 0o600))
         assert list(outside.iterdir()) == []
         assert "could not restore" in capsys.readouterr().out
 
     def test_restore_leaves_no_temp_file_behind(self, tmp_path):
         ws = _workspace(tmp_path)
         (ws / ".claude").mkdir()
-        fullsend_mod._restore_settings(ws, b"{}")
+        fullsend_mod._restore_settings(ws, (b"{}", 0o600))
         assert [p.name for p in (ws / ".claude").iterdir()] == ["settings.json"]
 
     def test_second_run_does_not_upload_first_runs_files(self, tmp_path, fake_fullsend):

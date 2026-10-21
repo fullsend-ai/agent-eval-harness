@@ -41,6 +41,7 @@ from agent_eval.config import (
 )
 from agent_eval.prompt_backends import (
     extract_runner_text,
+    require_sdk_judge_for_runner,
     resolve_judge_backend,
     resolve_judge_client,
     run_prompt_via_runner,
@@ -3471,14 +3472,26 @@ def _load_code_judge(jc, project_root=None):
     return fn
 
 
-def _resolve_judge_model(jc, config):
-    """Resolve LLM judge model: per-judge > models.judge > env > error."""
-    model = jc.model or config.models.judge or os.environ.get("EVAL_JUDGE_MODEL")
+def _resolve_judge_model(jc, config, *, grades_via_backend=True):
+    """Resolve LLM judge model: per-judge > models.judge > env > error.
+
+    A model that comes only from ``EVAL_JUDGE_MODEL`` is invisible to the
+    config-load check, so a runner-backed one (``runner:/…``) is checked here
+    against ``runner.type`` — at judge build, before any case runs — rather
+    than failing on every grading call. Agent judges always run through the
+    runner (``grades_via_backend=False``) and skip that check."""
+    static_model = jc.model or config.models.judge
+    model = static_model or os.environ.get("EVAL_JUDGE_MODEL")
     if not model:
         raise RuntimeError(
             f"No model configured for LLM judge '{jc.name}'. Set per-judge "
             "'model:', top-level 'models.judge:' in eval.yaml, or "
             "EVAL_JUDGE_MODEL env var.")
+    if grades_via_backend and not static_model:
+        backend, _ = resolve_judge_backend(model)
+        require_sdk_judge_for_runner(
+            config.runner.type, backend,
+            f"judge '{jc.name}' model (EVAL_JUDGE_MODEL)")
     return model
 
 
@@ -3980,7 +3993,8 @@ def _load_agent_judge(jc, config, project_root=None):
     # An agent judge is inherently runner-executed (it needs Read/Grep/Glob), so
     # its model always goes to the runner CLI. Strip any provider prefix
     # (`anthropic:/…`, `runner:/…`) to the bare id the runner expects.
-    _, judge_model = split_model_uri(_resolve_judge_model(jc, config))
+    _, judge_model = split_model_uri(
+        _resolve_judge_model(jc, config, grades_via_backend=False))
     judge_runner = copy.copy(agent.get("runner") or RunnerConfig())
     judge_runner.settings = dict(judge_runner.settings or {})
     # Agent judges run against a temporary staged workspace. Never let a

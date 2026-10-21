@@ -445,11 +445,15 @@ def _sum_iteration_usage(streams: list) -> tuple:
             models_seen, per_model_usage, ids_by_model or None)
 
 
-def _restore_settings(workspace: Path, original: Optional[bytes]) -> None:
-    """Put back the ``.claude/settings.json`` bytes saved by
-    ``_sanitize_settings`` (no-op when nothing was changed)."""
+def _restore_settings(workspace: Path,
+                      original: Optional[tuple[bytes, Optional[int]]]) -> None:
+    """Put back the ``.claude/settings.json`` bytes and permission bits saved by
+    ``_sanitize_settings`` (no-op when nothing was changed). The mode is the
+    one recorded before the run, never the post-run file's — the run could have
+    loosened it — and falls back to owner-only when none was recorded."""
     if original is None:
         return
+    content, original_mode = original
     claude_dir = workspace / ".claude"
     target = claude_dir / "settings.json"
     tmp_name = None
@@ -459,14 +463,10 @@ def _restore_settings(workspace: Path, original: Optional[bytes]) -> None:
         # file entry itself rather than writing through whatever it points at.
         if _has_symlink_component(workspace, claude_dir) or not claude_dir.is_dir():
             raise OSError(f"{claude_dir} is not a regular directory")
-        try:
-            mode = (target.stat().st_mode & 0o777
-                    if target.is_file() and not target.is_symlink() else 0o644)
-        except OSError:
-            mode = 0o644
+        mode = 0o600 if original_mode is None else original_mode
         fd, tmp_name = tempfile.mkstemp(dir=claude_dir, prefix=".settings-")
         with os.fdopen(fd, "wb") as handle:
-            handle.write(original)
+            handle.write(content)
         os.chmod(tmp_name, mode)
         os.replace(tmp_name, target)  # replaces a symlink entry, never follows it
         tmp_name = None
@@ -483,7 +483,8 @@ def _restore_settings(workspace: Path, original: Optional[bytes]) -> None:
                 pass
 
 
-def _sanitize_settings(workspace: Path) -> Optional[bytes]:
+def _sanitize_settings(
+        workspace: Path) -> Optional[tuple[bytes, Optional[int]]]:
     """Drop the host-only parts of the workspace ``.claude/settings.json``.
 
     The harness writes ``env`` (execution.env, already passed to fullsend through
@@ -494,8 +495,9 @@ def _sanitize_settings(workspace: Path) -> Optional[bytes]:
     keys are removed here. Raises ``ValueError`` when the file exists but cannot
     be parsed, so the run is refused instead of uploading it unsanitised.
 
-    Returns the original file bytes when the file was rewritten (so the caller
-    can restore them for later pipeline steps), else ``None``."""
+    Returns ``(original bytes, original permission bits)`` when the file was
+    rewritten (so the caller can restore both for later pipeline steps), else
+    ``None``. The mode is ``None`` if it could not be read."""
     path = workspace / ".claude" / "settings.json"
     if _has_symlink_component(workspace, path) or not path.is_file():
         return None
@@ -522,11 +524,15 @@ def _sanitize_settings(workspace: Path) -> Optional[bytes]:
     if not changed:
         return None
     try:
+        mode = path.stat().st_mode & 0o777
+    except OSError:
+        mode = None
+    try:
         path.write_text(json.dumps(settings, indent=2))
     except OSError:
         path.write_bytes(original)  # best effort: never leave a partial rewrite
         raise
-    return original
+    return original, mode
 
 
 def materialize_symlinks(workspace: Path, allowed_roots: Optional[list] = None) -> None:

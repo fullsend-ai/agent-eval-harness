@@ -163,6 +163,27 @@ def test_judge_model_resolution_precedence(tmp_path, monkeypatch):
         _resolve_judge_model(jc, cfg)
 
 
+def test_env_only_runner_judge_rejected_for_fullsend_runner(monkeypatch):
+    """A `runner:/…` judge model supplied only via EVAL_JUDGE_MODEL is not
+    visible to the config-load check, so judge build rejects it for a
+    fullsend runner instead of every grading call failing later."""
+    cfg = EvalConfig(name="t", skill="s")
+    cfg.runner.type = "fullsend"
+    jc = JudgeConfig(name="j")
+    monkeypatch.setenv("EVAL_JUDGE_MODEL", "runner:/opus")
+    with pytest.raises(ValueError, match="SDK-backed"):
+        _resolve_judge_model(jc, cfg)
+
+    # An SDK-backed env model, an agent judge (always runner-executed) and a
+    # non-fullsend runner are all fine.
+    monkeypatch.setenv("EVAL_JUDGE_MODEL", "anthropic:/claude-opus-4-1")
+    assert _resolve_judge_model(jc, cfg) == "anthropic:/claude-opus-4-1"
+    monkeypatch.setenv("EVAL_JUDGE_MODEL", "runner:/opus")
+    assert _resolve_judge_model(jc, cfg, grades_via_backend=False) == "runner:/opus"
+    cfg.runner.type = "cursor"
+    assert _resolve_judge_model(jc, cfg) == "runner:/opus"
+
+
 def test_judge_model_backend_validated_at_load(tmp_path):
     """An unroutable judge model fails at config load, naming the source."""
     body = ("name: t\nexecution:\n  skill: s\n"

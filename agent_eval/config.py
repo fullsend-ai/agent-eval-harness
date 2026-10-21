@@ -2881,10 +2881,17 @@ class EvalConfig:
         # Agent judges route their model through the runner (any provider prefix
         # is stripped to the bare id), not an SDK, so an explicit non-SDK provider
         # is valid for them — validate only judges that resolve to an SDK backend.
-        # models.judge is checked only when a non-agent judge could consume it.
+        # models.judge is checked only when a non-agent LLM judge actually
+        # inherits it — one that sets its own `model:`, or a check/code judge
+        # that never calls a model, leaves the default unused.
         non_agent_judges = [jc for jc in config.judges if not jc.agent]
+        inherits_default = [
+            jc for jc in non_agent_judges
+            if not jc.model and (
+                jc.prompt or jc.prompt_file or jc.llm_rubric
+                or (jc.builtin and builtin_judge_kind(jc.builtin) == "llm"))]
         judge_models = []
-        if config.models.judge and non_agent_judges:
+        if config.models.judge and inherits_default:
             judge_models.append(("models.judge", config.models.judge))
         for jc in non_agent_judges:
             if jc.model:
