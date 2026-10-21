@@ -2876,7 +2876,8 @@ class EvalConfig:
         # `model:`); a model supplied solely via EVAL_JUDGE_MODEL is validated
         # when the judge is built. Local import avoids an import cycle
         # (prompt_backends -> agent_eval.agent -> config).
-        from agent_eval.prompt_backends import resolve_judge_backend
+        from agent_eval.prompt_backends import (
+            require_sdk_judge_for_runner, resolve_judge_backend)
         # Agent judges route their model through the runner (any provider prefix
         # is stripped to the bare id), not an SDK, so an explicit non-SDK provider
         # is valid for them — validate only judges that resolve to an SDK backend.
@@ -2890,9 +2891,10 @@ class EvalConfig:
                 judge_models.append((f"judge '{jc.name}' model", jc.model))
         for label, model in judge_models:
             try:
-                resolve_judge_backend(model)
+                backend, _ = resolve_judge_backend(model)
             except ValueError as e:
                 raise ValueError(f"{label}: {e}") from e
+            require_sdk_judge_for_runner(config.runner.type, backend, label)
 
         # OpenRouter judges (spec 014): `provider_options` is validated by the
         # provider kind of the judge's statically-known model, and an `agent:`

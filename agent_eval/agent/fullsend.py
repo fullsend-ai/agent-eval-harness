@@ -208,11 +208,8 @@ class FullsendRunner(EvalRunner):
 
         env = os.environ.copy()
         env.update(entries)
-        result = self._run(cmd, workspace, env, timeout_s)
-
-        if isinstance(result, RunResult):  # launch failure
-            return result
-        returncode, console_out, console_err, duration = result
+        returncode, console_out, console_err, duration = self._run(
+            cmd, workspace, env, timeout_s)
 
         if self._log_prefix:
             status = "OK" if returncode == 0 else f"FAIL (exit {returncode})"
@@ -288,8 +285,7 @@ class FullsendRunner(EvalRunner):
         try:
             proc = subprocess.Popen(cmd, **popen_kwargs)
         except (OSError, subprocess.SubprocessError) as e:
-            return RunResult(exit_code=-1, stdout="", stderr=str(e),
-                             duration_s=time.monotonic() - start)
+            return -1, "", str(e), time.monotonic() - start
         try:
             out, err = proc.communicate(timeout=timeout_s)
         except subprocess.TimeoutExpired:
@@ -454,13 +450,37 @@ def _restore_settings(workspace: Path, original: Optional[bytes]) -> None:
     ``_sanitize_settings`` (no-op when nothing was changed)."""
     if original is None:
         return
+    claude_dir = workspace / ".claude"
+    target = claude_dir / "settings.json"
+    tmp_name = None
     try:
-        (workspace / ".claude" / "settings.json").write_bytes(original)
+        # The run (or the project's post-script) may have replaced either path
+        # with a link: refuse a link in the directory chain, and replace the
+        # file entry itself rather than writing through whatever it points at.
+        if _has_symlink_component(workspace, claude_dir) or not claude_dir.is_dir():
+            raise OSError(f"{claude_dir} is not a regular directory")
+        try:
+            mode = (target.stat().st_mode & 0o777
+                    if target.is_file() and not target.is_symlink() else 0o644)
+        except OSError:
+            mode = 0o644
+        fd, tmp_name = tempfile.mkstemp(dir=claude_dir, prefix=".settings-")
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(original)
+        os.chmod(tmp_name, mode)
+        os.replace(tmp_name, target)  # replaces a symlink entry, never follows it
+        tmp_name = None
     except OSError as exc:
         with _print_lock:
             print(f"  WARNING: could not restore {workspace}/.claude/settings.json "
                   f"after the fullsend run ({exc}); later steps in this "
                   f"workspace will run without its hooks and env", flush=True)
+    finally:
+        if tmp_name is not None:
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
 
 
 def _sanitize_settings(workspace: Path) -> Optional[bytes]:

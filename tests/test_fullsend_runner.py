@@ -263,6 +263,24 @@ class TestFullsendConfig:
                                  "    agent:\n      runner:\n        type: fullsend\n"
                                  "        agent: a\n")
 
+    def test_fullsend_rejected_with_runner_backed_judge_model(self, tmp_path):
+        with pytest.raises(ValueError, match=r"models\.judge.*SDK-backed"):
+            self._load(tmp_path, "runner:\n  type: fullsend\n  agent: a\n"
+                                 "models:\n  judge: runner:/opus\n"
+                                 "judges:\n  - name: j\n    prompt: grade\n")
+
+    def test_fullsend_rejected_with_runner_backed_per_judge_model(self, tmp_path):
+        with pytest.raises(ValueError, match=r"judge 'j' model.*SDK-backed"):
+            self._load(tmp_path, "runner:\n  type: fullsend\n  agent: a\n"
+                                 "judges:\n  - name: j\n    prompt: grade\n"
+                                 "    model: runner:/opus\n")
+
+    def test_fullsend_accepts_sdk_backed_judge_model(self, tmp_path):
+        cfg = self._load(tmp_path, "runner:\n  type: fullsend\n  agent: a\n"
+                                   "models:\n  judge: anthropic:/claude-opus-4-1\n"
+                                   "judges:\n  - name: j\n    prompt: grade\n")
+        assert cfg.runner.type == "fullsend"
+
     def test_fullsend_rejected_with_execution_prompt(self, tmp_path):
         p = tmp_path / "eval.yaml"
         p.write_text("name: t\nexecution:\n  prompt: hello\n"
@@ -448,6 +466,33 @@ class TestFullsendExecute:
             target="s", args="", workspace=ws, model="m", timeout_s=60)
         assert result.exit_code == -1
         assert settings.read_text() == original
+
+    def test_restore_does_not_write_through_a_settings_symlink(self, tmp_path):
+        ws = _workspace(tmp_path)
+        (ws / ".claude").mkdir()
+        artifact = ws / "artifact.txt"
+        artifact.write_text("artifact")
+        settings = ws / ".claude" / "settings.json"
+        settings.symlink_to(artifact)
+        fullsend_mod._restore_settings(ws, b'{"env": {"K": "literal-secret"}}')
+        assert artifact.read_text() == "artifact"
+        assert not settings.is_symlink()
+        assert settings.read_bytes() == b'{"env": {"K": "literal-secret"}}'
+
+    def test_restore_refuses_a_claude_dir_symlink(self, tmp_path, capsys):
+        ws = _workspace(tmp_path)
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (ws / ".claude").symlink_to(outside)
+        fullsend_mod._restore_settings(ws, b'{"env": {"K": "literal-secret"}}')
+        assert list(outside.iterdir()) == []
+        assert "could not restore" in capsys.readouterr().out
+
+    def test_restore_leaves_no_temp_file_behind(self, tmp_path):
+        ws = _workspace(tmp_path)
+        (ws / ".claude").mkdir()
+        fullsend_mod._restore_settings(ws, b"{}")
+        assert [p.name for p in (ws / ".claude").iterdir()] == ["settings.json"]
 
     def test_second_run_does_not_upload_first_runs_files(self, tmp_path, fake_fullsend):
         ws = _workspace(tmp_path)
