@@ -265,7 +265,9 @@ def test_preflight_checks_each_judge_under_its_own_verdict_policy(fake, tmp_path
 
     # run-level auto, one judge pinned to json_schema → FAIL for that judge
     c = cfg([{"name": "strict", "prompt": "p", "verdict": "json_schema"}])
-    assert judge_verdict_policies(c) == {"qwen/qwen3-8b": {"json_schema"}}
+    pinned = judge_routing_keys(c)["qwen/qwen3-8b"]
+    assert pinned.only == ("novita",)
+    assert judge_verdict_policies(c) == {"qwen/qwen3-8b": [(pinned, "json_schema")]}
     with pytest.raises(ConfigError, match="pins json_schema"):
         run_preflight(plan, level="strict", judges=judge_routing_keys(c),
                       verdict="auto", judge_verdicts=judge_verdict_policies(c))
@@ -273,7 +275,7 @@ def test_preflight_checks_each_judge_under_its_own_verdict_policy(fake, tmp_path
     # run-level json_schema, the only judge pinned to tool → no structured-output
     # failure; Decision 25's forcing check applies instead (novita cannot force)
     c = cfg([{"name": "legacy", "prompt": "p", "verdict": "tool"}], run_policy="json_schema")
-    assert judge_verdict_policies(c) == {"qwen/qwen3-8b": {"tool"}}
+    assert judge_verdict_policies(c) == {"qwen/qwen3-8b": [(pinned, "tool")]}
     res = run_preflight(plan, level="warn", judges=judge_routing_keys(c),
                         verdict="json_schema", judge_verdicts=judge_verdict_policies(c))
     assert not any("structured_outputs" in m for m in res.failures + res.warnings)
@@ -281,7 +283,7 @@ def test_preflight_checks_each_judge_under_its_own_verdict_policy(fake, tmp_path
 
     # two judges on the key, auto and json_schema: both policies are reported
     c = cfg([{"name": "a", "prompt": "p"}, {"name": "b", "prompt": "p", "verdict": "json_schema"}])
-    assert judge_verdict_policies(c) == {"qwen/qwen3-8b": {"auto", "json_schema"}}
+    assert judge_verdict_policies(c) == {"qwen/qwen3-8b": [(pinned, "auto"), (pinned, "json_schema")]}
     res = run_preflight(plan, level="warn", judges=judge_routing_keys(c),
                         verdict="auto", judge_verdicts=judge_verdict_policies(c))
     assert any("(judges on verdict: json_schema)" in m and "pins json_schema" in m for m in res.failures)
@@ -290,3 +292,54 @@ def test_preflight_checks_each_judge_under_its_own_verdict_policy(fake, tmp_path
     # a non-openrouter judge contributes no policy
     c = cfg([{"name": "x", "prompt": "p", "model": "claude-opus-5-5", "verdict": "json_schema"}])
     assert judge_verdict_policies(c) == {}
+
+
+def test_preflight_keeps_judges_with_different_declarations_apart(fake, tmp_path, monkeypatch):
+    """Judges on one slug are checked per (declaration, verdict policy) pair: a
+    `tool` judge pinned to Novita (which forces a tool but has no
+    structured_outputs) next to an unpinned `json_schema` judge passes strict —
+    the unpinned judge sends no pins and is not held to the pinned one's — while
+    a *pinned* `json_schema` judge on the slug still fails."""
+    import yaml
+
+    import openrouter_fakes
+    from agent_eval.config import EvalConfig
+    from agent_eval.providers.openrouter.plan import judge_routing_keys, judge_verdict_policies
+
+    monkeypatch.setitem(openrouter_fakes.ENDPOINTS, "qwen/qwen3-8b", [
+        {"provider_name": "Novita", "tag": "novita/qwen", "quantization": "bf16", "status": 0,
+         "supported_parameters": ["tools", "tool_choice"],
+         "supports_tool_choice": {"none": True, "auto": True, "required": False, "function": True},
+         "max_completion_tokens": 32768}])
+    pin = {"routing": {"only": ["novita"]}}
+
+    def cfg(judges):
+        raw = {"name": "t", "execution": {"skill": "s"},
+               "models": {"skill": "openrouter:/qwen/qwen3-8b", "judge": "openrouter:/qwen/qwen3-8b",
+                          "providers": {"openrouter": {"base_url": fake.base_url}}},
+               "judges": judges}
+        (tmp_path / "eval.yaml").write_text(yaml.safe_dump(raw))
+        return EvalConfig.from_yaml(tmp_path / "eval.yaml")
+
+    plan = make_plan(fake.base_url, skill=parse_agent_model("openrouter:/qwen/qwen3-8b"),
+                     subagent=parse_agent_model("openrouter:/qwen/qwen3-8b"))
+
+    def preflight(c):
+        return run_preflight(plan, level="strict", run_dir=tmp_path, judges=judge_routing_keys(c),
+                             verdict="auto", judge_verdicts=judge_verdict_policies(c))
+
+    c = cfg([{"name": "pinned-tool", "prompt": "p", "verdict": "tool", "provider_options": pin},
+             {"name": "open", "prompt": "p", "verdict": "json_schema"}])
+    pairs = judge_verdict_policies(c)["qwen/qwen3-8b"]
+    assert [p[1] for p in pairs] == ["tool", "json_schema"] and pairs[0][0].only == ("novita",) and pairs[1][0] is None
+    res = preflight(c)
+    assert res.failures == [] and not any("structured_outputs" in m for m in res.warnings)
+
+    c = cfg([{"name": "pinned-tool", "prompt": "p", "verdict": "tool", "provider_options": pin},
+             {"name": "pinned-schema", "prompt": "p", "verdict": "json_schema", "provider_options": pin}])
+    with pytest.raises(ConfigError, match="pins json_schema"):
+        preflight(c)
+
+    # the older call shape still works: judges= and verdict= with no pairs
+    res = run_preflight(plan, level="strict", judges={"qwen/qwen3-8b": True}, verdict="tool")
+    assert res.failures == []

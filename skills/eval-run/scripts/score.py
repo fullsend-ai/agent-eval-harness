@@ -1315,7 +1315,9 @@ def _verdict_from_data(data, is_bool, bounds, strict=False):
     structured-output reply — or None when the verdict key is missing or
     mistyped (the caller decides whether that is a strict error). A boolean
     is never a numeric score; `strict` (structured-output replies) also
-    requires `rationale` to be a string."""
+    requires `rationale` to be a string and `score` to be a JSON number — a
+    string is not coerced, and a non-integral value on an integer scale is
+    rejected rather than rounded. The tool-call path stays tolerant."""
     if not isinstance(data, dict):
         return None
     if strict and not isinstance(data.get("rationale"), str):
@@ -1325,6 +1327,12 @@ def _verdict_from_data(data, is_bool, bounds, strict=False):
         return (data["passed"], rationale) if isinstance(data.get("passed"), bool) else None
     if isinstance(data.get("score"), bool):
         return None
+    if strict:
+        score = data.get("score")
+        if not isinstance(score, (int, float)):
+            return None
+        if bounds[2] and not float(score).is_integer():
+            return None
     try:
         return (_coerce_number(data["score"], bounds[2]), rationale)
     except (KeyError, TypeError, ValueError):

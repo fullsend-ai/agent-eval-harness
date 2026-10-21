@@ -212,7 +212,11 @@ def run_preflight(plan, *, level: str = "strict", run_dir=None, catalog=None, fe
     """Run the checks for ``plan`` at ``level``; ``judges`` is
     ``{routing key: pinned}`` for the run's ``openrouter:/`` judges (see
     ``plan.judge_routing_keys``: the judge's effective RoutingSpec, ``True`` for
-    the table's entry, falsy when it sends no pins). ``strict`` raises :class:`ConfigError` listing
+    the table's entry, falsy when it sends no pins); ``judge_verdicts`` is
+    ``{routing key: [(declaration, verdict policy), ...]}``
+    (``plan.judge_verdict_policies``) and runs the judge checks once per
+    distinct pair, each against its own declaration — absent, ``judges`` with
+    ``verdict`` stand in. ``strict`` raises :class:`ConfigError` listing
     every failure; ``warn`` prints them and marks the result degraded; ``off``
     does nothing. ``fetch`` (tests) serves every GET."""
     if level not in LEVELS:
@@ -225,20 +229,35 @@ def run_preflight(plan, *, level: str = "strict", run_dir=None, catalog=None, fe
     catalog = catalog or (ModelCatalog(fetch=fetch, base_url=plan.base_url) if fetch
                           else ModelCatalog(base_url=plan.base_url))
     table = getattr(plan, "routing", None)
-    keys: dict = {k: {"variant": v, "roles": {"agent"}, "judge_spec": None}
+    keys: dict = {k: {"variant": v, "roles": {"agent"}, "judge_decls": []}
                   for k, v in plan_models(plan).items()}
-    for key, declared in (judges or {}).items():
-        # ``declared``: the judge's effective RoutingSpec (plan.judge_routing_keys),
-        # ``True`` for "the table's entry", falsy for a judge that sends no pins.
-        # ``judge_verdicts`` (plan.judge_verdict_policies) lists the spec 015
-        # policies the key's judges run under; absent → the run-level ``verdict``.
-        entry = keys.setdefault(routing_key(key), {"variant": None, "roles": set(), "judge_spec": None})
-        entry["roles"].add("judge")
-        entry["verdicts"] = set((judge_verdicts or {}).get(key) or ()) or {verdict}
+
+    def resolved(declared, key):
+        # a judge's effective RoutingSpec, ``True`` for "the table's entry",
+        # falsy for a judge that sends no pins (→ None)
         if declared is True:
-            declared = table.for_model(key) if table is not None else None
-        if declared and not isinstance(declared, bool) and entry["judge_spec"] is None:
-            entry["judge_spec"] = declared
+            return table.for_model(key) if table is not None else None
+        return declared if declared and not isinstance(declared, bool) else None
+
+    for key, declared in (judges or {}).items():
+        # ``judge_verdicts`` (plan.judge_verdict_policies) lists the distinct
+        # (declaration, spec 015 policy) pairs the key's judges run under; each
+        # pair is checked on its own. Absent (or the bare policy strings of the
+        # older shape) → ``judges[key]``'s declaration with the run-level
+        # ``verdict``.
+        entry = keys.setdefault(routing_key(key), {"variant": None, "roles": set(), "judge_decls": []})
+        entry["roles"].add("judge")
+        decls = entry["judge_decls"]
+        pairs = (judge_verdicts or {}).get(key) or [(declared, verdict)]
+        for pair in pairs:
+            spec, policy = (resolved(declared, key), pair) if isinstance(pair, str) \
+                else (resolved(pair[0], key), pair[1])
+            for d in decls:
+                if d[0] == spec:
+                    d[1].add(policy)
+                    break
+            else:
+                decls.append([spec, {policy}])
     snapshot_catalog: dict = {"providers": [], "models": [], "endpoints": {}}
     known: Optional[dict] = None
     try:
@@ -260,27 +279,37 @@ def run_preflight(plan, *, level: str = "strict", run_dir=None, catalog=None, fe
     for key, info in keys.items():
         roles = info["roles"]
         agent_spec = table.for_model(key) if table is not None else None
-        judge_spec = info.get("judge_spec")
         agent_pins = pinned_providers(agent_spec) if "agent" in roles else None
-        judge_pins = pinned_providers(judge_spec) if "judge" in roles else None
         # One check per declaration actually sent: the agent path sends the
-        # table's entry; a judge sends its own effective declaration, which
-        # may pin other providers (Decision 25) — then it is checked apart.
-        checks = []
+        # table's entry; each distinct judge declaration (Decision 25) is
+        # checked on its own — against its own pins and under the verdict
+        # policies of the judges that send it — unless it pins what the agent
+        # does, when it shares the agent's check. A judge sending no pins is
+        # not held to anyone else's.
+        checks = []   # [roles, spec, judge_pinned, verdict policies]
         if "agent" in roles:
-            same = "judge" in roles and judge_pins == agent_pins
-            checks.append(({"agent"} | ({"judge"} if same else set()), agent_spec, same and bool(judge_pins)))
-        if "judge" in roles and ("agent" not in roles or judge_pins != agent_pins):
-            checks.append(({"judge"}, judge_spec, bool(judge_pins)))
-        for check_roles, spec, judge_pinned in checks:
+            checks.append([{"agent"}, agent_spec, False, set()])
+        for judge_spec, policies in info["judge_decls"]:
+            judge_pins = pinned_providers(judge_spec)
+            if "agent" in roles and judge_pins == agent_pins:
+                checks[0][0].add("judge")
+                checks[0][2] = checks[0][2] or bool(judge_pins)
+                checks[0][3] |= policies
+            else:
+                checks.append([{"judge"}, judge_spec, bool(judge_pins), set(policies)])
+        for check_roles, spec, judge_pinned, policies in checks:
             entry = _check_key(key, check_roles, spec, judge_pinned, info["variant"], known, catalog,
                                snapshot_catalog, pricing, res,
-                               verdicts=info.get("verdicts") or {verdict})
+                               verdicts=policies or {verdict})
             if key not in snap_keys:
                 snap_keys[key] = entry
             else:
                 snap_keys[key]["roles"] = sorted(set(snap_keys[key]["roles"]) | check_roles)
-                snap_keys[key]["judge"] = entry
+                # the snapshot's `judge` slot keeps the first judge check, a
+                # pinned one taking it over from an unpinned one
+                if "judge" not in snap_keys[key] or (
+                        entry["eligible"] and not snap_keys[key]["judge"]["eligible"]):
+                    snap_keys[key]["judge"] = entry
     try:
         keyed(f"{base}/v1/key")
     except OpenRouterHTTPError as exc:

@@ -2434,6 +2434,34 @@ class TestVerdictTransportAnthropic:
         assert exc.value.error_type == error_type
         assert exc.value.verdict_transport == "json_schema"
 
+    @pytest.mark.parametrize("score_json", ['"2"', "1.5", "true", "null"])
+    def test_a_string_fractional_or_non_numeric_score_is_a_bad_verdict(self, score_json):
+        """Structured output is parsed strictly: a string score is not coerced and a
+        non-integral one on an integer scale is not rounded to a passing value."""
+        import score
+        reply = _anthropic_text('{"rationale": "r", "score": %s}' % score_json)
+        with patch("score._get_anthropic_client", return_value=_anthropic_client(reply)), \
+                pytest.raises(JudgeProviderError) as exc:
+            score._call_structured_judge("p", "claude-opus-5-5", "score", bounds=(0, 2, True))
+        assert exc.value.error_type == "bad_verdict"
+        assert exc.value.verdict_transport == "json_schema"
+
+    def test_a_whole_float_on_an_integer_scale_and_a_fraction_on_a_float_scale_are_accepted(self):
+        import score
+        for text, bounds, expected in (('{"rationale": "r", "score": 2.0}', (0, 2, True), 2),
+                                       ('{"rationale": "r", "score": 1.5}', (0, 2, False), 1.5)):
+            client = _anthropic_client(_anthropic_text(text))
+            with patch("score._get_anthropic_client", return_value=client):
+                assert score._call_structured_judge(
+                    "p", "claude-opus-5-5", "score", bounds=bounds) == (expected, "r")
+
+    def test_the_tool_path_keeps_its_tolerant_coercion(self):
+        import score
+        assert score._verdict_from_data({"rationale": "r", "score": "2"}, False, (0, 2, True)) == (2, "r")
+        assert score._verdict_from_data({"rationale": "r", "score": 1.6}, False, (0, 2, True)) == (2, "r")
+        assert score._verdict_from_data({"rationale": "r", "score": "2"}, False, (0, 2, True),
+                                        strict=True) is None
+
     def test_an_inline_fenced_fragment_in_the_rationale_does_not_displace_the_verdict(self):
         import score
         rationale = 'The output contained ```json\n{"passed": false}\n``` verbatim.'
@@ -2608,6 +2636,24 @@ class TestVerdictTransportOpenRouter:
             assert exc.value.error_type == error_type, error_type
             assert exc.value.verdict_transport == "json_schema"
             assert len(client.calls) == 1
+
+    @pytest.mark.parametrize("score_json", ['"2"', "1.5"])
+    def test_a_string_or_fractional_integer_score_is_a_bad_verdict(
+            self, score_json, or_env, monkeypatch):
+        judge = JudgeConfig(name="j", prompt="rate it", feedback_type="int", score_range=[0, 2])
+        client = _or_client(_or_response(
+            tool_name=None, content='{"rationale": "r", "score": %s}' % score_json))
+        with pytest.raises(JudgeProviderError) as exc:
+            self._score(_or_config(judge=judge, verdict="auto"), client, monkeypatch)
+        assert exc.value.error_type == "bad_verdict"
+        assert exc.value.verdict_transport == "json_schema"
+        assert len(client.calls) == 1
+
+    def test_a_whole_float_on_an_integer_scale_is_accepted(self, or_env, monkeypatch):
+        judge = JudgeConfig(name="j", prompt="rate it", feedback_type="int", score_range=[0, 2])
+        client = _or_client(_or_response(
+            tool_name=None, content='{"rationale": "r", "score": 2.0}'))
+        assert self._score(_or_config(judge=judge, verdict="auto"), client, monkeypatch) == (2, "r")
 
     def test_an_inline_fenced_fragment_in_the_rationale_does_not_displace_the_verdict(
             self, or_env, monkeypatch):
