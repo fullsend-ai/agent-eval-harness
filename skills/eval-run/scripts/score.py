@@ -3311,6 +3311,7 @@ _STAGING_SKIP_REASONS = (
     "symlink loop",
     "resolves outside",
     "name already staged",
+    "already staged via another path",
 )
 
 # `_copy_tree_dereferenced` recurses once per directory level. Real context
@@ -3321,10 +3322,18 @@ _MAX_CONTEXT_DEPTH = 64
 # Cumulative bounds on one staging operation. Depth and ancestor-loop checks do
 # not stop an acyclic fan-out (two links per level to an already-visited
 # directory expands exponentially) and staging runs before the judge timeout
-# starts, so the copy itself carries limits. Exceeding one fails the judge.
+# starts, so the copy itself carries limits. Exceeding one fails the judge for
+# `agent.context`; for case outputs (untrusted, skill-produced) it only skips
+# what is over the limit — see `_stage_agent_workspace`.
 _MAX_STAGE_ENTRIES = 1_000_000
 _MAX_STAGE_BYTES = 20 * 1024 ** 3
 _MAX_STAGE_SECONDS = 600
+
+# Untrusted-output copies refuse a sparse file that claims this much more
+# apparent size than it has allocated, and a copy that would leave less than
+# this much free disk beyond the file itself.
+_SPARSE_SLACK_BYTES = 1024 ** 2
+_MIN_FREE_DISK_BYTES = 100 * 1024 ** 2
 
 
 class _StagingBudget:
@@ -3338,6 +3347,9 @@ class _StagingBudget:
         self.entries = 0
         self.bytes = 0
         self.exceeded = None
+        # Real paths of the directories already staged by this walk, so one
+        # reached again through another link is not copied twice.
+        self.staged_dirs = set()
         self._deadline = time.monotonic() + max_seconds
 
     def charge(self, nbytes=0, entries=1):
@@ -3382,7 +3394,7 @@ def _copy_path(src, dest):
 
 
 def _copy_tree_dereferenced(src, dest, confine_root, ancestors, skip=None,
-                            budget=None):
+                            budget=None, *, untrusted=False):
     """Recursive worker for :func:`_copy_path`.
 
     ``confine_root`` is the real path of the declared entry being staged (an
@@ -3403,6 +3415,11 @@ def _copy_tree_dereferenced(src, dest, confine_root, ancestors, skip=None,
     ``budget`` (a :class:`_StagingBudget`, shared by the whole walk) bounds the
     entries, bytes and time one staging operation may spend; a fresh one is
     made when omitted.
+
+    ``untrusted`` marks a tree written by the skill under test (case outputs),
+    as opposed to one the eval author declared (``agent.context``). Such a tree
+    may hold a hardlink to a file elsewhere on the host and a sparse file
+    sized to fill the disk; both are skipped rather than copied.
     """
     if budget is None:
         budget = _StagingBudget()
@@ -3438,13 +3455,35 @@ def _copy_tree_dereferenced(src, dest, confine_root, ancestors, skip=None,
                 if real in ancestors:
                     errors.append((str(child), "symlink loop; not copied"))
                     continue
+                if real in budget.staged_dirs:
+                    errors.append((str(child),
+                                   "already staged via another path; not copied"))
+                    continue
+                budget.staged_dirs.add(real)
                 errors.extend(_copy_tree_dereferenced(
-                    child, target, confine_root, ancestors, budget=budget))
+                    child, target, confine_root, ancestors, budget=budget,
+                    untrusted=untrusted))
             elif entry.is_file(follow_symlinks=True):
-                over = budget.charge(entry.stat(follow_symlinks=True).st_size,
-                                     entries=0)
+                st = entry.stat(follow_symlinks=True)
+                if untrusted:
+                    if st.st_nlink > 1:
+                        errors.append((str(child),
+                                       "hardlinked file; not copied"))
+                        continue
+                    blocks = getattr(st, "st_blocks", None)
+                    if (blocks is not None
+                            and st.st_size - blocks * 512 > _SPARSE_SLACK_BYTES):
+                        errors.append((str(child), "sparse file; not copied"))
+                        continue
+                over = budget.charge(st.st_size, entries=0)
                 if over:
                     errors.append((str(child), over))
+                    break
+                if (shutil.disk_usage(target.parent).free
+                        < st.st_size + _MIN_FREE_DISK_BYTES):
+                    errors.append((str(child),
+                                   "staging limit exceeded (not enough free "
+                                   "disk space); not copied"))
                     break
                 shutil.copy2(child, target)
             else:
@@ -3477,11 +3516,12 @@ def _format_staging_problems(problems, limit=10):
     return f"{len(problems)} {noun}: {detail}{more}"
 
 
-def _report_staging_problems(problems, label="agent.context"):
+def _report_staging_problems(problems, label="agent.context", extra_skip=()):
     """Split staging problems into "lost content" and "nothing to lose".
 
     ``label`` names what was being staged (``agent.context`` or the case
-    outputs) in the warning and the error.
+    outputs) in the warning and the error. ``extra_skip`` lists reason
+    prefixes that count as skip reasons alongside `_STAGING_SKIP_REASONS`.
 
     Raises for the first — an unreadable file or an unlistable directory means
     the judge would grade a tree with holes in it and say nothing, which is
@@ -3493,8 +3533,8 @@ def _report_staging_problems(problems, label="agent.context"):
     """
     if not problems:
         return
-    skipped = [p for p in problems
-               if any(p[1].startswith(r) for r in _STAGING_SKIP_REASONS)]
+    skip_reasons = tuple(_STAGING_SKIP_REASONS) + tuple(extra_skip)
+    skipped = [p for p in problems if p[1].startswith(skip_reasons)]
     lost = [p for p in problems if p not in skipped]
     if skipped:
         print(f"  WARNING: {label} skipped "
@@ -3521,10 +3561,15 @@ def _stage_case_outputs(workspace, case_dir, output_dirs, selected):
         # Reserved namespaces: the verdict dir (./output/) and staged context
         # (./.context/). Case artifacts are skill-produced (untrusted); never let
         # one pre-seed ./output/score.json and forge a passing verdict (CWE-345/20).
-        return (name in ("output", ".context")
+        # Compared case-insensitively: on a case-insensitive filesystem
+        # `Output/` or `.Context/` is the same directory.
+        return (name.casefold() in ("output", ".context")
                 or (selected is not None and name not in selected))
 
-    sources = [(str(p), ()) for p in output_dirs or ()]
+    # `_modified` is always staged below, with its harness dirs excluded. A
+    # plain declaration of it must not win the dedupe and drop that exclusion.
+    sources = [(str(p), ()) for p in output_dirs or ()
+               if os.path.normpath(str(p)) != "_modified"]
     sources.append(("_modified", _SKIP_MODIFIED_PREFIXES))
     normalized = [(os.path.normpath(raw), exclude) for raw, exclude in sources]
     # Overlapping declarations ("." and "a", or "a" and "a/b") copy once. Drop a
@@ -3555,7 +3600,8 @@ def _stage_case_outputs(workspace, case_dir, output_dirs, selected):
             dest = workspace / rel
             skip = (lambda name, ex=exclude: name.startswith(ex)) if exclude else None
         problems.extend(_copy_tree_dereferenced(src, dest, str(src), (),
-                                                skip=skip, budget=budget))
+                                                skip=skip, budget=budget,
+                                                untrusted=True))
     return problems
 
 
@@ -3578,7 +3624,10 @@ def _stage_agent_workspace(workspace, record, stage_inputs, context_dirs, root,
     an ``agent.context`` entry could not be copied: the judge is told to ground
     its verdict in that material, so a silent hole in it is the #239 defect
     arriving by another route. Entries with no content to copy by nature are
-    reported on stderr instead — see :func:`_report_staging_problems`.
+    reported on stderr instead — see :func:`_report_staging_problems`. So are
+    case-output trees that hit a staging limit, a hardlinked or sparse file:
+    they are skill-produced, and staging stops at the limit. An
+    ``agent.context`` tree over a limit still raises.
     """
     # 1. Output dirs copied from the case directory.
     selected = None
@@ -3591,7 +3640,11 @@ def _stage_agent_workspace(workspace, record, stage_inputs, context_dirs, root,
         _report_staging_problems(
             _stage_case_outputs(workspace, Path(case_dir).resolve(),
                                 output_dirs, selected),
-            "case outputs")
+            "case outputs",
+            # Case outputs are skill-produced: a tree over a staging limit is
+            # staged up to it, not a reason to fail the judge.
+            extra_skip=("deeper than", "staging limit exceeded",
+                        "hardlinked file", "sparse file"))
     # 2. Context dirs/files copied under ./.context/, so a judge write cannot
     #    escape through a link to real project files (CWE-59/829).
     if context_dirs:
@@ -3730,7 +3783,7 @@ def _load_agent_judge(jc, config, project_root=None):
             try:
                 _stage_agent_workspace(workspace, record, stage_inputs,
                                        context_dirs, root, output_dirs)
-            except RuntimeError as exc:
+            except (RuntimeError, ValueError) as exc:
                 raise RuntimeError(f"Agent judge '{jc.name}': {exc}") from exc
             rendered = _render_judge_prompt(prompt, jc, config, arguments,
                                             record)
