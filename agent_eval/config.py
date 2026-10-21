@@ -2704,8 +2704,12 @@ class EvalConfig:
                   "after_step", "before_scoring", "after_all", "before_report"]
         for phase in phases:
             entries = []
+            # after_each always ran with continue semantics; an explicit
+            # `on_failure: fail` now fails the case (not the run), so the
+            # default stays `continue` there to keep existing evals as-is.
+            default_on_failure = "continue" if phase == "after_each" else "fail"
             for h in (hooks_raw.get(phase) or []):
-                on_failure_val = h.get("on_failure", "fail")
+                on_failure_val = h.get("on_failure", default_on_failure)
                 if on_failure_val not in ("fail", "continue"):
                     raise ValueError(
                         f"hooks.{phase}: on_failure must be 'fail' or "
