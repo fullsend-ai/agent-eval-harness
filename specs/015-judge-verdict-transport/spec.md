@@ -181,7 +181,12 @@ system prompt gets the same two variants.
 under `auto`/`json_schema` every eligible pinned endpoint is checked for
 `structured_outputs` in `supported_parameters`; a pinned set with none is a WARN under
 `auto` (the run will take the `tool` rung) and a FAIL under `json_schema`; the existing
-`supports_tool_choice.function` check applies to the `tool` rung as before. Unpinned
+`supports_tool_choice.function` check applies to the `tool` rung, relaxed as follows.
+This amends spec 014 Decision 25 rule 2: the runtime walks `function` → `required` →
+`auto` and strict-parses the `auto` rung, so when no eligible pinned endpoint supports
+`function` but at least one supports `required` or `auto`, preflight emits a WARN naming
+the rung the judge will land on (under `tool` and `auto` alike) and fails only when no
+eligible endpoint supports any forcing rung. Unpinned
 judges are not preflighted today and stay that way: `require_parameters` does the routing.
 
 ### SDK floor

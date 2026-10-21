@@ -6,8 +6,9 @@ by an agent role (skill, subagent, hook, background model) or by an
 ``openrouter:/`` judge: the slug exists in the public catalog; each pinned
 provider serves it, at a declared quantization when ``quantizations`` is set,
 with tools/``tool_choice: auto`` for agents (Claude Code sends ``auto``) and
-``tool_choice: function`` for judges that carry pins (the forced tool call
-404s otherwise — probe #5, Decision 25); endpoints with ``status < 0`` are
+a ``tool_choice`` forcing rung (``function``, else ``required``, else ``auto``)
+for judges that carry pins (a warning when only a weaker rung than ``function``
+exists, a failure when none does — probe #5, Decision 25 as amended by spec 015); endpoints with ``status < 0`` are
 degraded and excluded; ``max_completion_tokens < 32000`` warns. The key is
 valid (``GET /key``) and the account can use the model (``GET /models/user``,
 the paid-training filter). A catalog *fetch* failure degrades the run to
@@ -136,6 +137,7 @@ def _check_key(key, roles, spec, judge_pinned, variant, known, catalog, snapshot
                             f"(served by: {', '.join(entry['catalog']['providers']) or 'nobody'})")
         return entry
     function_capable, function_reported = [], False
+    required_capable, auto_capable = [], []
     structured_capable, params_reported = [], False
     for slug in sorted(pins):
         for e in served.get(slug, []):
@@ -151,6 +153,13 @@ def _check_key(key, roles, spec, judge_pinned, variant, known, catalog, snapshot
                 function_reported = True
                 if stc.get("function"):
                     function_capable.append(tag)
+                # a pinned endpoint with no tools cannot serve any forcing rung
+                if not (isinstance(e.get("supported_parameters"), list)
+                        and "tools" not in e["supported_parameters"]):
+                    if stc.get("required"):
+                        required_capable.append(tag)
+                    if stc.get("auto"):
+                        auto_capable.append(tag)
             params = e.get("supported_parameters")
             if isinstance(params, list):
                 params_reported = True
@@ -166,7 +175,7 @@ def _check_key(key, roles, spec, judge_pinned, variant, known, catalog, snapshot
     if "judge" in roles and judge_pinned:
         # Spec 015: the `json_schema` transport needs `structured_outputs` on the
         # endpoint; the `tool` transport (the fallback under `auto`, the only
-        # rung under `tool`) needs `tool_choice: function` (Decision 25). One
+        # rung under `tool`) needs a forcing rung (Decision 25, amended). One
         # pass per policy the key's judges actually run under; a judge with
         # its own `verdict:` is not held to the run-level policy.
         policies = sorted(set(verdicts or ("auto",)))
@@ -188,16 +197,25 @@ def _check_key(key, roles, spec, judge_pinned, variant, known, catalog, snapshot
                                         "forced tool there (spec 015)")
             if verdict in ("auto", "tool") and function_reported:
                 lacking = [t for t in entry["eligible"] if t not in function_capable]
-                if not function_capable and verdict == "auto" and structured_capable:
-                    # `auto` sends json_schema first; an endpoint that serves it
-                    # keeps the run viable without forced-tool support.
+                if not function_capable and (required_capable or auto_capable):
+                    # the runtime walks function → required → auto and strict-parses
+                    # the `auto` rung, so a weaker rung still serves a judge
+                    # (amends spec 014 Decision 25 rule 2)
+                    rung = "required" if required_capable else "auto"
                     res.warnings.append(f"{label}{who}: no pinned endpoint supports "
-                                        "tool_choice: function; the judge runs on the "
-                                        "json_schema transport only (a forced-tool "
-                                        "fallback would answer 404, Decision 25)")
+                                        "tool_choice: function; the tool transport will land on "
+                                        f"tool_choice: {rung} (strict-parsed on a degraded rung, "
+                                        "spec 015)")
+                elif not function_capable and verdict == "auto" and structured_capable:
+                    # `auto` sends json_schema first; an endpoint that serves it
+                    # keeps the run viable without any forcing rung.
+                    res.warnings.append(f"{label}{who}: no pinned endpoint supports any "
+                                        "tool_choice forcing rung (function, required, auto); "
+                                        "the judge runs on the json_schema transport only")
                 elif not function_capable:
-                    res.failures.append(f"{label}{who}: no pinned endpoint supports tool_choice: "
-                                        "function — a pinned judge's forced tool call answers 404 "
+                    res.failures.append(f"{label}{who}: no pinned endpoint supports any "
+                                        "tool_choice forcing rung (function, required, auto) — "
+                                        "a pinned judge's forced tool call answers 404 "
                                         "(Decision 25)")
                 elif lacking:
                     res.warnings.append(f"{label}{who}: pinned endpoint(s) {', '.join(lacking)} lack "

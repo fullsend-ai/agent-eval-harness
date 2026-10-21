@@ -246,7 +246,10 @@ model for the rest of the run, so a fallback costs one extra request, not one pe
 verdict. Preflight checks `structured_outputs` in a pinned endpoint's
 `supported_parameters` once per policy the key's judges run under — a judge's own
 `verdict:` counts, not only `models.judge_verdict` (a WARN under `auto`, a FAIL
-under `json_schema`, skipped under `tool`).
+under `json_schema`, skipped under `tool`). Forcing support for the tool transport
+is warned about, not required: an endpoint that cannot force `function` but serves
+`required` or `auto` gets a WARN naming the rung the judge will land on; only a
+set with no forcing rung at all fails.
 
 On the forced-tool transport the judge asks for its verdict tool with
 `tool_choice: function` first and steps down a ladder — `required`, then `auto` —
