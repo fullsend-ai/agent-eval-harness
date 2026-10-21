@@ -34,8 +34,8 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from agent_eval.config import workspace_source_roots
-from .base import EvalRunner, RunResult, resolve_env_value, terminate_process_group
+from agent_eval.config import resolve_env_value, workspace_source_roots
+from .base import EvalRunner, RunResult, terminate_process_group
 from .stream_capture import (
     count_subagent_turns, extract_usage, message_ids_for_run,
     per_model_turns as combine_per_model_turns,
@@ -162,12 +162,24 @@ class FullsendRunner(EvalRunner):
                         "run and no artifacts could be collected; remove it"))
 
         workspace = workspace.resolve()
+        original_settings = None
         try:
-            materialize_symlinks(workspace, self._allowed_roots)
-            _sanitize_settings(workspace)
-            output_dir = _run_base(workspace)
-        except (OSError, ValueError, shutil.Error) as e:
-            return RunResult(exit_code=-1, stdout="", stderr=str(e), duration_s=0.0)
+            try:
+                materialize_symlinks(workspace, self._allowed_roots)
+                original_settings = _sanitize_settings(workspace)
+                output_dir = _run_base(workspace)
+            except (OSError, ValueError, shutil.Error) as e:
+                return RunResult(
+                    exit_code=-1, stdout="", stderr=str(e), duration_s=0.0)
+            return self._launch(
+                target, args, workspace, output_dir, model, timeout_s, extra_env)
+        finally:
+            # The workspace is shared with later (non-fullsend) pipeline
+            # steps, which still need the hooks, env and directory grants.
+            _restore_settings(workspace, original_settings)
+
+    def _launch(self, target, args, workspace, output_dir, model, timeout_s,
+                extra_env) -> RunResult:
         # fullsend names each run directory itself; remember what is already
         # there so a run that fails before creating one maps nothing.
         known = {d.name for d in output_dir.iterdir()}
@@ -437,7 +449,21 @@ def _sum_iteration_usage(streams: list) -> tuple:
             models_seen, per_model_usage, ids_by_model or None)
 
 
-def _sanitize_settings(workspace: Path) -> None:
+def _restore_settings(workspace: Path, original: Optional[bytes]) -> None:
+    """Put back the ``.claude/settings.json`` bytes saved by
+    ``_sanitize_settings`` (no-op when nothing was changed)."""
+    if original is None:
+        return
+    try:
+        (workspace / ".claude" / "settings.json").write_bytes(original)
+    except OSError as exc:
+        with _print_lock:
+            print(f"  WARNING: could not restore {workspace}/.claude/settings.json "
+                  f"after the fullsend run ({exc}); later steps in this "
+                  f"workspace will run without its hooks and env", flush=True)
+
+
+def _sanitize_settings(workspace: Path) -> Optional[bytes]:
     """Drop the host-only parts of the workspace ``.claude/settings.json``.
 
     The harness writes ``env`` (execution.env, already passed to fullsend through
@@ -446,20 +472,24 @@ def _sanitize_settings(workspace: Path) -> None:
     the other runners. fullsend uploads the settings file with the repository,
     and the agent definition owns the sandbox's environment and hooks, so those
     keys are removed here. Raises ``ValueError`` when the file exists but cannot
-    be parsed, so the run is refused instead of uploading it unsanitised."""
+    be parsed, so the run is refused instead of uploading it unsanitised.
+
+    Returns the original file bytes when the file was rewritten (so the caller
+    can restore them for later pipeline steps), else ``None``."""
     path = workspace / ".claude" / "settings.json"
     if _has_symlink_component(workspace, path) or not path.is_file():
-        return
+        return None
     try:
-        settings = json.loads(path.read_text())
-    except (OSError, ValueError) as exc:
+        original = path.read_bytes()
+        settings = json.loads(original.decode("utf-8"))
+    except (OSError, ValueError) as exc:  # UnicodeDecodeError is a ValueError
         # Fail closed: an unreadable file may still carry literal env
         # credentials, and fullsend would upload it unchanged.
         raise ValueError(
             f"cannot sanitise {path} before upload to the fullsend sandbox "
             f"({exc}); fix or remove the file") from exc
     if not isinstance(settings, dict):
-        return
+        return None
     changed = False
     for key in ("env", "hooks"):
         if key in settings:
@@ -469,8 +499,14 @@ def _sanitize_settings(workspace: Path) -> None:
     if isinstance(perms, dict) and "additionalDirectories" in perms:
         del perms["additionalDirectories"]
         changed = True
-    if changed:
+    if not changed:
+        return None
+    try:
         path.write_text(json.dumps(settings, indent=2))
+    except OSError:
+        path.write_bytes(original)  # best effort: never leave a partial rewrite
+        raise
+    return original
 
 
 def materialize_symlinks(workspace: Path, allowed_roots: Optional[list] = None) -> None:

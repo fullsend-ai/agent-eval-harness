@@ -310,6 +310,10 @@ class AgentEvalAdapter(FrameworkAdapter):
             raise ValueError(
                 "EvalHub does not support runner.type: cursor; use "
                 "claude-code or codex")
+        if eval_config.runner.type == "fullsend":
+            raise ValueError(
+                "EvalHub does not support runner.type: fullsend (local "
+                "execution only); use claude-code or codex")
 
         # Mount project resources from ConfigMap if specified
         if params.get("project_configmap"):

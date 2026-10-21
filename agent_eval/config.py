@@ -17,6 +17,38 @@ import yaml
 from agent_eval.providers.openrouter.routing import RoutingSpec, RoutingTable
 
 
+# --- Env value references ($NAME / ${NAME}) -----------------------------------
+
+_ENV_REF_RE = re.compile(r"^\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))$")
+
+
+def env_ref_name(value) -> Optional[str]:
+    """Variable name a configured env value references (``$NAME`` or
+    ``${NAME}``), or ``None`` when ``value`` is not a whole-string reference.
+
+    The single parser behind both runtime resolution (:func:`resolve_env_value`)
+    and load-time secret-reference validation, so the two cannot disagree."""
+    if not isinstance(value, str):
+        return None
+    m = _ENV_REF_RE.match(value)
+    return (m.group(1) or m.group(2)) if m else None
+
+
+def resolve_env_value(value) -> Optional[str]:
+    """Resolve one configured env value against the caller's environment.
+
+    ``$VAR`` and ``${VAR}`` are looked up in ``os.environ`` and resolve to
+    ``None`` when unset (callers omit the variable); any other string passes
+    through; ``None`` stays ``None`` (a YAML null means "unset", never the
+    string ``"None"``); other scalars are stringified."""
+    if value is None:
+        return None
+    if isinstance(value, str) and value.startswith("$"):
+        name = env_ref_name(value) or value[1:]
+        return os.environ.get(name)
+    return str(value)
+
+
 # --- Config overlay: `extends:` and the single raw loader (spec 014 PR-3a) -----
 #
 # `extends: <path relative to the file>` layers an eval config (a *profile*)
@@ -1513,7 +1545,6 @@ def validate_openrouter_roles(config):
     secret_names = {effective.api_key_env, effective.management_key_env}
     # Recognise both $NAME and ${NAME} with the parser the runners resolve
     # values with, so a braced alias cannot forward a managed key unnoticed.
-    from agent_eval.agent.base import env_ref_name
     leaks = []
     for label, env in _env_surfaces(config, include_judges=True):
         for key, value in env.items():
@@ -2823,9 +2854,11 @@ class EvalConfig:
         runners.extend(
             step.runner for step in config.execution.steps if step.runner)
         for runner in runners:
-            # Neither codex nor cursor supports tool interception; reject at load
-            # (same altitude as codex) rather than only at runner construction.
-            if runner.type in ("codex", "cursor") and config.inputs.tools:
+            # codex, cursor and fullsend do not support tool interception
+            # (fullsend strips the workspace hooks); reject at load (same
+            # altitude as codex) rather than only at runner construction.
+            if (runner.type in ("codex", "cursor", "fullsend")
+                    and config.inputs.tools):
                 raise ValueError(
                     f"runner.type '{runner.type}' does not support "
                     "inputs.tools interception; use claude-code or remove "

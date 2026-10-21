@@ -11,9 +11,10 @@ import warnings
 from pathlib import Path
 from typing import Optional
 
-from agent_eval.config import resolve_plugin_dir, resolve_plugin_skill_roots
+from agent_eval.config import (
+    resolve_env_value, resolve_plugin_dir, resolve_plugin_skill_roots)
 
-from .base import EvalRunner, RunResult, resolve_env_value
+from .base import EvalRunner, RunResult
 
 _print_lock = threading.Lock()
 CODEX_EFFORTS = frozenset({"minimal", "low", "medium", "high", "xhigh"})

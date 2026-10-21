@@ -419,6 +419,36 @@ class TestFullsendExecute:
         assert uploaded["permissions"] == {"allow": ["Bash(ls)"]}
         assert uploaded["model"] == "opus"
 
+    def test_workspace_settings_restored_after_run(self, tmp_path, fake_fullsend):
+        """A later non-fullsend pipeline step shares the workspace and still
+        needs the hooks, env and directory grants the sanitiser strips."""
+        ws = _workspace(tmp_path)
+        (ws / ".claude").mkdir()
+        original = json.dumps({
+            "env": {"SECRET": "x"},
+            "hooks": {"PreToolUse": [{"hooks": [{"command": "/host/tools.py"}]}]},
+            "permissions": {"allow": ["Bash(ls)"],
+                            "additionalDirectories": ["/host/dir"]},
+        }, indent=4)
+        settings = ws / ".claude" / "settings.json"
+        settings.write_text(original)
+        _runner(tmp_path).execute(target="s", args="", workspace=ws, model="m",
+                                  timeout_s=60)
+        uploaded = json.loads(json.loads(fake_fullsend.read_text())["settings"])
+        assert "hooks" not in uploaded  # the run itself saw the sanitised file
+        assert settings.read_text() == original
+
+    def test_workspace_settings_restored_when_launch_fails(self, tmp_path):
+        ws = _workspace(tmp_path)
+        (ws / ".claude").mkdir()
+        original = json.dumps({"hooks": {"PreToolUse": []}, "model": "opus"})
+        settings = ws / ".claude" / "settings.json"
+        settings.write_text(original)
+        result = _runner(tmp_path, binary=str(tmp_path / "no-such-fullsend")).execute(
+            target="s", args="", workspace=ws, model="m", timeout_s=60)
+        assert result.exit_code == -1
+        assert settings.read_text() == original
+
     def test_second_run_does_not_upload_first_runs_files(self, tmp_path, fake_fullsend):
         ws = _workspace(tmp_path)
         runner = _runner(tmp_path)
@@ -853,7 +883,7 @@ def test_execute_py_batch_end_to_end(tmp_path, fake_bin):
 
 class TestSharedHelpers:
     def test_resolve_env_value_forms(self, monkeypatch):
-        from agent_eval.agent.base import resolve_env_value
+        from agent_eval.config import resolve_env_value
         monkeypatch.setenv("SHARED_VAR", "v")
         monkeypatch.delenv("UNSET_VAR_XYZ", raising=False)
         assert resolve_env_value("$SHARED_VAR") == "v"
@@ -865,7 +895,7 @@ class TestSharedHelpers:
         assert resolve_env_value(None) is None
 
     def test_env_ref_name_recognises_both_reference_forms(self):
-        from agent_eval.agent.base import env_ref_name
+        from agent_eval.config import env_ref_name
         assert env_ref_name("$NAME") == "NAME"
         assert env_ref_name("${NAME}") == "NAME"
         for not_a_ref in ("NAME", "$NAME suffix", "${NAME", "$", "${}", 3, None):

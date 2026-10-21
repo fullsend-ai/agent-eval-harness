@@ -733,6 +733,18 @@ runner: {type: codex, workspace_mode: repo}
 """))
 
 
+def test_fullsend_rejects_tool_interception(tmp_path):
+    with pytest.raises(ValueError, match=r"does not support inputs\.tools"):
+        EvalConfig.from_yaml(_write(tmp_path, """
+name: t
+execution: {skill: s}
+runner: {type: fullsend, agent: a}
+inputs:
+  tools:
+    - {match: Bash, prompt: mock it}
+"""))
+
+
 def test_discovery_skips_hidden_files_and_dirs(tmp_path):
     """Hidden entries under eval/ are working files, never configs — a
     git-ignored .entity-map.yaml surfacing as an eval config turns

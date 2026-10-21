@@ -6,7 +6,6 @@ The eval harness only interacts with runners through this interface.
 """
 
 import os
-import re
 import signal
 import subprocess
 import sys
@@ -16,36 +15,6 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
-
-_ENV_REF_RE = re.compile(r"^\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))$")
-
-
-def env_ref_name(value) -> Optional[str]:
-    """Variable name a configured env value references (``$NAME`` or
-    ``${NAME}``), or ``None`` when ``value`` is not a whole-string reference.
-
-    The single parser behind both runtime resolution (:func:`resolve_env_value`)
-    and load-time secret-reference validation, so the two cannot disagree."""
-    if not isinstance(value, str):
-        return None
-    m = _ENV_REF_RE.match(value)
-    return (m.group(1) or m.group(2)) if m else None
-
-
-def resolve_env_value(value) -> Optional[str]:
-    """Resolve one configured env value against the caller's environment.
-
-    ``$VAR`` and ``${VAR}`` are looked up in ``os.environ`` and resolve to
-    ``None`` when unset (callers omit the variable); any other string passes
-    through; ``None`` stays ``None`` (a YAML null means "unset", never the
-    string ``"None"``); other scalars are stringified."""
-    if value is None:
-        return None
-    if isinstance(value, str) and value.startswith("$"):
-        name = env_ref_name(value) or value[1:]
-        return os.environ.get(name)
-    return str(value)
-
 
 def terminate_process_group(proc: subprocess.Popen, grace_s: float = 0.0,
                             final_wait_s: float = 5.0):

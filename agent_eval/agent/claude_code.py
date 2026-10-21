@@ -13,7 +13,7 @@ import urllib.parse
 from pathlib import Path
 from typing import Optional
 
-from .base import EvalRunner, RunResult, resolve_env_value
+from .base import EvalRunner, RunResult
 from .stream_capture import (
     make_prompt_event, inject_timestamp, extract_usage,
     count_subagent_turns, per_model_turns as combine_per_model_turns,
@@ -23,7 +23,8 @@ from .stream_capture import (
     message_ids_for_run,
 )
 from agent_eval.tools.permissions import compile_permission_rules
-from agent_eval.config import resolve_plugin_dir, resolve_plugin_skill_roots
+from agent_eval.config import (
+    resolve_env_value, resolve_plugin_dir, resolve_plugin_skill_roots)
 from agent_eval.providers.base import parse_agent_model
 from agent_eval.providers.env import MANAGED_ENV_KEYS, settings_env_block
 

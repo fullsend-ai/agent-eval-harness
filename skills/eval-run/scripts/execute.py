@@ -466,7 +466,7 @@ def main():
         print(f"ERROR: unknown runner '{agent}'. Available: {list(RUNNERS.keys())}",
               file=sys.stderr)
         sys.exit(1)
-    if agent in {"codex", "cursor"}:
+    if agent in {"codex", "cursor", "fullsend"}:
         # The config loader/runner enforces these for a declared runner;
         # an --agent override must not slip past the same guarantees.
         if config.inputs.tools:
@@ -1550,7 +1550,7 @@ def _run_multi_step_case(runner, case_id, case_ws, output_dir, model,
                         f"Available: {list(RUNNERS)}")
                 step_cfg = copy.copy(config)
                 step_cfg.runner = step.runner
-                if rtype in {"codex", "cursor"}:
+                if rtype in {"codex", "cursor", "fullsend"}:
                     if config.inputs.tools:
                         raise ValueError(
                             f"runner '{rtype}' does not support inputs.tools "

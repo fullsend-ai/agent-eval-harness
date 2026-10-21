@@ -17,6 +17,7 @@ def _make_eval_yaml(
     skill: str = "test-skill",
     arguments: str = "--input {prompt}",
     runner_type: str = "claude-code",
+    runner_extra: dict = None,
 ) -> Path:
     config = {
         "name": "test-eval",
@@ -27,7 +28,7 @@ def _make_eval_yaml(
             "timeout": 300,
             "max_budget_usd": 2.0,
         },
-        "runner": {"type": runner_type},
+        "runner": {"type": runner_type, **(runner_extra or {})},
         "permissions": {"allow": ["Bash", "Read"]},
         "dataset": {"path": "cases"},
     }
@@ -170,6 +171,21 @@ def test_adapter_handles_runner_failure():
             (r for r in result.results if r.metric_name == "exit_code"), None)
         assert exit_metric is not None
         assert exit_metric.metric_value == 1
+
+
+def test_adapter_rejects_fullsend_runner():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmpdir = Path(tmpdir)
+        eval_yaml = _make_eval_yaml(
+            tmpdir, runner_type="fullsend", runner_extra={"agent": "a"})
+        config = _StubJobSpec()
+        callbacks = _StubJobCallbacks()
+
+        with patch("agent_eval.evalhub.adapter._framework_adapter_init"):
+            from agent_eval.evalhub.adapter import AgentEvalAdapter
+            adapter = AgentEvalAdapter(eval_config_path=str(eval_yaml))
+            with pytest.raises(ValueError, match=r"does not support runner\.type: fullsend"):
+                adapter.run_benchmark_job(config, callbacks)
 
 
 def test_adapter_rejects_cursor_runner():

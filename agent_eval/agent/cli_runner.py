@@ -13,7 +13,9 @@ from typing import Optional, Union
 
 import yaml
 
-from .base import EvalRunner, RunResult, resolve_env_value
+from agent_eval.config import resolve_env_value
+
+from .base import EvalRunner, RunResult
 
 _print_lock = threading.Lock()
 

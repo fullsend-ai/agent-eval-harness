@@ -416,7 +416,11 @@ Per case (or once per batch) the runner:
    writes `env`, its own hook commands and `permissions.additionalDirectories` for
    the other runners; they name host paths and values that mean nothing in the
    sandbox, and fullsend uploads the file with the repository, so the runner removes
-   all three before launching.
+   all three for the duration of the run and puts the original file back
+   afterwards, so a later non-fullsend step in the same workspace keeps its hooks,
+   env and directory grants. Because the hooks never reach the sandbox,
+   `inputs.tools` interception is not available with this runner and is rejected at
+   config load.
 3. **Sets the environment** of the fullsend process, on top of the caller's
    environment (no env file is written, so no dotenv quoting applies). It holds
    `FULLSEND_TASK="/<skill> <args>"`, `AGENT_EVAL_SUBAGENT_MODEL` (only when a

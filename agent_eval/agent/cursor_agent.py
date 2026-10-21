@@ -30,9 +30,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from agent_eval.config import resolve_plugin_dir, resolve_plugin_skill_roots
+from agent_eval.config import (
+    resolve_env_value, resolve_plugin_dir, resolve_plugin_skill_roots)
 
-from .base import EvalRunner, RunResult, resolve_env_value
+from .base import EvalRunner, RunResult
 from .claude_code import stage_plugin_dir
 
 
