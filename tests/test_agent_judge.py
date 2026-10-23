@@ -971,6 +971,44 @@ class TestOutputStagingByCopy:
             ("a", "already staged via another path")]
         assert "already staged via another path" in capsys.readouterr().err
 
+    def test_alias_in_an_earlier_branch_does_not_claim_the_real_dir(
+            self, tmp_path, capsys):
+        """`out/a/link -> ../z/src` is walked before `out/z/src`. The real
+        directory still wins; the link is the entry reported as already staged."""
+        from score import _stage_agent_workspace
+        record = _make_case(tmp_path / "case", {
+            "out/z/src/file.py": "CANONICAL",
+            "out/a/keep.txt": "keep"})
+        os.symlink("../z/src", tmp_path / "case" / "out" / "a" / "link")
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        skips = _stage_agent_workspace(ws, record, None, [], tmp_path, ["out"])
+        assert (ws / "out" / "z" / "src" / "file.py").read_text() == "CANONICAL"
+        assert not (ws / "out" / "a" / "link").exists()
+        assert (ws / "out" / "a" / "keep.txt").read_text() == "keep"
+        assert [(Path(p).relative_to(tmp_path / "case").as_posix(),
+                 why.split(";")[0]) for p, why in skips] == [
+            ("out/a/link", "already staged via another path")]
+        err = capsys.readouterr().err
+        assert "out/a/link" in err and "out/z/src" not in err
+
+    def test_alias_in_a_later_branch_does_not_claim_the_real_dir(
+            self, tmp_path):
+        """The backward ordering (`out/z/link -> ../a`) stays correct."""
+        from score import _stage_agent_workspace
+        record = _make_case(tmp_path / "case", {"out/a/file.py": "CANONICAL"})
+        os.symlink("../a", tmp_path / "case" / "out" / "z-link")
+        (tmp_path / "case" / "out" / "z").mkdir()
+        os.symlink("../a", tmp_path / "case" / "out" / "z" / "link")
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        skips = _stage_agent_workspace(ws, record, None, [], tmp_path, ["out"])
+        assert (ws / "out" / "a" / "file.py").read_text() == "CANONICAL"
+        assert not (ws / "out" / "z" / "link").exists()
+        assert not (ws / "out" / "z-link").exists()
+        assert sorted(Path(p).relative_to(tmp_path / "case").as_posix()
+                      for p, _why in skips) == ["out/z-link", "out/z/link"]
+
     def test_report_staging_problems_returns_the_skipped_entries(self):
         from score import _report_staging_problems
         assert _report_staging_problems([]) == []

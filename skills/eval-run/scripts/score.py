@@ -1943,9 +1943,10 @@ def _record_staging_skips(skips):
     """Thread-local copy of the case-output entries staging left out.
 
     A skipped hardlinked, sparse or over-limit file means the judge graded an
-    incomplete workspace. That is reported for the operator (and a threshold),
-    never to the judge: telling it content was omitted invites it to discount
-    the case for a reason unrelated to the agent under test.
+    incomplete workspace. That is kept in the per-case result for the operator
+    to read; nothing consumes it and no threshold currently gates on it. It is
+    never shown to the judge: telling it content was omitted invites it to
+    discount the case for a reason unrelated to the agent under test.
     """
     _JUDGE_CALL_META.staging_skips = skips or None
 
@@ -3442,8 +3443,8 @@ def score_cases(judges, case_dirs, config, run_id=None, samples_override=None):
                                                else _sum_usage(usages))
             if staging_skips and isinstance(case_results.get(name), dict):
                 # The judge graded a workspace missing these entries. Kept in
-                # the result for the operator and `thresholds`; deliberately
-                # not in the judge's prompt (see `_record_staging_skips`).
+                # the result for the operator (no threshold reads it);
+                # deliberately not in the judge's prompt (see `_record_staging_skips`).
                 case_results[name]["staging_skips"] = _summarize_staging_skips(
                     staging_skips)
             if denials and isinstance(case_results.get(name), dict):
@@ -3920,7 +3921,7 @@ def _copy_path(src, dest):
 
 
 def _copy_tree_dereferenced(src, dest, confine_root, ancestors, skip=None,
-                            budget=None, *, untrusted=False):
+                            budget=None, *, untrusted=False, _deferred=None):
     """Recursive worker for :func:`_copy_path`.
 
     ``confine_root`` is the real path of the declared entry being staged (an
@@ -3946,32 +3947,80 @@ def _copy_tree_dereferenced(src, dest, confine_root, ancestors, skip=None,
     as opposed to one the eval author declared (``agent.context``). Such a tree
     may hold a hardlink to a file elsewhere on the host and a sparse file
     sized to fill the disk; both are skipped rather than copied.
+
+    The walk makes two passes over the whole tree. Pass 1 descends only real
+    (non-symlink) directories and registers each real path in
+    ``budget.staged_dirs``; every directory symlink met on the way is set
+    aside. Pass 2 then handles those links, so one whose target is already
+    registered is the entry reported as "already staged" — never the real
+    directory, however the two are ordered in the tree (``a/link -> ../z/src``
+    visited before ``z/src``). ``_deferred`` is the internal list of set-aside
+    links, shared by the recursion of one pass 1; only the call that creates it
+    runs pass 2.
     """
     if budget is None:
         budget = _StagingBudget()
+    run_links = _deferred is None
+    if run_links:
+        _deferred = []
     if len(ancestors) >= _MAX_CONTEXT_DEPTH:
         return [(str(src), f"deeper than {_MAX_CONTEXT_DEPTH} levels; not copied")]
     try:
         dest.mkdir(parents=True, exist_ok=True)
         with os.scandir(src) as it:
-            # Real entries before symlinks: a link and its target are the
-            # same directory, and whichever is visited first claims it. An
-            # alias must not claim `src/` ahead of `src` itself, or the real
-            # path is the one reported as "already staged".
-            entries = sorted(it, key=lambda e: (e.is_symlink(), e.name))
+            entries = sorted(it, key=lambda e: e.name)
     except OSError as exc:
         return [(str(src), str(exc))]
     ancestors = ancestors + (os.path.realpath(src),)
     errors = []
+
+    def stage_dir(child, target, ancestors):
+        """Stage the directory `child` (real, or a link to one); charges the
+        budget and applies the confinement, loop and alias checks."""
+        over = budget.charge()
+        if over:
+            errors.append((str(child), over))
+            return False
+        real = os.path.realpath(child)
+        if real != confine_root and not real.startswith(
+                confine_root.rstrip(os.sep) + os.sep):
+            errors.append(
+                (str(child), "resolves outside the staged entry; not copied"))
+            return True
+        if real in ancestors:
+            errors.append((str(child), "symlink loop; not copied"))
+            return True
+        if real in budget.staged_dirs:
+            errors.append((str(child),
+                           "already staged via another path; not copied"))
+            return True
+        budget.staged_dirs.add(real)
+        # Recurse through the resolved path: walking via `child` would stack
+        # one more symlink per level, and the OS refuses to resolve more than
+        # a fixed number (ELOOP).
+        errors.extend(_copy_tree_dereferenced(
+            Path(real), target, confine_root, ancestors, budget=budget,
+            untrusted=untrusted, _deferred=_deferred))
+        return True
+
     for entry in entries:
         if skip is not None and skip(entry.name):
             continue
         child, target = Path(entry.path), dest / entry.name
-        over = budget.charge()
-        if over:
-            errors.append((str(child), over))
-            break
         try:
+            if entry.is_symlink() and entry.is_dir(follow_symlinks=True):
+                # Pass 2: a real directory anywhere in the tree claims its
+                # path first.
+                _deferred.append((child, target, ancestors))
+                continue
+            if entry.is_dir(follow_symlinks=False):
+                if not stage_dir(child, target, ancestors):
+                    break
+                continue
+            over = budget.charge()
+            if over:
+                errors.append((str(child), over))
+                break
             real = os.path.realpath(child)
             if real != confine_root and not real.startswith(
                     confine_root.rstrip(os.sep) + os.sep):
@@ -3981,22 +4030,7 @@ def _copy_tree_dereferenced(src, dest, confine_root, ancestors, skip=None,
             # follow_symlinks resolves a relative link against its OWN
             # directory — the part copytree gets wrong. A dangling link is
             # neither a dir nor a file here, and raises nothing.
-            if entry.is_dir(follow_symlinks=True):
-                if real in ancestors:
-                    errors.append((str(child), "symlink loop; not copied"))
-                    continue
-                if real in budget.staged_dirs:
-                    errors.append((str(child),
-                                   "already staged via another path; not copied"))
-                    continue
-                budget.staged_dirs.add(real)
-                # Recurse through the resolved path: walking via `child`
-                # would stack one more symlink per level, and the OS refuses
-                # to resolve more than a fixed number (ELOOP).
-                errors.extend(_copy_tree_dereferenced(
-                    Path(real), target, confine_root, ancestors, budget=budget,
-                    untrusted=untrusted))
-            elif entry.is_file(follow_symlinks=True):
+            if entry.is_file(follow_symlinks=True):
                 st = entry.stat(follow_symlinks=True)
                 if untrusted:
                     if st.st_nlink > 1:
@@ -4024,6 +4058,14 @@ def _copy_tree_dereferenced(src, dest, confine_root, ancestors, skip=None,
                     (str(child), "dangling symlink or special file; not copied"))
         except OSError as exc:
             errors.append((str(child), str(exc)))
+    if run_links:
+        # Pass 2: every real directory of the walk has claimed its path.
+        for child, target, link_ancestors in _deferred:
+            try:
+                if not stage_dir(child, target, link_ancestors):
+                    break
+            except OSError as exc:
+                errors.append((str(child), str(exc)))
     return errors
 
 
