@@ -2863,9 +2863,10 @@ class EvalConfig:
                     f"runner.type '{runner.type}' does not support "
                     "inputs.tools interception; use claude-code or remove "
                     "the tool interceptors")
-            # codex additionally cannot enforce repository answer-key
+            # codex and fullsend cannot enforce repository answer-key
             # protections in workspace_mode: repo (cursor can).
-            if runner.type == "codex" and runner.workspace_mode == "repo":
+            if (runner.type in ("codex", "fullsend")
+                    and runner.workspace_mode == "repo"):
                 raise ValueError(
                     f"runner.type '{runner.type}' does not support "
                     "workspace_mode: repo because repository answer-key "
@@ -2877,7 +2878,8 @@ class EvalConfig:
         # when the judge is built. Local import avoids an import cycle
         # (prompt_backends -> agent_eval.agent -> config).
         from agent_eval.prompt_backends import (
-            require_sdk_judge_for_runner, resolve_judge_backend)
+            require_sdk_judge_for_runner, resolve_judge_backend,
+            split_model_uri)
         # Agent judges route their model through the runner (any provider prefix
         # is stripped to the bare id), not an SDK, so an explicit non-SDK provider
         # is valid for them — validate only judges that resolve to an SDK backend.
@@ -2907,7 +2909,6 @@ class EvalConfig:
         # provider kind of the judge's statically-known model, and an `agent:`
         # judge cannot use an `openrouter:/` model — it runs through the
         # runner, which has no OpenRouter transport yet.
-        from agent_eval.prompt_backends import split_model_uri
         for jc in config.judges:
             static_model = jc.model or config.models.judge or ""
             provider, _bare = split_model_uri(static_model)

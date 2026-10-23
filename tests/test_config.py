@@ -2,7 +2,9 @@
 
 import copy
 import json
+import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -763,6 +765,15 @@ runner: {type: fullsend, agent: a}
 inputs:
   tools:
     - {match: Bash, prompt: mock it}
+"""))
+
+
+def test_fullsend_rejects_repo_workspace_mode(tmp_path):
+    with pytest.raises(ValueError, match="answer-key protections"):
+        EvalConfig.from_yaml(_write(tmp_path, """
+name: t
+execution: {skill: s}
+runner: {type: fullsend, agent: a, workspace_mode: repo}
 """))
 
 
@@ -1747,3 +1758,63 @@ judges:
     prompt: rate it
     verdict: structured
 """))
+
+
+class TestSharedHelpers:
+    def test_resolve_env_value_forms(self, monkeypatch):
+        from agent_eval.config import resolve_env_value
+        monkeypatch.setenv("SHARED_VAR", "v")
+        monkeypatch.delenv("UNSET_VAR_XYZ", raising=False)
+        assert resolve_env_value("$SHARED_VAR") == "v"
+        assert resolve_env_value("${SHARED_VAR}") == "v"
+        assert resolve_env_value("$UNSET_VAR_XYZ") is None
+        assert resolve_env_value("${UNSET_VAR_XYZ}") is None
+        assert resolve_env_value("literal") == "literal"
+        assert resolve_env_value(3) == "3"
+        assert resolve_env_value(None) is None
+
+    def test_env_ref_name_recognises_both_reference_forms(self):
+        from agent_eval.config import env_ref_name
+        assert env_ref_name("$NAME") == "NAME"
+        assert env_ref_name("${NAME}") == "NAME"
+        for not_a_ref in ("NAME", "$NAME suffix", "${NAME", "$", "${}", 3, None):
+            assert env_ref_name(not_a_ref) is None
+
+    def test_terminate_process_group_sigterm_then_reaps(self):
+        from agent_eval.agent.base import terminate_process_group
+        proc = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            start_new_session=True)
+        terminate_process_group(proc, grace_s=5)
+        assert proc.poll() is not None
+
+    def test_terminate_process_group_kills_sigterm_ignoring_descendant(self):
+        from agent_eval.agent.base import terminate_process_group
+        # The leader exits on SIGTERM; its child ignores it and holds the pipes.
+        code = ("import subprocess, sys, time\n"
+                "subprocess.Popen([sys.executable, '-c', "
+                "'import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                "time.sleep(60)'])\n"
+                "time.sleep(60)\n")
+        proc = subprocess.Popen(
+            [sys.executable, "-c", code], stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, start_new_session=True)
+        start = time.monotonic()
+        terminate_process_group(proc, grace_s=1)
+        assert time.monotonic() - start < 10
+
+    def test_failed_link_copy_leaves_the_link(self, tmp_path, monkeypatch):
+        from agent_eval.agent import fullsend as fullsend_mod
+        from agent_eval.agent.fullsend import materialize_symlinks
+        src = tmp_path / "src"
+        src.write_text("data")
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        (ws / "link").symlink_to(src)
+        monkeypatch.setattr(fullsend_mod.shutil, "copy2",
+                            lambda *a, **k: (_ for _ in ()).throw(OSError("boom")))
+        with pytest.raises(OSError):
+            materialize_symlinks(ws)
+        assert (ws / "link").is_symlink()
+        assert sorted(p.name for p in ws.iterdir()) == ["link"]

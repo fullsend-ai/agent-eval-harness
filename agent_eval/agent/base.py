@@ -16,62 +16,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-def terminate_process_group(proc: subprocess.Popen, grace_s: float = 0.0,
-                            final_wait_s: float = 5.0):
-    """Stop ``proc`` and its process group, then reap it; returns the captured
-    ``(stdout, stderr)``.
-
-    With ``grace_s`` > 0 the group first gets SIGTERM and that long to exit; the
-    SIGKILL that finishes the group (a descendant may ignore SIGTERM and keep
-    the pipes open) is sent while the leader is still unreaped, so the pgid
-    cannot have been recycled. ``grace_s`` 0 sends SIGKILL at once."""
-    def _signal(sig):
-        if sys.platform != "win32":
-            try:
-                os.killpg(proc.pid, sig)
-                return
-            except ProcessLookupError:
-                return
-            except OSError:
-                pass  # group signalling refused — signal the process itself
-        try:
-            if sig == signal.SIGTERM:
-                proc.terminate()
-            else:
-                proc.kill()
-        except OSError:
-            pass
-
-    kill = getattr(signal, "SIGKILL", signal.SIGTERM)
-    if grace_s > 0:
-        _signal(signal.SIGTERM)
-        _wait_unreaped(proc, grace_s)
-    # Still unreaped here (communicate/wait below does the reaping).
-    _signal(kill)
-    try:
-        return proc.communicate(timeout=final_wait_s)
-    except subprocess.TimeoutExpired:
-        return "", "Process group termination hung"
-
-
-def _wait_unreaped(proc: subprocess.Popen, timeout_s: float) -> None:
-    """Wait up to ``timeout_s`` for the leader to exit WITHOUT reaping it, so
-    its pid (the process-group id) stays reserved until the caller has
-    finished signalling the group."""
-    deadline = time.monotonic() + timeout_s
-    waitid = getattr(os, "waitid", None)
-    while time.monotonic() < deadline:
-        if waitid is not None:
-            try:
-                if waitid(os.P_PID, proc.pid,
-                          os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None:
-                    return
-            except ChildProcessError:
-                return
-        elif proc.poll() is not None:  # no WNOWAIT: reaped, best effort
-            return
-        time.sleep(0.05)
-
 
 @dataclass
 class RunResult:
@@ -198,3 +142,60 @@ class EvalRunner(ABC):
             timeout_s=timeout_s,
             extra_env=extra_env,
         )
+
+
+def terminate_process_group(proc: subprocess.Popen, grace_s: float = 0.0,
+                            final_wait_s: float = 5.0) -> tuple[str, str]:
+    """Stop ``proc`` and its process group, then reap it; returns the captured
+    ``(stdout, stderr)``.
+
+    With ``grace_s`` > 0 the group first gets SIGTERM and that long to exit; the
+    SIGKILL that finishes the group (a descendant may ignore SIGTERM and keep
+    the pipes open) is sent while the leader is still unreaped, so the pgid
+    cannot have been recycled. ``grace_s`` 0 sends SIGKILL at once."""
+    def _signal(sig):
+        if sys.platform != "win32":
+            try:
+                os.killpg(proc.pid, sig)
+                return
+            except ProcessLookupError:
+                return
+            except OSError:
+                pass  # group signalling refused — signal the process itself
+        try:
+            if sig == signal.SIGTERM:
+                proc.terminate()
+            else:
+                proc.kill()
+        except OSError:
+            pass
+
+    kill = getattr(signal, "SIGKILL", signal.SIGTERM)
+    if grace_s > 0:
+        _signal(signal.SIGTERM)
+        _wait_unreaped(proc, grace_s)
+    # Still unreaped here (communicate/wait below does the reaping).
+    _signal(kill)
+    try:
+        return proc.communicate(timeout=final_wait_s)
+    except subprocess.TimeoutExpired:
+        return "", "Process group termination hung"
+
+
+def _wait_unreaped(proc: subprocess.Popen, timeout_s: float) -> None:
+    """Wait up to ``timeout_s`` for the leader to exit WITHOUT reaping it, so
+    its pid (the process-group id) stays reserved until the caller has
+    finished signalling the group."""
+    deadline = time.monotonic() + timeout_s
+    waitid = getattr(os, "waitid", None)
+    while time.monotonic() < deadline:
+        if waitid is not None:
+            try:
+                if waitid(os.P_PID, proc.pid,
+                          os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None:
+                    return
+            except ChildProcessError:
+                return
+        elif proc.poll() is not None:  # no WNOWAIT: reaped, best effort
+            return
+        time.sleep(0.05)

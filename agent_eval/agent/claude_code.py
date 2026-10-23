@@ -16,7 +16,7 @@ from typing import Optional
 from .base import EvalRunner, RunResult
 from .stream_capture import (
     make_prompt_event, inject_timestamp, extract_usage,
-    count_subagent_turns, per_model_turns as combine_per_model_turns,
+    count_subagent_turns, combine_per_model_turns,
     setup_subagent_hook,
     assistant_message_id,
     classify_stream_errors,

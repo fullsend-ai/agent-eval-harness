@@ -38,7 +38,7 @@ from agent_eval.config import resolve_env_value, workspace_source_roots
 from .base import EvalRunner, RunResult, terminate_process_group
 from .stream_capture import (
     count_subagent_turns, extract_usage, message_ids_for_run,
-    per_model_turns as combine_per_model_turns,
+    combine_per_model_turns,
 )
 
 _print_lock = threading.Lock()
@@ -105,6 +105,7 @@ class FullsendRunner(EvalRunner):
         term_grace_s: Optional[float] = None,
         log_prefix: Optional[str] = None,
         allowed_roots: Optional[list] = None,
+        unrestricted_symlink_copy: bool = False,
         **_kwargs,
     ):
         if not agent or not isinstance(agent, str):
@@ -120,13 +121,16 @@ class FullsendRunner(EvalRunner):
         self._subagent_model = subagent_model or ""
         self._effort = effort or ""
         self._term_grace_s = (
-            float(term_grace_s) if term_grace_s else float(_DEFAULT_TERM_GRACE_S))
+            float(_DEFAULT_TERM_GRACE_S) if term_grace_s is None
+            else float(term_grace_s))
         self._log_prefix = log_prefix
         # Roots a workspace symlink may resolve into (project root + plugin
-        # dirs); None disables the containment check.
+        # dirs). No roots means an empty allowlist: only the invocation
+        # workspace itself is allowed. ``unrestricted_symlink_copy`` is the
+        # explicit opt-in that disables the containment check (None here).
         self._allowed_roots = (
-            None if allowed_roots is None
-            else [Path(r).resolve() for r in allowed_roots])
+            None if unrestricted_symlink_copy
+            else [Path(r).resolve() for r in (allowed_roots or [])])
 
     @property
     def name(self) -> str:
@@ -165,7 +169,11 @@ class FullsendRunner(EvalRunner):
         original_settings = None
         try:
             try:
-                materialize_symlinks(workspace, self._allowed_roots)
+                # Links resolving inside this invocation's own workspace (e.g.
+                # a relative link in an isolated workspace) are always allowed.
+                roots = (None if self._allowed_roots is None
+                         else [*self._allowed_roots, workspace])
+                materialize_symlinks(workspace, roots)
                 original_settings = _sanitize_settings(workspace)
                 output_dir = _run_base(workspace)
             except (OSError, ValueError, shutil.Error) as e:

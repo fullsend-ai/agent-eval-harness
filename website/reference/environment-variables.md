@@ -140,6 +140,7 @@ General harness knobs, read by the skills and runner directly.
 | `AGENT_EVAL_RUNS_DIR` | `eval/runs` | Base directory where each run's workspace, artifacts, scores, and `report.html` are written. See [the runs directory](runs-directory.md). |
 | `EVAL_JUDGE_MODEL` | *(none)* | Fallback model for LLM and pairwise judges. Resolution order: per-judge `model:` **>** `models.judge` **>** this variable. |
 | `CLAUDE_CODE_SUBAGENT_MODEL` | *(none)* | Model used for subagents spawned by the skill under test. Set automatically from `models.subagent` when configured. Under an OpenRouter plan it is one of the managed keys the plan sets (see [models → providers](config/models.md#providers-openrouter)). |
+| `AGENT_EVAL_SUBAGENT_MODEL` | *(none)* | The `fullsend` runner's counterpart of `CLAUDE_CODE_SUBAGENT_MODEL`: set from `models.subagent` in the environment of the `fullsend` process. It only takes effect if the project's `.fullsend/` agent definition references it (for example as `CLAUDE_CODE_SUBAGENT_MODEL`); the runner warns when nothing there does. |
 | `CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS` | `600000` | How long the Claude Code CLI waits for background tasks that outlive the final turn before terminating them (`0` = wait indefinitely). Tasks killed at this ceiling fail the case (exit 1) since their artifacts may be half-written — raise it for long-running pipeline skills, via export (on the env allowlist) or `runner.env:`. |
 | `CLAUDE_CODE_MAX_RETRIES` / `CLAUDE_CODE_AUTO_COMPACT_WINDOW` | *(none)* | Claude Code CLI tuning variables on the local runner's allowlist: forwarded verbatim to the agent subprocess when exported; the harness does not interpret them. |
 
@@ -153,7 +154,10 @@ General harness knobs, read by the skills and runner directly.
     dropped. To inject additional variables, use [`runner.env`](config/runner.md#env) or
     the [`execution.env`](config/execution.md) block in `eval.yaml`, both of which
     support `$VAR` passthrough from the caller's environment. The `cli` runner inherits
-    the full environment plus `execution.env` (it does not apply `runner.env`).
+    the full environment plus `execution.env` (it does not apply `runner.env`). The
+    `fullsend` runner starts the `fullsend` CLI with the full environment plus
+    `execution.env` and `runner.env`; what reaches the agent inside the sandbox is
+    decided by the agent definition's `env.sandbox`, not by an allowlist here.
 
 ## Harbor — Podman backend
 

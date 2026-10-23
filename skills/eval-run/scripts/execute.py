@@ -474,7 +474,7 @@ def main():
                   "interception; use claude-code or remove the tool "
                   "interceptors", file=sys.stderr)
             sys.exit(1)
-        if (agent == "codex"
+        if (agent in {"codex", "fullsend"}
                 and getattr(config.runner, "workspace_mode", None) == "repo"):
             print(f"ERROR: runner '{agent}' does not support workspace_mode: "
                   "repo because repository answer-key protections cannot "
@@ -1555,7 +1555,7 @@ def _run_multi_step_case(runner, case_id, case_ws, output_dir, model,
                         raise ValueError(
                             f"runner '{rtype}' does not support inputs.tools "
                             "interception")
-                    if (rtype == "codex"
+                    if (rtype in {"codex", "fullsend"}
                             and step.runner.workspace_mode == "repo"):
                         raise ValueError(
                             f"runner '{rtype}' does not support "

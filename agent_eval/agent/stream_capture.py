@@ -340,7 +340,7 @@ def count_subagent_turns_by_model(subagent_dir, already_seen_by_model=None):
             if len(s) - initial_counts.get(m, 0) > 0}
 
 
-def per_model_turns(subagent_dir, stream_ids_by_model):
+def combine_per_model_turns(subagent_dir, stream_ids_by_model):
     """Combine stream-level per-model turn IDs with subagent transcripts.
 
     Returns ``{model: turn_count}`` summing stream IDs and any new IDs found

@@ -326,6 +326,7 @@ class TestFullsendConfig:
                                    "  term_grace_s: 45\n")
         assert FullsendRunner.from_config(cfg)._term_grace_s == 45.0
         assert FullsendRunner(agent="a")._term_grace_s == fullsend_mod._DEFAULT_TERM_GRACE_S
+        assert FullsendRunner(agent="a", term_grace_s=0)._term_grace_s == 0.0
         with pytest.raises(ValueError, match="term_grace_s"):
             self._load(tmp_path, "runner:\n  type: fullsend\n  agent: a\n"
                                  "  term_grace_s: 0\n")
@@ -597,8 +598,8 @@ class TestFullsendExecute:
         (ws / ".claude" / "settings.json").write_text("{}")
         (ws / ".claude" / "skills").symlink_to(skills.resolve())
 
-        _runner(tmp_path).execute(target="s", args="", workspace=ws, model="m",
-                                  timeout_s=60)
+        _runner(tmp_path, allowed_roots=[tmp_path / "project"]).execute(
+            target="s", args="", workspace=ws, model="m", timeout_s=60)
         rec = json.loads(fake_fullsend.read_text())
         assert rec["symlinks"] == []
         assert rec["scripts_is_dir"] is True
@@ -612,6 +613,41 @@ class TestFullsendExecute:
         # The project root is untouched.
         assert (outside / ".git" / "HEAD").exists()
         assert sorted(p.name for p in outside.iterdir()) == [".git", "helper.sh"]
+
+    def test_relative_symlink_inside_isolated_workspace_survives(
+            self, tmp_path, fake_fullsend):
+        ws = _workspace(tmp_path)
+        (ws / "data").mkdir()
+        (ws / "data" / "note.txt").write_text("note")
+        (ws / "alias.txt").symlink_to("data/note.txt")
+
+        _runner(tmp_path, allowed_roots=[tmp_path / "project"]).execute(
+            target="s", args="", workspace=ws, model="m", timeout_s=60)
+        assert not (ws / "alias.txt").is_symlink()
+        assert (ws / "alias.txt").read_text() == "note"
+
+    def test_no_allowed_roots_is_an_empty_allowlist(self, tmp_path, fake_fullsend):
+        outside = tmp_path / "outside.txt"
+        outside.write_text("host file")
+        ws = _workspace(tmp_path)
+        (ws / "leak.txt").symlink_to(outside)
+
+        _runner(tmp_path).execute(
+            target="s", args="", workspace=ws, model="m", timeout_s=60)
+        assert not (ws / "leak.txt").exists()
+        assert not (ws / "leak.txt").is_symlink()
+
+    def test_unrestricted_symlink_copy_is_an_explicit_opt_in(
+            self, tmp_path, fake_fullsend):
+        outside = tmp_path / "outside.txt"
+        outside.write_text("host file")
+        ws = _workspace(tmp_path)
+        (ws / "leak.txt").symlink_to(outside)
+
+        _runner(tmp_path, unrestricted_symlink_copy=True).execute(
+            target="s", args="", workspace=ws, model="m", timeout_s=60)
+        assert (ws / "leak.txt").read_text() == "host file"
+        assert not (ws / "leak.txt").is_symlink()
 
     def test_run_result_mapping(self, tmp_path, fake_fullsend):
         ws = _workspace(tmp_path)
@@ -980,64 +1016,6 @@ def test_execute_py_batch_end_to_end(tmp_path, fake_bin):
     for n, case_id in enumerate(("case-001", "case-002"), start=1):
         report = output_dir / "cases" / case_id / "artifacts" / f"report-{n}.md"
         assert report.read_text() == f"report {n}"
-
-
-class TestSharedHelpers:
-    def test_resolve_env_value_forms(self, monkeypatch):
-        from agent_eval.config import resolve_env_value
-        monkeypatch.setenv("SHARED_VAR", "v")
-        monkeypatch.delenv("UNSET_VAR_XYZ", raising=False)
-        assert resolve_env_value("$SHARED_VAR") == "v"
-        assert resolve_env_value("${SHARED_VAR}") == "v"
-        assert resolve_env_value("$UNSET_VAR_XYZ") is None
-        assert resolve_env_value("${UNSET_VAR_XYZ}") is None
-        assert resolve_env_value("literal") == "literal"
-        assert resolve_env_value(3) == "3"
-        assert resolve_env_value(None) is None
-
-    def test_env_ref_name_recognises_both_reference_forms(self):
-        from agent_eval.config import env_ref_name
-        assert env_ref_name("$NAME") == "NAME"
-        assert env_ref_name("${NAME}") == "NAME"
-        for not_a_ref in ("NAME", "$NAME suffix", "${NAME", "$", "${}", 3, None):
-            assert env_ref_name(not_a_ref) is None
-
-    def test_terminate_process_group_sigterm_then_reaps(self):
-        from agent_eval.agent.base import terminate_process_group
-        proc = subprocess.Popen(
-            [sys.executable, "-c", "import time; time.sleep(60)"],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-            start_new_session=True)
-        terminate_process_group(proc, grace_s=5)
-        assert proc.poll() is not None
-
-    def test_terminate_process_group_kills_sigterm_ignoring_descendant(self):
-        from agent_eval.agent.base import terminate_process_group
-        # The leader exits on SIGTERM; its child ignores it and holds the pipes.
-        code = ("import subprocess, sys, time\n"
-                "subprocess.Popen([sys.executable, '-c', "
-                "'import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
-                "time.sleep(60)'])\n"
-                "time.sleep(60)\n")
-        proc = subprocess.Popen(
-            [sys.executable, "-c", code], stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, text=True, start_new_session=True)
-        start = __import__("time").monotonic()
-        terminate_process_group(proc, grace_s=1)
-        assert __import__("time").monotonic() - start < 10
-
-    def test_failed_link_copy_leaves_the_link(self, tmp_path, monkeypatch):
-        src = tmp_path / "src"
-        src.write_text("data")
-        ws = tmp_path / "ws"
-        ws.mkdir()
-        (ws / "link").symlink_to(src)
-        monkeypatch.setattr(fullsend_mod.shutil, "copy2",
-                            lambda *a, **k: (_ for _ in ()).throw(OSError("boom")))
-        with pytest.raises(OSError):
-            materialize_symlinks(ws)
-        assert (ws / "link").is_symlink()
-        assert sorted(p.name for p in ws.iterdir()) == ["link"]
 
 
 # ── Review hardening ─────────────────────────────────────────────────
