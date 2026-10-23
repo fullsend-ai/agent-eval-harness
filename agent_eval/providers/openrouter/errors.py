@@ -26,6 +26,8 @@ AGENT_TYPES = frozenset({
 })
 ROUTING_404_MARKER = "no endpoints found"
 TOOL_CHOICE_400_MARKERS = ("tool_choice", "tool choice")
+STRUCTURED_OUTPUT_400_MARKERS = ("response_format", "json_schema", "structured output",
+                                 "structured_output", "output_config", "output_format")
 
 
 def is_routing_404(status: Optional[int], message: Optional[str]) -> bool:
@@ -45,6 +47,16 @@ def is_tool_choice_400(status: Optional[int], message: Optional[str]) -> bool:
     "Provider returned error"."""
     text = (message or "").lower()
     return status == 400 and any(marker in text for marker in TOOL_CHOICE_400_MARKERS)
+
+
+def is_structured_output_400(status: Optional[int], message: Optional[str]) -> bool:
+    """A provider refusing the request's structured-output parameter itself
+    (spec 015): a 400 whose text names ``response_format`` / ``json_schema``
+    (OpenAI-shaped) or ``output_config`` (Anthropic), or an endpoint that
+    does not support structured outputs. The judge steps from the
+    ``json_schema`` transport to the forced tool call instead of failing."""
+    text = (message or "").lower()
+    return status == 400 and any(marker in text for marker in STRUCTURED_OUTPUT_400_MARKERS)
 
 
 def classify(error_type: Optional[str] = None, status: Optional[int] = None,

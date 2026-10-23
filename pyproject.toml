@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agent-eval-harness"
-version = "1.56.4"
+version = "1.57.1"
 description = "Agent and skill evaluation harness"
 readme = "README.md"
 license = {text = "Apache-2.0"}
@@ -20,7 +20,7 @@ dependencies = [
 
 [project.optional-dependencies]
 mlflow = ["mlflow[genai]>=3.5"]
-anthropic = ["anthropic[vertex]>=0.40"]
+anthropic = ["anthropic[vertex]>=0.77"]
 evalhub = [
     "eval-hub-sdk[adapter]>=0.1.7,<1.0",
     "boto3>=1.34,<2.0",
@@ -30,6 +30,9 @@ evalhub = [
 # Requires Python >=3.12 (harbor's minimum).
 harbor = [
     "harbor>=0.21.0; python_version >= '3.12'",
+    # harbor pulls litellm unbounded; 1.107.0 shipped a credential stealer
+    # (2026-10-21). Keep below it until a vetted clean release exists.
+    "litellm<1.107; python_version >= '3.12'",
     "kubernetes>=29.0,<37.0; python_version >= '3.12'",
 ]
 openai = ["openai>=1.70"]
@@ -41,10 +44,13 @@ anova = [
 ]
 all = [
     "mlflow[genai]>=3.5",
-    "anthropic[vertex]>=0.40",
+    "anthropic[vertex]>=0.77",
     "eval-hub-sdk[adapter]>=0.1.7,<1.0",
     "boto3>=1.34,<2.0",
     "harbor>=0.21.0; python_version >= '3.12'",
+    # harbor pulls litellm unbounded; 1.107.0 shipped a credential stealer
+    # (2026-10-21). Keep below it until a vetted clean release exists.
+    "litellm<1.107; python_version >= '3.12'",
     "kubernetes>=29.0,<37.0; python_version >= '3.12'",
     "openai>=1.70",
     "scipy>=1.17",

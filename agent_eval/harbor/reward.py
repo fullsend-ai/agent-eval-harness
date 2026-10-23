@@ -217,6 +217,13 @@ def score_case(config: EvalConfig, case_dir: Path,
     Returns the per-judge result dict: ``{judge_name: {value, rationale,
     judge_type}}`` for the single case.
     """
+    return _score_case_counted(config, case_dir, run_id=run_id)[0]
+
+
+def _score_case_counted(config: EvalConfig, case_dir: Path,
+                        run_id: Optional[str] = None) -> tuple:
+    """`score_case` plus the spec 015 verdict-transport counters of the
+    engine instance that ran it: ``(per_judge, transports, fallbacks)``."""
     score = _load_score_module()
     judges = score.load_judges(config, project_root=Path.cwd())
     # load_case_record only reads stdout/stderr/metrics when a run_id is set; in
@@ -224,7 +231,8 @@ def score_case(config: EvalConfig, case_dir: Path,
     # stdout-based judges (e.g. pipeline_flow) see case_dir/stdout.log.
     effective_run_id = run_id or case_dir.name
     result = score.score_cases(judges, [case_dir], config, run_id=effective_run_id)
-    return result.get("per_case", {}).get(case_dir.name, {})
+    transports, fallbacks = score._verdict_transport_counts()
+    return result.get("per_case", {}).get(case_dir.name, {}), transports, fallbacks
 
 
 def _extract_metrics(per_judge: dict) -> dict[str, float]:
@@ -431,13 +439,20 @@ def build_reward(config: EvalConfig, case_dir: Path,
     Returns a dict with ``reward`` (overall float), per-judge ``metrics``, and
     the full ``per_judge`` detail (value + rationale) for the sidecar.
     """
-    per_judge = score_case(config, case_dir, run_id=run_id)
+    per_judge, transports, fallbacks = _score_case_counted(config, case_dir, run_id=run_id)
 
     reward_cfg = getattr(config, "reward", None)
 
     reward, metrics = compose_reward(per_judge, reward_cfg=reward_cfg,
                                      judge_ranges=judge_ranges(config))
-    return {"reward": reward, "metrics": metrics, "per_judge": per_judge}
+    payload = {"reward": reward, "metrics": metrics, "per_judge": per_judge}
+    # Spec 015 judge-usage counters: the in-container engine's transport tally
+    # rides the sidecar so the host can aggregate it across trials.
+    if transports:
+        payload["verdict_transports"] = transports
+    if fallbacks:
+        payload["verdict_fallbacks"] = fallbacks
+    return payload
 
 
 def write_reward(payload: dict, out_dir: Path, case_dir: Optional[Path] = None) -> None:
@@ -456,8 +471,11 @@ def write_reward(payload: dict, out_dir: Path, case_dir: Optional[Path] = None) 
     (out_dir / "reward.json").write_text(json.dumps(reward_json, indent=2))
     (out_dir / "reward.txt").write_text(str(reward))
 
-    sidecar = json.dumps(
-        {"reward": reward, "per_judge": payload["per_judge"]}, indent=2, default=str)
+    sidecar_data = {"reward": reward, "per_judge": payload["per_judge"]}
+    for counter in ("verdict_transports", "verdict_fallbacks"):
+        if payload.get(counter):
+            sidecar_data[counter] = payload[counter]
+    sidecar = json.dumps(sidecar_data, indent=2, default=str)
     (out_dir / "judges.json").write_text(sidecar)
     if case_dir is not None:
         (case_dir / "judges.json").write_text(sidecar)

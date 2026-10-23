@@ -80,6 +80,32 @@ def test_multi_step_merges_every_steps_judges_sidecar(tmp_path):
     assert parsed["reward"] == 0.8
 
 
+def test_verdict_counters_ride_the_sidecar_single_and_multi_step(tmp_path):
+    # Spec 015: the in-container engine's transport tally is carried onto the
+    # trial record, summed across steps of a multi-step trial.
+    single = tmp_path / "single"
+    (single / "verifier").mkdir(parents=True)
+    (single / "verifier" / "reward.json").write_text(json.dumps({"reward": 1.0}))
+    (single / "verifier" / "judges.json").write_text(json.dumps({
+        "reward": 1.0, "per_judge": {},
+        "verdict_transports": {"json_schema": 2, "tool": 1}, "verdict_fallbacks": 1}))
+    parsed = R.parse_trial(single)
+    assert parsed["verdict_transports"] == {"json_schema": 2, "tool": 1}
+    assert parsed["verdict_fallbacks"] == 1
+
+    multi = tmp_path / "multi"
+    for step, n in (("s1", 1), ("s2", 2)):
+        v = multi / "steps" / step / "verifier"
+        v.mkdir(parents=True)
+        (v / "reward.json").write_text(json.dumps({"reward": 1.0}))
+        (v / "judges.json").write_text(json.dumps({
+            "reward": 1.0, "per_judge": {f"j_{step}": {"value": 1.0}},
+            "verdict_transports": {"json_schema": n}}))
+    parsed = R.parse_trial(multi)
+    assert parsed["verdict_transports"] == {"json_schema": 3}
+    assert "verdict_fallbacks" not in parsed
+
+
 def test_single_step_falls_back_to_result_json_for_version_and_duration(
         tmp_path):
     # Codex transcripts carry no result/system-init event, so version and

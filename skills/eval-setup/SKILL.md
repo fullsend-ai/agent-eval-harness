@@ -46,9 +46,9 @@ To install additional packages manually into the venv:
 VENV_DIR="${CLAUDE_SKILL_DIR}/../../.eval-venv"
 # Use uv if available, otherwise venv pip
 if command -v uv &>/dev/null; then
-  uv pip install --python "$VENV_DIR/bin/python3" 'mlflow[genai]>=3.5' 'anthropic[vertex]>=0.40'
+  uv pip install --python "$VENV_DIR/bin/python3" 'mlflow[genai]>=3.5' 'anthropic[vertex]>=0.77'
 else
-  "$VENV_DIR/bin/pip" install 'mlflow[genai]>=3.5' 'anthropic[vertex]>=0.40'
+  "$VENV_DIR/bin/pip" install 'mlflow[genai]>=3.5' 'anthropic[vertex]>=0.77'
 fi
 ```
 
@@ -59,9 +59,9 @@ for containerized execution (`/eval-run --runner harbor`,
 ```bash
 VENV_DIR="${CLAUDE_SKILL_DIR}/../../.eval-venv"
 if command -v uv &>/dev/null; then
-  uv pip install --python "$VENV_DIR/bin/python3" harbor 'kubernetes>=29.0,<37.0'
+  uv pip install --python "$VENV_DIR/bin/python3" harbor 'litellm<1.107' 'kubernetes>=29.0,<37.0'
 else
-  "$VENV_DIR/bin/pip" install harbor 'kubernetes>=29.0,<37.0'
+  "$VENV_DIR/bin/pip" install harbor 'litellm<1.107' 'kubernetes>=29.0,<37.0'
 fi
 ```
 

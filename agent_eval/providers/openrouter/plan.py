@@ -93,21 +93,20 @@ def guardrail_providers(orc, keys) -> tuple:
     return tuple(sorted(union))
 
 
-def judge_routing_keys(config, judge_model: Optional[str] = None) -> dict:
-    """``{routing key: effective RoutingSpec | None}`` for every ``openrouter:/``
-    judge of the run — ``models.judge`` (or a CLI override) and per-judge
-    ``model:`` values. The value is the declaration the judge actually sends
-    (Decision 25): the table's entry when ``judge.inherit_pins`` is set, merged
-    with the judge's own ``provider_options.routing`` when it carries one;
-    ``None`` for a judge that sends no pins. Two judges on one key keep the
-    more specific (overriding) declaration."""
+def _judge_declarations(config, judge_model: Optional[str] = None):
+    """``(judge, routing key, effective RoutingSpec | None, has own routing)``
+    for every ``openrouter:/`` judge of the run — ``models.judge`` (or a CLI
+    override) and per-judge ``model:`` values. The spec is the declaration the
+    judge actually sends (Decision 25): the table's entry when
+    ``judge.inherit_pins`` is set, merged with the judge's own
+    ``provider_options.routing`` when it carries one; ``None`` for a judge that
+    sends no pins."""
     from agent_eval.providers.openrouter.routing import RoutingSpec, RoutingTable
 
     orc = getattr(getattr(config.models, "providers", None), "openrouter", None)
     inherit = bool(getattr(getattr(orc, "judge", None), "inherit_pins", False)) if orc is not None else False
     table = getattr(orc, "routing", None) or RoutingTable()
     default = judge_model or getattr(config.models, "judge", None)
-    out: dict = {}
     for jc in getattr(config, "judges", None) or []:
         model = getattr(jc, "model", None) or default
         if not (isinstance(model, str) and model.startswith("openrouter:")):
@@ -124,8 +123,36 @@ def judge_routing_keys(config, judge_model: Optional[str] = None) -> dict:
             spec = table.for_model(key)
         else:
             spec = None
+        yield jc, key, spec, bool(override)
+
+
+def judge_routing_keys(config, judge_model: Optional[str] = None) -> dict:
+    """``{routing key: effective RoutingSpec | None}`` for every ``openrouter:/``
+    judge of the run (see :func:`_judge_declarations`). Two judges on one key
+    keep the more specific (overriding) declaration; the per-judge pairs the
+    preflight checks come from :func:`judge_verdict_policies`."""
+    out: dict = {}
+    for _jc, key, spec, override in _judge_declarations(config, judge_model):
         if key not in out or (spec is not None and override):
             out[key] = spec
+    return out
+
+
+def judge_verdict_policies(config, judge_model: Optional[str] = None) -> dict:
+    """``{routing key: [(effective RoutingSpec | None, verdict policy), ...]}``
+    for the same ``openrouter:/`` judges as :func:`judge_routing_keys` (spec
+    015): the distinct pairs of what a judge sends (its routing declaration,
+    resolved as there) and how it carries its verdict (its own ``verdict`` or
+    ``models.judge_verdict``). The preflight runs the judge capability checks
+    once per pair, each against its own declaration, so neither the run-level
+    policy nor another judge's pins are applied to a judge that differs."""
+    run_policy = getattr(config.models, "judge_verdict", "auto") or "auto"
+    out: dict = {}
+    for jc, key, spec, _override in _judge_declarations(config, judge_model):
+        pair = (spec, getattr(jc, "verdict", "") or run_policy)
+        pairs = out.setdefault(key, [])
+        if pair not in pairs:
+            pairs.append(pair)
     return out
 
 

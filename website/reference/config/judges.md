@@ -84,6 +84,7 @@ flowchart TD
 | `model` | string | LLM, agent | Per-judge model override (highest precedence). |
 | `samples` | int | LLM, agent | Run N times per case and reduce (median/majority). Default `1`. |
 | `examples` | mapping | LLM, agent | Few-shot exemplars harvested from prior runs' human review labels and injected into the prompt; see [Few-shot examples from human reviews](#few-shot-examples-from-human-reviews-examples). Rejected at load on `check`/`builtin`/`code` judges and on the reserved `pairwise` judge. |
+| `verdict` | string | LLM (SDK-backed) | Verdict transport for this judge — `auto`, `json_schema` or `tool` — overriding `models.judge_verdict`; see [Verdict transport](#verdict-transport). Rejected at load for any other value. |
 | `score_range` | `[min, max]` | all numeric judges | The judge's scale. **Declared:** stated in the LLM judge's system prompt and `submit_score` schema (and in the agent judge's `score.json` contract), colors per-case report cells, normalizes the judge in every [reward](reward.md#precedence) composition that normalizes it — a `reward.score_range` only covers judges that declare none, and a judge the reward clamps as-is (`reward.raw`, or a single `reward.judge` without `normalize`) consults no range — and is **enforced for every judge type** — including `check`, `module`/`function` and Python `builtin` judges: an off-scale (or non-finite) value becomes an error sample, not a clamped one (see [Validation](#validation-at-load-time)). **Omitted:** LLM/agent judges are told `[1, 5]` but nothing is checked, and the cell renders neutral (uncolored). Bounds may be negative (`[-1, 1]`) or fractional (`[0, 2.5]`); fractional bounds also select a non-rounded `number` verdict. |
 
 !!! note "Boolean vs numeric aggregation"
@@ -211,9 +212,9 @@ an OpenAI judge works with a claude-code runner. Write the model as a
 
 | Judge model | Backend | Notes |
 | --- | --- | --- |
-| `sonnet`, `claude-sonnet-4-5`, `anthropic:/…` | Anthropic SDK | Direct forced-tool structured output; image evidence and Vertex supported. |
-| `openai:/gpt-4o`, `gpt-4o`, or any other bare id | OpenAI SDK | Function-calling structured output. Point `OPENAI_BASE_URL` at an OpenAI-compatible gateway (LiteLLM proxy, Azure, local, …) to reach other providers or self-hosted models. Needs the `openai` package and either `OPENAI_API_KEY` or `OPENAI_BASE_URL` (a gateway without auth works — a placeholder key is supplied). |
-| `openrouter:/z-ai/glm-5.2`, `openrouter:/openai/gpt-5.2:exacto` | OpenAI SDK, dedicated OpenRouter client | Any model OpenRouter serves (`<author>/<slug>[:variant]`). Reads `OPENROUTER_API_KEY` (never `OPENAI_*`), sends the routing declared under `models.providers.openrouter`, and reports OpenRouter's own failures instead of parsing an empty reply. |
+| `sonnet`, `claude-sonnet-4-5`, `anthropic:/…` | Anthropic SDK | Verdict as a structured output (`output_config.format`) on Claude 4.5 and later, as a forced tool call on older Claude models — see [verdict transport](#verdict-transport); image evidence and Vertex supported. |
+| `openai:/gpt-4o`, `gpt-4o`, or any other bare id | OpenAI SDK | Verdict as a `response_format` JSON schema (strict), the function call as the fallback. Point `OPENAI_BASE_URL` at an OpenAI-compatible gateway (LiteLLM proxy, Azure, local, …) to reach other providers or self-hosted models. Needs the `openai` package and either `OPENAI_API_KEY` or `OPENAI_BASE_URL` (a gateway without auth works — a placeholder key is supplied). |
+| `openrouter:/z-ai/glm-5.2`, `openrouter:/openai/gpt-5.2:exacto` | OpenAI SDK, dedicated OpenRouter client | Any model OpenRouter serves (`<author>/<slug>[:variant]`). Reads `OPENROUTER_API_KEY` (never `OPENAI_*`), sends the routing declared under `models.providers.openrouter`, and reports OpenRouter's own failures instead of parsing an empty reply. Same two transports, decided per endpoint. |
 | `runner:/gpt-5.4-medium` | Configured runner | Explicit opt-in for a model only the runner CLI can serve (e.g. Cursor's internal models). |
 
 An explicit unsupported provider (e.g. `gemini:/…`) is rejected at config load
@@ -234,18 +235,34 @@ endpoint that cannot force a named function, so a judge sends the table's
 `order`/`only`/`quantizations` only when `judge.inherit_pins: true` or the
 judge declares its own routing.
 
-The judge asks for its verdict tool with `tool_choice: function` first and
-steps down a ladder — `required`, then `auto` — when the provider refuses the
-forcing mode rather than the request. Two answers count as a refusal: the
-routing 404 above, and a `400` whose message names `tool_choice` (Anthropic,
-reached through OpenRouter, rejects the forcing modes `tool` and `any` for
-Claude Opus 5.5, so such a judge lands on `auto` on its third request; a 400
-about anything else propagates from the first rung). Neither refusal is backed
-off or retried. On a degraded rung the harness strict-parses the first tool
-call (a non-verdict answer is an error, never a prose fallback), records the
-mode as `tool_choice_mode` on the per-case record and counts it in
-`summary.yaml` under `judge_usage.tool_choice_fallbacks`. A refusal that
-survives all three rungs is a config error (`no_endpoints` for the 404,
+Under the default [verdict policy](#verdict-transport) an OpenRouter judge first
+sends the verdict schema as `response_format` (strict JSON schema, no tools) together
+with `provider.require_parameters: true`, so OpenRouter routes the request only to
+endpoints that honour it — an unpinned judge still sends no pins. A `400` naming
+`response_format`/`json_schema`, or the routing 404, steps the call down to the
+forced-tool transport; any other failure (auth, 429, 5xx) follows the retry policy
+and never changes the transport. The transport that worked is remembered for the
+model for the rest of the run, so a fallback costs one extra request, not one per
+verdict. Preflight checks `structured_outputs` in a pinned endpoint's
+`supported_parameters` once per policy the key's judges run under — a judge's own
+`verdict:` counts, not only `models.judge_verdict` (a WARN under `auto`, a FAIL
+under `json_schema`, skipped under `tool`). Forcing support for the tool transport
+is warned about, not required: an endpoint that cannot force `function` but serves
+`required` or `auto` gets a WARN naming the rung the judge will land on; only a
+set with no forcing rung at all fails.
+
+On the forced-tool transport the judge asks for its verdict tool with
+`tool_choice: function` first and steps down a ladder — `required`, then `auto` —
+when the provider refuses the forcing mode rather than the request. Two answers
+count as a refusal: the routing 404 above, and a `400` whose message names
+`tool_choice` (Anthropic, reached through OpenRouter, rejects the forcing modes
+`tool` and `any` for Claude Opus 5.5 and Sonnet 5.5 — under the default policy
+those judges never reach this transport, since their endpoints serve structured
+outputs). Neither refusal is backed off or retried. On a degraded rung the harness
+strict-parses the first tool call (a non-verdict answer is an error, never a prose
+fallback), records the mode as `tool_choice_mode` on the per-case record and
+counts it in `summary.yaml` under `judge_usage.tool_choice_fallbacks`. A refusal
+that survives all three rungs is a config error (`no_endpoints` for the 404,
 `tool_choice_rejected` for the 400), not a judge failure.
 
 Every LLM judge call (Anthropic, OpenAI, OpenRouter, runner) also records what it
@@ -270,12 +287,47 @@ judges:
 
 ### Verdict output
 
-Anthropic and OpenAI judges grade with the same forced-tool contract: the
+Anthropic, OpenAI and OpenRouter judges grade with the same verdict contract: the
 rationale first, then the `score`/`passed` field on the declared scale
 (`submit_score` for numeric judges, `submit_evaluation` for `feedback_type: bool`).
 The field order is deliberate — the judge writes its assessment of the evidence
-before it commits to a verdict token — and the system prompt that forces the tool is
-also where the [untrusted-data guard](#fenced-vs-unfenced) lives.
+before it commits to a verdict token — and the system prompt that asks for the
+verdict is also where the [untrusted-data guard](#fenced-vs-unfenced) lives.
+
+#### Verdict transport
+
+The contract travels over one of two transports, chosen per call by
+`models.judge_verdict` (or a judge's own `verdict:`):
+
+| Transport | Request | Reply |
+| --- | --- | --- |
+| `json_schema` | The provider's structured output: Anthropic `output_config.format`, OpenAI-shaped `response_format` with a strict JSON schema. No tools, no `tool_choice`. The model may think before it writes the object. | The verdict object in the text, validated against the schema and the declared scale. A refusal, a `max_tokens` cut-off or a non-verdict reply is an error (`refusal`, `truncated`, `bad_verdict`), never a prose guess. |
+| `tool` | The forced tool call (`tool_choice` naming the verdict tool), with the `required`/`auto` ladder on OpenAI-shaped providers and an `auto` rung on Anthropic for models that reject forcing. | The tool call's input. Text instead of a forced call is still parsed; a degraded rung is strict. |
+
+`auto` (the default) sends `json_schema` first and falls back to `tool` when the
+provider refuses the structured-output parameter itself (a `400` naming it, or an
+Anthropic SDK older than 0.77); a Claude id older than the 4.5 generation starts on
+`tool`. The rung that worked is remembered per model and routing (a pinned and an
+unpinned judge on one slug learn separately) for the run. `json_schema` and
+`tool` pin one transport: no cross-transport fallback. A `json_schema` pin on a model
+that refuses structured outputs is a config error (`verdict_unsupported`); that error
+applies to the `json_schema` pin only. Claude Opus 5.5, Sonnet 5.5, Fable 5.1
+and Mythos 5.1 reject forced tool use, but the `tool` pin still reaches them through
+the strict `tool_choice: auto` rung.
+
+The schema the provider constrains on is the verdict tool's, made strict: every
+object closes `additionalProperties`, every field is required, and the numeric
+`minimum`/`maximum` of `submit_score` move into the field's description (Anthropic's
+grammar rejects numeric constraints) while the range stays enforced in-harness.
+Each judge call records `verdict_transport` on its per-case record; `summary.yaml`
+counts `judge_usage.verdict_transports` and `verdict_fallbacks`.
+
+!!! warning "Scores move across the transport boundary"
+    A judge that writes its verdict as a structured output can think first; under a
+    forced tool it could not. Re-judge a baseline before comparing it with a run judged
+    the other way, or pin `models.judge_verdict: tool` for continuity on a judge model
+    that still accepts forcing.
+
 Runner-backed (`runner:/…`) judges instead run the prompt through the configured
 runner against a read-only workspace and require stdout to contain exactly one
 JSON verdict object — no preamble, Markdown, or trailing text — in the same
@@ -601,9 +653,10 @@ scoring time.
 A judge named `pairwise` is not scored per case — it configures the A/B comparison
 used by `/eval-run --baseline <run-id>`. It takes `prompt`/`prompt_file` and an
 optional `model`; the harness swaps output positions to control for order bias.
-The comparison is graded through a forced `submit_comparison` tool — `reasoning`
-first, then `preferred` (`A` / `B` / `tie`) — with both outputs fenced as evaluated
-material. `examples:` is rejected on this judge, and no `score_range` applies to it.
+The comparison is graded through the `submit_comparison` verdict — `reasoning`
+first, then `preferred` (`A` / `B` / `tie`) — over the same
+[verdict transport](#verdict-transport) as every judge, with both outputs fenced
+as evaluated material. `examples:` is rejected on this judge, and no `score_range` applies to it.
 See [pairwise & sampling](../../concepts/pairwise-and-sampling.md).
 
 ```yaml

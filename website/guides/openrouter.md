@@ -113,8 +113,11 @@ there is nothing to audit and the key warns.
 
 1. **Preflight** (`preflight: strict | warn | off`): every routing key an agent role uses
    and every OpenRouter judge — slug exists; each pinned provider serves it, at a declared
-   quantization, with tools and `tool_choice: auto` for agents and `tool_choice: function`
-   for pinned judges (a forced tool call under pins answers 404 otherwise); degraded
+   quantization, with tools and `tool_choice: auto` for agents; for pinned judges
+   `structured_outputs` (the default verdict transport; a WARN when absent, the judge
+   then forces a tool) and tool-forcing support (`tool_choice: function`, else
+   `required`, else `auto` — warned about, not required: a WARN naming the rung the
+   judge lands on, a failure only when no eligible endpoint supports any of them); degraded
    endpoints (`status < 0`) excluded, and a pinned set with no eligible endpoint left
    fails; `max_completion_tokens < 32000` warns; key valid; account eligible. A catalog fetch failure degrades to `warn`; key, slug and eligibility
    stay strict. `python3 -m agent_eval.providers.openrouter.preflight --config eval.yaml`

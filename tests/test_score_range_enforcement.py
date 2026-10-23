@@ -117,8 +117,12 @@ def test_the_openai_backend_judge_is_told_its_scale(monkeypatch):
         call = SimpleNamespace(function=SimpleNamespace(
             name="submit_score",
             arguments=json.dumps({"rationale": "r", "score": 1})))
-        message = SimpleNamespace(tool_calls=[call], content=None)
-        return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+        # Serves both spec 015 transports: the tool call for `tool`, the
+        # content for `json_schema` (the default first rung).
+        message = SimpleNamespace(tool_calls=[call], refusal=None,
+                                  content=json.dumps({"rationale": "r", "score": 1}))
+        return SimpleNamespace(choices=[SimpleNamespace(message=message,
+                                                        finish_reason="stop")])
 
     fake_client = SimpleNamespace(chat=SimpleNamespace(
         completions=SimpleNamespace(create=fake_create)))

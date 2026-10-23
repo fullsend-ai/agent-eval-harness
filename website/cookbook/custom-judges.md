@@ -274,7 +274,8 @@ The prompt is rendered with these variables:
 
 !!! tip "Grading on a scale other than 1–5"
     Declare it: `score_range: [0, 2]`. The range is stated in the judge's system prompt,
-    set as `minimum`/`maximum` on the `submit_score` tool schema, and used to normalize the
+    written into the `submit_score` verdict schema (the field's description under a
+    structured output, advisory `minimum`/`maximum` on the tool schema), and used to normalize the
     judge in every reward composition that normalizes it (not `reward.raw`, nor a
     clamped single `reward.judge`). Because a tool schema is *advisory* — the model
     is not constrained by `minimum`/`maximum` — a returned value off the scale is recorded
@@ -387,12 +388,12 @@ the levels or decompose into tiered booleans); and `score_range` declared on the
 
 ### What NOT to put in the prompt
 
-- **JSON or response-format boilerplate.** The harness forces a tool call —
-  `submit_evaluation` for boolean judges, `submit_score` for numeric ones — so structured
-  output and a rationale are already enforced. "Respond with JSON {...}" fights the forced
-  schema and is ignored at best.
+- **JSON or response-format boilerplate.** The harness hands the provider the verdict
+  schema itself — `submit_evaluation` for boolean judges, `submit_score` for numeric
+  ones, as a structured output or a forced tool call — so the shape and a rationale are
+  already enforced. "Respond with JSON {...}" fights that schema and is ignored at best.
 - **The numeric bounds.** A declared `score_range` is stated in the system prompt and
-  tool schema automatically. The prompt defines what each level *means*.
+  verdict schema automatically. The prompt defines what each level *means*.
 - **Your own untrusted-data guard.** The harness fences the artifact variables and puts
   the guard in every LLM judge's system prompt — see
   [How the judge prompt is assembled](../concepts/judges.md#how-the-judge-prompt-is-assembled).

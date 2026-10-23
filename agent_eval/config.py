@@ -1630,6 +1630,23 @@ class ModelsConfig:
     # Provider registry for `<provider>:/<model>` URIs on the roles above
     # (spec 014). Readers address it as `config.models.providers`.
     providers: ProvidersConfig = field(default_factory=ProvidersConfig)
+    # How SDK-backed LLM judges carry their verdict (spec 015): `auto` tries the
+    # provider's structured output first and the forced tool call second,
+    # `json_schema` / `tool` pin one transport. A judge's own `verdict:` wins.
+    judge_verdict: str = "auto"
+
+
+# The verdict transport policies of spec 015 (`models.judge_verdict`, per-judge
+# `verdict`). `auto` = structured output first, forced tool second.
+VERDICT_POLICIES = ("auto", "json_schema", "tool")
+
+
+def _check_verdict_policy(value, label, default="auto"):
+    if value is None or value == "":
+        return default
+    if not isinstance(value, str) or value not in VERDICT_POLICIES:
+        raise ValueError(f"{label} must be one of {', '.join(VERDICT_POLICIES)}; got {value!r}")
+    return value
 
 
 @dataclass
@@ -1793,6 +1810,9 @@ class JudgeConfig:
     # `openrouter:/` judge: `routing` (per-judge RoutingSpec override — opts the
     # judge into pins), `fallbacks`, `max_tokens`.
     provider_options: dict = field(default_factory=dict)
+    # Verdict transport override for this judge (spec 015): "" inherits
+    # `models.judge_verdict`; `auto` | `json_schema` | `tool` otherwise.
+    verdict: str = ""
 
 
 @dataclass
@@ -2182,6 +2202,8 @@ class EvalConfig:
             subagent=models_raw.get("subagent"),
             judge=models_raw.get("judge"),
             hook=models_raw.get("hook"),
+            judge_verdict=_check_verdict_policy(models_raw.get("judge_verdict"),
+                                                "models.judge_verdict"),
             providers=_parse_providers(models_raw.get("providers")),
         )
 
@@ -2491,6 +2513,9 @@ class EvalConfig:
                     examples=examples_val,
                     agent=agent_val,
                     provider_options=j.get("provider_options") or {},
+                    verdict=_check_verdict_policy(
+                        j.get("verdict"), f"Judge '{j.get('name', '')}': 'verdict'",
+                        default=""),
                 )
             )
 

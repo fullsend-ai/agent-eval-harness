@@ -35,8 +35,8 @@ graph LR
     number for a scored one (declare its scale with `score_range`). A `.md` file is an **LLM** judge — a Jinja2 prompt
     rendered through the same renderer as a `prompt_file` judge (same
     [template variables](config/judges.md#template-variables), same fencing rules)
-    and graded **pass/fail** by `models.judge` through the same forced
-    `submit_evaluation` tool, rationale first — the prompt states the criterion, the
+    and graded **pass/fail** by `models.judge` through the same
+    `submit_evaluation` verdict schema, rationale first — the prompt states the criterion, the
     harness owns the verdict shape. That shape is fixed, so declaring a `score_range`
     or a non-`bool` `feedback_type` on one is rejected at config load. Python
     builtins are unaffected: they may be numeric and take a `score_range`. See
@@ -183,7 +183,7 @@ LLM judge that scores whether the output fully addresses the task.
 | --- | --- |
 | **Required fields** | `conversation`, `files` |
 | **Kind** | LLM prompt (scored by `models.judge`) |
-| **Returns** | pass/fail — `passed` + `rationale` via the forced `submit_evaluation` tool |
+| **Returns** | pass/fail — `passed` + `rationale` via the `submit_evaluation` verdict schema |
 
 | Argument | Type | Default | Effect |
 | --- | --- | --- | --- |
@@ -211,7 +211,7 @@ as legitimate.
 | --- | --- |
 | **Required fields** | `conversation`, `files` |
 | **Kind** | LLM prompt (scored by `models.judge`) |
-| **Returns** | pass/fail — `passed` + `rationale` via the forced `submit_evaluation` tool |
+| **Returns** | pass/fail — `passed` + `rationale` via the `submit_evaluation` verdict schema |
 
 | Argument | Type | Default | Effect |
 | --- | --- | --- | --- |
@@ -247,8 +247,8 @@ Adding one is a file drop — no registration:
 
     Drop a `.md` Jinja2 prompt into a category dir. It renders with the usual
     [template variables](config/judges.md#template-variables) (`outputs`,
-    `arguments`, `conversation`, …) and is graded pass/fail through the forced
-    `submit_evaluation` tool — state the criterion only; the verdict shape is the
+    `arguments`, `conversation`, …) and is graded pass/fail through the
+    `submit_evaluation` verdict schema — state the criterion only; the verdict shape is the
     harness's, not the prompt's.
 
 </div>

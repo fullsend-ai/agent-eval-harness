@@ -294,13 +294,15 @@ def _start_harbor_session(plan, config: EvalConfig, output_dir: Path, n_concurre
     nothing), then the run-scoped session. Harbor exposes no live stream, so
     the backfill polls immediately once the job dir is parsed."""
     from agent_eval.config import OpenRouterConfig
-    from agent_eval.providers.openrouter.plan import judge_routing_keys
+    from agent_eval.providers.openrouter.plan import judge_routing_keys, judge_verdict_policies
     from agent_eval.providers.openrouter.preflight import run_preflight
     from agent_eval.providers.openrouter.session import ProviderSession
 
     orc = getattr(getattr(config.models, "providers", None), "openrouter", None) or OpenRouterConfig()
     pre = run_preflight(plan, level=orc.preflight, run_dir=output_dir,
-                        judges=judge_routing_keys(config, judge_model))
+                        judges=judge_routing_keys(config, judge_model),
+                        verdict=getattr(config.models, "judge_verdict", "auto"),
+                        judge_verdicts=judge_verdict_policies(config, judge_model))
     for warning in pre.warnings:
         print(f"WARNING: preflight: {warning}", file=sys.stderr)
     factory = SESSION_FACTORY or ProviderSession
@@ -432,7 +434,7 @@ def build_summary(parsed_job: dict, config: EvalConfig) -> dict:
             }
             # Judge usage side channel (spec 014): the in-container engine
             # records tokens/cost per judge call; carry it into the summary.
-            for extra in ("usage", "tool_choice_mode"):
+            for extra in ("usage", "tool_choice_mode", "verdict_transport"):
                 if rec.get(extra):
                     case_judges[name][extra] = rec[extra]
             if value is not None:
@@ -450,7 +452,16 @@ def build_summary(parsed_job: dict, config: EvalConfig) -> dict:
             judges[name] = {"mean": None, "pass_rate": None}
 
     summary = {"judges": judges, "per_case": per_case}
-    judge_usage = _load_score_module().aggregate_judge_usage(per_case)
+    # Spec 015 counters ride each trial's judges.json sidecar (the engine ran
+    # in the verifier container); sum them across trials.
+    verdict_transports: dict = {}
+    verdict_fallbacks = 0
+    for trial in parsed_job["trials"]:
+        for name, n in (trial.get("verdict_transports") or {}).items():
+            verdict_transports[name] = verdict_transports.get(name, 0) + n
+        verdict_fallbacks += trial.get("verdict_fallbacks") or 0
+    judge_usage = _load_score_module().aggregate_judge_usage(
+        per_case, verdict_transports=verdict_transports, verdict_fallbacks=verdict_fallbacks)
     if judge_usage:
         summary["judge_usage"] = judge_usage
     return summary
