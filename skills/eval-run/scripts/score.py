@@ -1653,6 +1653,7 @@ def _reset_judge_call_meta():
     _JUDGE_CALL_META.verdict_transport = None
     _JUDGE_CALL_META.usage = None
     _JUDGE_CALL_META.denials = None
+    _JUDGE_CALL_META.staging_skips = None
 
 
 def _pop_verdict_transport():
@@ -1936,6 +1937,42 @@ def _pop_judge_denials():
     denials = getattr(_JUDGE_CALL_META, "denials", None)
     _JUDGE_CALL_META.denials = None
     return denials
+
+
+def _record_staging_skips(skips):
+    """Thread-local copy of the case-output entries staging left out.
+
+    A skipped hardlinked, sparse or over-limit file means the judge graded an
+    incomplete workspace. That is reported for the operator (and a threshold),
+    never to the judge: telling it content was omitted invites it to discount
+    the case for a reason unrelated to the agent under test.
+    """
+    _JUDGE_CALL_META.staging_skips = skips or None
+
+
+def _pop_staging_skips():
+    skips = getattr(_JUDGE_CALL_META, "staging_skips", None)
+    _JUDGE_CALL_META.staging_skips = None
+    return skips
+
+
+def _staging_skip_key(reason):
+    """The known skip-reason prefix `reason` starts with, else its first clause
+    (the text varies per entry: sizes, limits, OS error text)."""
+    for prefix in _STAGING_SKIP_REASONS + _CASE_OUTPUT_SKIP_REASONS:
+        if reason.startswith(prefix):
+            return prefix
+    return reason.split(";", 1)[0].split(" (", 1)[0]
+
+
+def _summarize_staging_skips(skips):
+    """`[(path, reason), ...]` -> `{"count": n, "reasons": {reason: n}}`, keyed
+    by reason prefix (the shape `_summarize_denials` has, by reason not tool)."""
+    reasons = {}
+    for _path, reason in skips or []:
+        key = _staging_skip_key(str(reason))
+        reasons[key] = reasons.get(key, 0) + 1
+    return {"count": len(skips or []), "reasons": reasons}
 
 
 def _summarize_denials(denials):
@@ -3345,6 +3382,7 @@ def score_cases(judges, case_dirs, config, run_id=None, samples_override=None):
             transports = []
             usages = []
             denials = []
+            staging_skips = []
 
             def _run_scorer():
                 # One judge call → (value, rationale). The usage record comes
@@ -3372,6 +3410,7 @@ def score_cases(judges, case_dirs, config, run_id=None, samples_override=None):
                     transport = _pop_verdict_transport()
                     if transport:
                         transports.append(transport)
+                    staging_skips.extend(_pop_staging_skips() or [])
 
             try:
                 if n > 1:
@@ -3401,6 +3440,12 @@ def score_cases(judges, case_dirs, config, run_id=None, samples_override=None):
             if usages and isinstance(case_results.get(name), dict):
                 case_results[name]["usage"] = (usages[0] if len(usages) == 1
                                                else _sum_usage(usages))
+            if staging_skips and isinstance(case_results.get(name), dict):
+                # The judge graded a workspace missing these entries. Kept in
+                # the result for the operator and `thresholds`; deliberately
+                # not in the judge's prompt (see `_record_staging_skips`).
+                case_results[name]["staging_skips"] = _summarize_staging_skips(
+                    staging_skips)
             if denials and isinstance(case_results.get(name), dict):
                 # Evidence that the tool policy did something. A judge that
                 # tried to leave its staged inputs and was stopped reads
@@ -3794,6 +3839,12 @@ _STAGING_SKIP_REASONS = (
 # recursion limit with it and surface as something unrelated.
 _MAX_CONTEXT_DEPTH = 64
 
+# Skip reasons that only apply to case outputs (skill-produced, untrusted): a
+# tree over a staging limit is staged up to it, and a hardlinked or sparse file
+# is left out, rather than failing the judge. `agent.context` still raises.
+_CASE_OUTPUT_SKIP_REASONS = ("deeper than", "staging limit exceeded",
+                             "hardlinked file", "sparse file")
+
 # Cumulative bounds on one staging operation. Depth and ancestor-loop checks do
 # not stop an acyclic fan-out (two links per level to an already-visited
 # directory expands exponentially) and staging runs before the judge timeout
@@ -3903,7 +3954,11 @@ def _copy_tree_dereferenced(src, dest, confine_root, ancestors, skip=None,
     try:
         dest.mkdir(parents=True, exist_ok=True)
         with os.scandir(src) as it:
-            entries = sorted(it, key=lambda e: e.name)
+            # Real entries before symlinks: a link and its target are the
+            # same directory, and whichever is visited first claims it. An
+            # alias must not claim `src/` ahead of `src` itself, or the real
+            # path is the one reported as "already staged".
+            entries = sorted(it, key=lambda e: (e.is_symlink(), e.name))
     except OSError as exc:
         return [(str(src), str(exc))]
     ancestors = ancestors + (os.path.realpath(src),)
@@ -3935,8 +3990,11 @@ def _copy_tree_dereferenced(src, dest, confine_root, ancestors, skip=None,
                                    "already staged via another path; not copied"))
                     continue
                 budget.staged_dirs.add(real)
+                # Recurse through the resolved path: walking via `child`
+                # would stack one more symlink per level, and the OS refuses
+                # to resolve more than a fixed number (ELOOP).
                 errors.extend(_copy_tree_dereferenced(
-                    child, target, confine_root, ancestors, budget=budget,
+                    Path(real), target, confine_root, ancestors, budget=budget,
                     untrusted=untrusted))
             elif entry.is_file(follow_symlinks=True):
                 st = entry.stat(follow_symlinks=True)
@@ -4005,9 +4063,12 @@ def _report_staging_problems(problems, label="agent.context", extra_skip=()):
     entry) carries no gradeable content, so it is reported on stderr and the
     staging stands: a stale link in a snapshotted repo must not take every
     case of every judge down with it.
+
+    Returns the skipped ``(path, reason)`` list (empty when nothing was), so a
+    caller can record what the judge did not get to see.
     """
     if not problems:
-        return
+        return []
     skip_reasons = tuple(_STAGING_SKIP_REASONS) + tuple(extra_skip)
     skipped = [p for p in problems if p[1].startswith(skip_reasons)]
     lost = [p for p in problems if p not in skipped]
@@ -4017,6 +4078,7 @@ def _report_staging_problems(problems, label="agent.context", extra_skip=()):
     if lost:
         raise RuntimeError(
             f"staging {label} failed for {_format_staging_problems(lost)}")
+    return skipped
 
 
 def _stage_case_outputs(workspace, case_dir, output_dirs, selected):
@@ -4103,6 +4165,9 @@ def _stage_agent_workspace(workspace, record, stage_inputs, context_dirs, root,
     case-output trees that hit a staging limit, a hardlinked or sparse file:
     they are skill-produced, and staging stops at the limit. An
     ``agent.context`` tree over a limit still raises.
+
+    Returns the ``(path, reason)`` list of case-output entries that were
+    skipped, for the caller to record (`_record_staging_skips`).
     """
     # 1. Output dirs copied from the case directory.
     selected = None
@@ -4110,16 +4175,16 @@ def _stage_agent_workspace(workspace, record, stage_inputs, context_dirs, root,
         names = [str(s).strip("/").split("/")[0] for s in stage_inputs]
         if "." not in names:  # "." means stage everything
             selected = set(names)
+    skips = []
     case_dir = record.get("case_dir")
     if case_dir:
-        _report_staging_problems(
+        skips = _report_staging_problems(
             _stage_case_outputs(workspace, Path(case_dir).resolve(),
                                 output_dirs, selected),
             "case outputs",
             # Case outputs are skill-produced: a tree over a staging limit is
             # staged up to it, not a reason to fail the judge.
-            extra_skip=("deeper than", "staging limit exceeded",
-                        "hardlinked file", "sparse file"))
+            extra_skip=_CASE_OUTPUT_SKIP_REASONS)
     # 2. Context dirs/files copied under ./.context/, so a judge write cannot
     #    escape through a link to real project files (CWE-59/829).
     if context_dirs:
@@ -4148,6 +4213,7 @@ def _stage_agent_workspace(workspace, record, stage_inputs, context_dirs, root,
         _report_staging_problems(problems)
     # 3. Verdict output dir.
     (workspace / "output").mkdir(parents=True, exist_ok=True)
+    return skips
 
 
 def _load_agent_judge(jc, config, project_root=None):
@@ -4256,8 +4322,9 @@ def _load_agent_judge(jc, config, project_root=None):
         workspace = Path(tempfile.mkdtemp(prefix="agent-judge-"))
         try:
             try:
-                _stage_agent_workspace(workspace, record, stage_inputs,
-                                       context_dirs, root, output_dirs)
+                _record_staging_skips(_stage_agent_workspace(
+                    workspace, record, stage_inputs, context_dirs, root,
+                    output_dirs))
             except (RuntimeError, ValueError) as exc:
                 raise RuntimeError(f"Agent judge '{jc.name}': {exc}") from exc
             rendered = _render_judge_prompt(prompt, jc, config, arguments,

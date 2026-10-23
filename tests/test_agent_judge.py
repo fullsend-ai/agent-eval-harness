@@ -828,9 +828,11 @@ class TestOutputStagingByCopy:
         ws = tmp_path / "ws"
         ws.mkdir()
         _stage_agent_workspace(ws, record, None, ["docs"], tmp_path, ["."])
+        # Assert on names: on a case-insensitive filesystem `ws / "Output"`
+        # is the same directory as `ws / "output"`, so `.exists()` is true.
         assert list((ws / "output").iterdir()) == []
-        assert not (ws / "Output").exists()
-        assert not (ws / ".Context").exists()
+        assert "Output" not in os.listdir(ws)
+        assert ".Context" not in os.listdir(ws)
         assert (ws / ".context" / "docs" / "a.md").read_text() == "author"
         assert (ws / "real.txt").read_text() == "ok"
 
@@ -924,10 +926,71 @@ class TestOutputStagingByCopy:
         assert "already staged via another path" in err
         assert any(p.name == "leaf.txt" for p in (ws / "out").rglob("leaf.txt"))
         assert any(p.name == "leaf.txt" for p in (ws / ".context").rglob("leaf.txt"))
+        # The deepest file really is staged, at the real depth, and walking the
+        # links never stacked enough of them for the OS to refuse (ELOOP).
+        leaf = ws / "out"
+        for _ in range(18):
+            leaf = leaf / "real"
+        assert (leaf / "leaf.txt").read_text() == "x"
+        assert "too many levels of symbolic links" not in err
+        assert "ELOOP" not in err
         start = time.monotonic()
         problems = _copy_path(tmp_path / "ctxdir", tmp_path / "dest")
         assert time.monotonic() - start < 5
         assert any("already staged via another path" in why for _p, why in problems)
+        assert not any("symbolic links" in why for _p, why in problems)
+
+    def test_real_directory_is_staged_before_a_link_to_it(self, tmp_path, capsys):
+        """`latest -> run-3`: `run-3/` is staged and the alias is the one
+        reported as already staged."""
+        from score import _stage_agent_workspace
+        record = _make_case(tmp_path / "case", {"out/run-3/r.txt": "three"})
+        os.symlink("run-3", tmp_path / "case" / "out" / "latest")
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        _stage_agent_workspace(ws, record, None, [], tmp_path, ["out"])
+        assert (ws / "out" / "run-3" / "r.txt").read_text() == "three"
+        assert not (ws / "out" / "latest").exists()
+        err = capsys.readouterr().err
+        assert "already staged via another path" in err
+        assert "out/latest" in err and "out/run-3" not in err
+
+    def test_alias_sorting_before_the_real_dir_does_not_hide_it(
+            self, tmp_path, capsys):
+        """`a -> src` visits `a` before `src` by name. The real `src/` must
+        still be staged, with the alias the one reported as already staged."""
+        from score import _stage_agent_workspace
+        record = _make_case(tmp_path / "case", {"out/src/file.py": "REAL SOURCE"})
+        os.symlink("src", tmp_path / "case" / "out" / "a")
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        skips = _stage_agent_workspace(ws, record, None, [], tmp_path, ["out"])
+        assert (ws / "out" / "src" / "file.py").read_text() == "REAL SOURCE"
+        assert not (ws / "out" / "a").exists()
+        assert [(Path(p).name, why.split(";")[0]) for p, why in skips] == [
+            ("a", "already staged via another path")]
+        assert "already staged via another path" in capsys.readouterr().err
+
+    def test_report_staging_problems_returns_the_skipped_entries(self):
+        from score import _report_staging_problems
+        assert _report_staging_problems([]) == []
+        skipped = [("a", "hardlinked file; not copied")]
+        assert _report_staging_problems(
+            skipped, "case outputs", extra_skip=("hardlinked file",)) == skipped
+
+    def test_staging_skips_do_not_leak_between_calls(self):
+        from score import (_pop_staging_skips, _record_staging_skips,
+                           _reset_judge_call_meta, _summarize_staging_skips)
+        _record_staging_skips([("a", "sparse file; not copied")])
+        _reset_judge_call_meta()
+        assert _pop_staging_skips() is None
+        _record_staging_skips([("a", "sparse file; not copied")])
+        assert _pop_staging_skips() == [("a", "sparse file; not copied")]
+        assert _pop_staging_skips() is None
+        assert _summarize_staging_skips(
+            [("a", "staging limit exceeded (more than 5 entries); not copied"),
+             ("b", "staging limit exceeded (more than 9 bytes); not copied")]) == {
+            "count": 2, "reasons": {"staging limit exceeded": 2}}
 
     @staticmethod
     def _deep_tree(root, levels=66):
@@ -1039,6 +1102,47 @@ class TestRecordFilesGating:
                     if Path(p).resolve().is_relative_to(out_dir)]
         assert staged["pr-head/a.txt"] == b"alpha"
         assert staged["pr-head/b.bin"] == b"\xff\xfe\x00"
+
+    def test_staging_skips_are_recorded_on_the_judge_result(self, tmp_path):
+        """A hardlinked and a sparse case output are skipped, and the judge's
+        result says so (`staging_skips`) while its prompt does not."""
+        import score
+        case_dir = tmp_path / "case-001"
+        _make_case(case_dir, {"out/ok.md": "fine"})
+        outside = tmp_path / "outside.txt"
+        outside.write_text("host file")
+        os.link(outside, case_dir / "out" / "linked.txt")
+        sparse = case_dir / "out" / "huge.bin"
+        with open(sparse, "wb") as fh:
+            fh.truncate(50 * 1024 ** 2)
+        st = sparse.stat()
+        if (not hasattr(st, "st_blocks")
+                or st.st_size - st.st_blocks * 512 < 2 * 1024 ** 2):
+            pytest.skip("filesystem does not create sparse files")
+        judge = _agent_judge(feedback_type="bool", inputs=["out"])
+        config = _config(judge, outputs=["out"])
+        staged = {}
+        with _patched_runners(self._staging_runner(staged)):
+            result = score.score_cases(load_judges(config), [case_dir], config)
+        cell = result["per_case"]["case-001"]["arch_score"]
+        assert cell["value"] is True
+        assert cell["staging_skips"] == {
+            "count": 2,
+            "reasons": {"hardlinked file": 1, "sparse file": 1}}
+        assert staged["out/ok.md"] == b"fine"
+        # The judge is not told: that invites it to discount the case.
+        for word in (b"omitted", b"skipped", b"staging", b"hardlinked", b"sparse"):
+            assert word not in staged["_args"].encode()
+
+    def test_clean_staging_leaves_no_staging_skips_field(self, tmp_path):
+        import score
+        case_dir = tmp_path / "case-001"
+        _make_case(case_dir, {"out/ok.md": "fine"})
+        judge = _agent_judge(feedback_type="bool", inputs=["out"])
+        config = _config(judge, outputs=["out"])
+        with _patched_runners(self._staging_runner({})):
+            result = score.score_cases(load_judges(config), [case_dir], config)
+        assert "staging_skips" not in result["per_case"]["case-001"]["arch_score"]
 
     def test_check_judge_still_gets_files(self, tmp_path):
         import score
