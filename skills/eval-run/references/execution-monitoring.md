@@ -105,7 +105,7 @@ Most execute.py flags fall back to eval.yaml config values:
 - `--model` → `models.skill` (required — errors if unset)
 - `--mlflow-experiment` → `mlflow.experiment`
 - `--skill-args` → `execution.arguments` (`{field}` placeholders resolved per case)
-- `--effort` → `runner.effort` (Claude Code, Cursor, and Codex)
+- `--effort` → `runner.effort` (Claude Code, Cursor, Codex, and fullsend)
 - `--parallelism` → `execution.parallelism` (concurrent via thread pool)
 
 Override via CLI only when testing different combinations than config specifies.

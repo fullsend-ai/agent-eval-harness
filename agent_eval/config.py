@@ -17,6 +17,38 @@ import yaml
 from agent_eval.providers.openrouter.routing import RoutingSpec, RoutingTable
 
 
+# --- Env value references ($NAME / ${NAME}) -----------------------------------
+
+_ENV_REF_RE = re.compile(r"^\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))$")
+
+
+def env_ref_name(value) -> Optional[str]:
+    """Variable name a configured env value references (``$NAME`` or
+    ``${NAME}``), or ``None`` when ``value`` is not a whole-string reference.
+
+    The single parser behind both runtime resolution (:func:`resolve_env_value`)
+    and load-time secret-reference validation, so the two cannot disagree."""
+    if not isinstance(value, str):
+        return None
+    m = _ENV_REF_RE.match(value)
+    return (m.group(1) or m.group(2)) if m else None
+
+
+def resolve_env_value(value) -> Optional[str]:
+    """Resolve one configured env value against the caller's environment.
+
+    ``$VAR`` and ``${VAR}`` are looked up in ``os.environ`` and resolve to
+    ``None`` when unset (callers omit the variable); any other string passes
+    through; ``None`` stays ``None`` (a YAML null means "unset", never the
+    string ``"None"``); other scalars are stringified."""
+    if value is None:
+        return None
+    if isinstance(value, str) and value.startswith("$"):
+        name = env_ref_name(value) or value[1:]
+        return os.environ.get(name)
+    return str(value)
+
+
 # --- Config overlay: `extends:` and the single raw loader (spec 014 PR-3a) -----
 #
 # `extends: <path relative to the file>` layers an eval config (a *profile*)
@@ -750,18 +782,68 @@ class RunnerConfig:
     # Passed as --permission-mode (a CLI flag), so it applies even in untrusted
     # isolated workspaces where settings-file permissions are trust-gated.
     permission_mode: Optional[str] = None
+    # fullsend: the agent name registered in <fullsend_dir>/config.yaml
+    # (required), the .fullsend directory (default ".fullsend", resolved
+    # against the project root), the binary (default "fullsend" on PATH) and
+    # extra arguments appended verbatim to `fullsend run`.
+    agent: Optional[str] = None
+    fullsend_dir: Optional[str] = None
+    binary: Optional[str] = None
+    extra_args: list = field(default_factory=list)
+    # fullsend: seconds between SIGTERM and SIGKILL when the harness timeout
+    # expires (None = the runner default, which outlasts a sandbox teardown).
+    term_grace_s: Optional[float] = None
 
 
-def _parse_runner_config(runner_raw, *, context="runner"):
+# Runner types accepted by ``runner.type``. Name-only so config parsing does
+# not import ``agent_eval.agent`` (which imports this module); a test asserts it
+# equals ``agent_eval.agent.RUNNERS``.
+RUNNER_TYPES = frozenset({
+    "claude-code", "cli", "codex", "cursor", "fullsend", "responses-api",
+})
+
+
+def _parse_runner_config(runner_raw, *, context="runner", reject_fullsend=None):
     """Parse a runner block into a RunnerConfig with validation.
 
     Shared by the top-level ``runner:`` block, a judge's nested
     ``agent.runner:`` block, and per-step ``execution.steps[].runner:`` so all
     honor identical defaults and validation (command type-check,
     workspace_mode whitelist). ``context`` is the field path used in error
-    messages.
+    messages. ``reject_fullsend`` names a context (e.g. "a judge's agent.runner")
+    that cannot use the ``fullsend`` runner, because it drives the agent through
+    prompt mode, which that runner does not support.
     """
     runner_raw = runner_raw or {}
+    runner_type = runner_raw.get("type", "claude-code")
+    if not isinstance(runner_type, str) or runner_type not in RUNNER_TYPES:
+        raise ValueError(
+            f"{context}.type: unknown runner type {runner_type!r}; "
+            f"expected one of {sorted(RUNNER_TYPES)}. To run on a Harbor-only agent "
+            f"(e.g. opencode), drop {context}.type and pass --agent <harbor-agent>")
+    if runner_type == "fullsend" and reject_fullsend:
+        raise ValueError(
+            f"{context}.type: the 'fullsend' runner cannot be used for "
+            f"{reject_fullsend}: it runs a skill as FULLSEND_TASK and does not "
+            "support prompt mode")
+    agent = runner_raw.get("agent")
+    if runner_type == "fullsend" and not (isinstance(agent, str) and agent.strip()):
+        raise ValueError(
+            f"{context}.agent is required when {context}.type is 'fullsend' "
+            "(an agent name registered in <fullsend_dir>/config.yaml)")
+    for key in ("agent", "fullsend_dir", "binary"):
+        value = runner_raw.get(key)
+        if value is not None and not isinstance(value, str):
+            raise ValueError(f"{context}.{key} must be a string")
+    term_grace = runner_raw.get("term_grace_s")
+    if term_grace is not None and (
+            not isinstance(term_grace, (int, float)) or isinstance(term_grace, bool)
+            or term_grace <= 0):
+        raise ValueError(f"{context}.term_grace_s must be a positive number")
+    extra_args = runner_raw.get("extra_args")
+    if extra_args is not None and not (
+            isinstance(extra_args, list) and all(isinstance(x, str) for x in extra_args)):
+        raise ValueError(f"{context}.extra_args must be a list of strings")
     command = runner_raw.get("command")
     if command is not None:
         valid_list = isinstance(command, list) and all(
@@ -786,7 +868,7 @@ def _parse_runner_config(runner_raw, *, context="runner"):
                 f'{context}.settings.enabledPlugins."*" must be a boolean, '
                 f'got: {enabled_plugins["*"]!r}')
     return RunnerConfig(
-        type=runner_raw.get("type", "claude-code"),
+        type=runner_type,
         command=command,
         workspace_mode=workspace_mode,
         settings=runner_raw.get("settings", {}) or {},
@@ -795,6 +877,11 @@ def _parse_runner_config(runner_raw, *, context="runner"):
         system_prompt=runner_raw.get("system_prompt"),
         effort=runner_raw.get("effort"),
         permission_mode=runner_raw.get("permission_mode"),
+        agent=agent,
+        fullsend_dir=runner_raw.get("fullsend_dir"),
+        binary=runner_raw.get("binary"),
+        extra_args=extra_args or [],
+        term_grace_s=term_grace,
     )
 
 
@@ -1456,11 +1543,13 @@ def validate_openrouter_roles(config):
     # authored env entries (they would be baked into task packages/settings).
     effective = orc or OpenRouterConfig()
     secret_names = {effective.api_key_env, effective.management_key_env}
-    secret_refs = {f"${name}" for name in secret_names}
+    # Recognise both $NAME and ${NAME} with the parser the runners resolve
+    # values with, so a braced alias cannot forward a managed key unnoticed.
     leaks = []
     for label, env in _env_surfaces(config, include_judges=True):
         for key, value in env.items():
-            if key in secret_names or (isinstance(value, str) and value.strip() in secret_refs):
+            if key in secret_names or (
+                    isinstance(value, str) and env_ref_name(value.strip()) in secret_names):
                 leaks.append(f"{label}.{key}")
     if leaks:
         level = effective.routing.enforcement
@@ -2190,6 +2279,17 @@ class EvalConfig:
 
         # Runner config (block form)
         runner = _parse_runner_config(raw.get("runner"), context="runner")
+        if runner.type == "fullsend" and execution.prompt and execution.prompt.strip():
+            raise ValueError(
+                "runner.type: the 'fullsend' runner cannot be used with "
+                "execution.prompt: it runs a skill as FULLSEND_TASK and does not "
+                "support prompt mode — set execution.skill")
+        for i, step in enumerate(steps):
+            eff = step.runner or runner
+            if eff.type == "fullsend" and step.prompt and step.prompt.strip():
+                raise ValueError(
+                    f"execution.steps[{i}]: the 'fullsend' runner cannot run a "
+                    "prompt step (prompt mode is unsupported) — set skill")
 
         # Models block (+ the provider registry, spec 014 Decision 17)
         if "providers" in raw:
@@ -2415,6 +2515,7 @@ class EvalConfig:
                 agent_val["runner"] = _parse_runner_config(
                     agent_val["runner"],
                     context=f"Judge '{j.get('name', '')}': agent.runner",
+                    reject_fullsend="an agent judge's runner",
                 )
             # A bare string would be iterated per character downstream
             # (`denied_tools: Bash` -> deny B,a,s,h), silently denying nothing.
@@ -2753,16 +2854,19 @@ class EvalConfig:
         runners.extend(
             step.runner for step in config.execution.steps if step.runner)
         for runner in runners:
-            # Neither codex nor cursor supports tool interception; reject at load
-            # (same altitude as codex) rather than only at runner construction.
-            if runner.type in ("codex", "cursor") and config.inputs.tools:
+            # codex, cursor and fullsend do not support tool interception
+            # (fullsend strips the workspace hooks); reject at load (same
+            # altitude as codex) rather than only at runner construction.
+            if (runner.type in ("codex", "cursor", "fullsend")
+                    and config.inputs.tools):
                 raise ValueError(
                     f"runner.type '{runner.type}' does not support "
                     "inputs.tools interception; use claude-code or remove "
                     "the tool interceptors")
-            # codex additionally cannot enforce repository answer-key
+            # codex and fullsend cannot enforce repository answer-key
             # protections in workspace_mode: repo (cursor can).
-            if runner.type == "codex" and runner.workspace_mode == "repo":
+            if (runner.type in ("codex", "fullsend")
+                    and runner.workspace_mode == "repo"):
                 raise ValueError(
                     f"runner.type '{runner.type}' does not support "
                     "workspace_mode: repo because repository answer-key "
@@ -2773,29 +2877,38 @@ class EvalConfig:
         # `model:`); a model supplied solely via EVAL_JUDGE_MODEL is validated
         # when the judge is built. Local import avoids an import cycle
         # (prompt_backends -> agent_eval.agent -> config).
-        from agent_eval.prompt_backends import resolve_judge_backend
+        from agent_eval.prompt_backends import (
+            require_sdk_judge_for_runner, resolve_judge_backend,
+            split_model_uri)
         # Agent judges route their model through the runner (any provider prefix
         # is stripped to the bare id), not an SDK, so an explicit non-SDK provider
         # is valid for them — validate only judges that resolve to an SDK backend.
-        # models.judge is checked only when a non-agent judge could consume it.
+        # models.judge is checked only when a non-agent LLM judge actually
+        # inherits it — one that sets its own `model:`, or a check/code judge
+        # that never calls a model, leaves the default unused.
         non_agent_judges = [jc for jc in config.judges if not jc.agent]
+        inherits_default = [
+            jc for jc in non_agent_judges
+            if not jc.model and (
+                jc.prompt or jc.prompt_file or jc.llm_rubric
+                or (jc.builtin and builtin_judge_kind(jc.builtin) == "llm"))]
         judge_models = []
-        if config.models.judge and non_agent_judges:
+        if config.models.judge and inherits_default:
             judge_models.append(("models.judge", config.models.judge))
         for jc in non_agent_judges:
             if jc.model:
                 judge_models.append((f"judge '{jc.name}' model", jc.model))
         for label, model in judge_models:
             try:
-                resolve_judge_backend(model)
+                backend, _ = resolve_judge_backend(model)
             except ValueError as e:
                 raise ValueError(f"{label}: {e}") from e
+            require_sdk_judge_for_runner(config.runner.type, backend, label)
 
         # OpenRouter judges (spec 014): `provider_options` is validated by the
         # provider kind of the judge's statically-known model, and an `agent:`
         # judge cannot use an `openrouter:/` model — it runs through the
         # runner, which has no OpenRouter transport yet.
-        from agent_eval.prompt_backends import split_model_uri
         for jc in config.judges:
             static_model = jc.model or config.models.judge or ""
             provider, _bare = split_model_uri(static_model)

@@ -101,7 +101,11 @@ execution:
 #   NO  (skill testing, isolated capabilities) → omit workspace_mode (use default)
 #
 runner:
-  type: claude-code         # claude-code | cursor | codex | cli | responses-api
+  type: claude-code         # claude-code | cursor | codex | fullsend | cli | responses-api
+  # agent: my-agent         # fullsend only (required): agent name in <fullsend_dir>/config.yaml
+  # fullsend_dir: .fullsend # fullsend only: .fullsend dir, relative to the project root
+  # binary: fullsend        # fullsend only: binary to run (default: fullsend on PATH)
+  # extra_args: []          # fullsend only: appended verbatim to `fullsend run`
   # workspace_mode: repo    # Set ONLY when testing requires full repo access (see above)
   # settings: {}            # Runner-specific settings overrides
   # plugin_dirs: []         # Plugin dirs the evaluated skill needs

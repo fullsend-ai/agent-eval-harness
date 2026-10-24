@@ -310,7 +310,7 @@ execution:
   arguments: "{prompt}"   # resolved per case from input.yaml fields
 
 runner:
-  type: claude-code       # claude-code | cursor | codex | cli | responses-api
+  type: claude-code       # claude-code | cursor | codex | fullsend | cli | responses-api
   # effort: high          # accepted values are runner-specific: claude-code
   #                       # low|medium|high|xhigh|max; codex low|medium|high|xhigh;
   #                       # cursor is model-specific

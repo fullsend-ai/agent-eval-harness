@@ -6,12 +6,12 @@ read selectively. Fields a runner doesn't understand are ignored, and runners ma
 when an unsupported setting would otherwise be easy to miss.
 
 !!! tip "Runtime, not backend"
-    `runner.type` picks the *agent* (Claude Code, Cursor, Codex, an opaque CLI, or the OpenAI
-    Responses API). The **execution backend** (Local, Harbor, EvalHub) is a separate `--runner`
+    `runner.type` picks the *agent* (Claude Code, Cursor, Codex, an opaque CLI, fullsend, or the
+    OpenAI Responses API). The **execution backend** (Local, Harbor, EvalHub) is a separate `--runner`
     CLI flag, never a config key. See [backends](../../concepts/backends.md) and the
     [runners concept](../../concepts/runners.md) for the distinction.
 
-## The five runner types
+## The six runner types
 
 ```mermaid
 flowchart TD
@@ -20,6 +20,7 @@ flowchart TD
     T -->|cursor| CU[CursorAgentRunner<br/>cursor-agent --print]
     T -->|codex| CX[CodexRunner<br/>codex exec]
     T -->|cli| CLI[CliRunner<br/>arbitrary command template]
+    T -->|fullsend| FS[FullsendRunner<br/>fullsend run]
     T -->|responses-api| RA[ResponsesAPIRunner<br/>OpenAI Responses + Skills API]
 ```
 
@@ -29,11 +30,12 @@ flowchart TD
 | `cursor` | Cursor Agent CLI in headless mode (`cursor-agent --print --output-format …`) | Local Cursor-account execution with Cursor-managed model access and plugin loading. **Local backend only** — not available in EvalHub or Harbor. The Cursor CLI has no budget flag, so `max_budget_usd` is not enforced; bound spend with `execution.timeout` |
 | `codex` | Codex CLI in non-interactive mode (`codex exec --json`) | Native Codex execution, skill staging, JSONL usage parsing, and sandbox-mode mapping |
 | `cli` | Any command you provide, via a placeholder template | Wrapping OpenCode, a custom agent, or a shell script. See the [opaque CLI runner contract](https://github.com/opendatahub-io/agent-eval-harness/blob/main/docs/opaque-cli-runner-contract.md) |
+| `fullsend` | `fullsend run <agent>`: the project's own `.fullsend/` agent in an OpenShell sandbox | Running the skill under test on the production path (sandbox, security hooks, agent definition, pinned Claude Code). Skill mode and **local backend only** |
 | `responses-api` | OpenAI Responses API with the Shell tool + Skills API | Apples-to-apples comparison of the *same* skill on an OpenAI model |
 
 !!! note "Which model ids a runner accepts"
     `claude-code` takes a bare Anthropic id, `anthropic:/…` or `openrouter:/<author>/<slug>`
-    — it is the only runner the harness-managed OpenRouter plan supports. The other four
+    — it is the only runner the harness-managed OpenRouter plan supports. The others
     pass the resolved skill model to their own CLI or API and authenticate through their
     own environment (`CURSOR_API_KEY`, `OPENAI_*`). See
     [Model providers → Which role accepts which provider](../../concepts/providers.md#which-role-accepts-which-provider).
@@ -42,17 +44,22 @@ flowchart TD
 
 Not every runner reads every field. The matrix below shows where each field lands.
 
-| Field | Type | `claude-code` | `cursor` | `codex` | `cli` | `responses-api` |
-| --- | --- | :---: | :---: | :---: | :---: | :---: |
-| `type` | `str` | discriminator | discriminator | discriminator | discriminator | discriminator |
-| `effort` | `str` (enum) | `--effort` flag | appended to a base `--model` as `[effort=…]`; existing Cursor effort variants pass through | `model_reasoning_effort` | `{effort}` placeholder | — |
-| `permission_mode` | `str` (enum) | `--permission-mode` flag (also accepts `manual`, claude-code-only) | `plan` → `--mode plan`; `bypassPermissions` → `--force` | mapped to Codex sandbox mode | — | — |
-| `settings` | `dict` | merged into workspace `.claude/settings.json` | `binary` only; other keys warn and are ignored | `-c` config overrides for `codex exec` | — | connection settings (see below) |
-| `plugin_dirs` | `list[str]` | one `--plugin-dir` per entry (workspace-staged copy for out-of-workspace paths) | one `--plugin-dir` per entry (workspace-staged copy for out-of-workspace paths) | skills copied into `.agents/skills` | — | — |
-| `env` | `dict` | injected on the safe allowlist | injected into the subprocess env | injected on the safe allowlist | — (uses `execution.env`) | — |
-| `system_prompt` | `str` | `--append-system-prompt` | prepended to the prompt | prepended to the prompt | `{system_prompt}` placeholder | `developer` message |
-| `command` | `str` \| `list[str]` | — | — | — | **required** — command template | — |
-| `workspace_mode` | `None` \| `"repo"` | harness-level (all runners) | harness-level | rejected | harness-level | harness-level |
+| Field | Type | `claude-code` | `cursor` | `codex` | `cli` | `responses-api` | `fullsend` |
+| --- | --- | :---: | :---: | :---: | :---: | :---: | :---: |
+| `type` | `str` | discriminator | discriminator | discriminator | discriminator | discriminator | discriminator |
+| `effort` | `str` (enum) | `--effort` flag | appended to a base `--model` as `[effort=…]`; existing Cursor effort variants pass through | `model_reasoning_effort` | `{effort}` placeholder | — | `--effort` flag on `fullsend run` |
+| `permission_mode` | `str` (enum) | `--permission-mode` flag (also accepts `manual`, claude-code-only) | `plan` → `--mode plan`; `bypassPermissions` → `--force` | mapped to Codex sandbox mode | — | — | — |
+| `settings` | `dict` | merged into workspace `.claude/settings.json` | `binary` only; other keys warn and are ignored | `-c` config overrides for `codex exec` | — | connection settings (see below) | — |
+| `plugin_dirs` | `list[str]` | one `--plugin-dir` per entry (workspace-staged copy for out-of-workspace paths) | one `--plugin-dir` per entry (workspace-staged copy for out-of-workspace paths) | skills copied into `.agents/skills` | — | — | — |
+| `env` | `dict` | injected on the safe allowlist | injected into the subprocess env | injected on the safe allowlist | — (uses `execution.env`) | — | injected into the subprocess env |
+| `system_prompt` | `str` | `--append-system-prompt` | prepended to the prompt | prepended to the prompt | `{system_prompt}` placeholder | `developer` message | — (the agent definition replaces it) |
+| `command` | `str` \| `list[str]` | — | — | — | **required** — command template | — | — |
+| `workspace_mode` | `None` \| `"repo"` | harness-level (all runners) | harness-level | rejected | harness-level | harness-level | — |
+| `agent` | `str` | — | — | — | — | — | **required** — agent name in `<fullsend_dir>/config.yaml` |
+| `fullsend_dir` | `str` | — | — | — | — | — | `--fullsend-dir` (default `.fullsend`) |
+| `binary` | `str` | — | — | — | — | — | executable (default `fullsend` on PATH) |
+| `extra_args` | `list[str]` | — | — | — | — | — | appended to `fullsend run` |
+| `term_grace_s` | `float` | — | — | — | — | — | seconds from SIGTERM to SIGKILL on timeout (default 30) |
 
 !!! warning "Unset ≠ empty behavior"
     A field ignored by the active runner is harmless — it just does nothing. But two
@@ -65,7 +72,9 @@ Not every runner reads every field. The matrix below shows where each field land
 ### `type`
 
 Selects the runner implementation. One of `claude-code` (default), `cursor`,
-`codex`, `cli`, or `responses-api`. Any other value fails to resolve at run time.
+`codex`, `cli`, `fullsend`, or `responses-api`. Any other value fails config
+validation with an error naming the field (`runner.type`,
+`execution.steps[N].runner.type`, or a judge's `agent.runner.type`).
 
 ### `effort`
 
@@ -76,8 +85,10 @@ Reasoning-effort level for the agent. The accepted values are runner-specific:
 | `claude-code` | `low`, `medium`, `high`, `xhigh`, `max` |
 | `codex` | `minimal`, `low`, `medium`, `high`, `xhigh` |
 | `cursor` | Passed as the Cursor model's `effort` parameter; accepted values depend on the selected model |
+| `fullsend` | Forwarded as `--effort` to `fullsend run`; fullsend validates the accepted values |
 
-An invalid value raises at construction time for `claude-code` and `codex`. Cursor
+An invalid value raises at construction time for `claude-code` and `codex`; for
+`fullsend` the harness does not validate it and leaves that to `fullsend run`. Cursor
 does not have a standalone `--effort` flag; it appends the value to the model ID,
 for example `gpt-5.4[effort=high]`. If the model is already a Cursor catalog
 variant such as `gpt-5.4-medium`, the runner passes that ID through unchanged
@@ -265,7 +276,7 @@ runner:
 
 ### `env`
 
-`claude-code`, `cursor`, and `codex`. Extra environment variables injected into the
+`claude-code`, `cursor`, `codex`, and `fullsend`. Extra environment variables injected into the
 runner subprocess, **additive** to the runner's built-in safe allowlist (`PATH`, `HOME`,
 provider credentials, `MLFLOW_TRACKING_URI`, …). A value starting with `$` is resolved
 from the caller's environment; missing vars are dropped. Cursor reads its provider
@@ -343,6 +354,49 @@ runner:
     Claude-Code-only and do not work with `cli`. See the
     [cross-runner cookbook](../../cookbook/cross-runner-opencode.md).
 
+### `agent`, `fullsend_dir`, `binary`, `extra_args`, `term_grace_s`
+
+`fullsend` only. `agent` is **required** with `type: fullsend` (a missing value fails
+config validation naming `runner.agent`): the name of an agent registered in
+`<fullsend_dir>/config.yaml`. `fullsend_dir` defaults to `.fullsend` and resolves
+against the project root. `binary` defaults to `fullsend` on `PATH`; a relative
+value containing a path separator resolves against the project root. `extra_args`
+(a list of strings) is appended verbatim to the command; `--no-post-script` is
+rejected, because the project's post-script is what copies the agent's outputs into
+the workspace. `term_grace_s` (positive number, default 30) is the time between
+SIGTERM and SIGKILL when the eval timeout expires. `type: fullsend` is rejected at
+load time on `execution.prompt` configs and on an agent judge's `agent.runner`
+(prompt mode is unsupported):
+
+```text
+<binary> run <agent> --fullsend-dir <abs fullsend_dir> --target-repo <abs workspace>
+  [--model <model>] [--effort <effort>] --output-dir <workspace>/.fullsend-runs <extra_args>
+```
+
+The process environment carries `FULLSEND_TASK="/<skill> <args>"`,
+`AGENT_EVAL_SUBAGENT_MODEL` (only when a subagent model is set; the agent definition
+must reference it, or the runner warns), and every `execution.env`, `runner.env` and
+hook-output entry, on top of the caller's environment. The workspace
+`.claude/settings.json` is stripped of `env`, hooks and
+`permissions.additionalDirectories` before the upload. Artifacts reach the workspace
+through the project's post-script copy into `--target-repo`; `iteration-N/output/`
+is not read. All iterations' streams and subagent transcripts are mapped. fullsend
+aborts before the pre-script when a `${VAR}` the agent's harness references is unset
+on the host, so that harness may only reference these variables or ones from the
+caller's environment. Requires fullsend ≥ 0.48, a running OpenShell gateway with
+podman, and the agent's own credentials on the host. Keep the fullsend harness's
+`timeout_minutes` below `execution.timeout`. `max_budget_usd` is a hint only, because
+the fullsend harness enforces its own budget. See the
+[runners concept](../../concepts/runners.md#fullsend) for the result mapping.
+
+```yaml
+runner:
+  type: fullsend
+  agent: rfe-creator-eval
+  fullsend_dir: .fullsend
+  extra_args: [--keep-sandbox]
+```
+
 ### `workspace_mode`
 
 Execution context. Validated at load time — only `None` or `"repo"` are accepted (a
@@ -406,6 +460,16 @@ runner:
         - --model
         - "{model}"
         - "/{agent} {args}"
+    ```
+
+=== "fullsend"
+
+    ```yaml
+    runner:
+      type: fullsend
+      agent: rfe-creator-eval
+      env:
+        GOOGLE_APPLICATION_CREDENTIALS: $GOOGLE_APPLICATION_CREDENTIALS
     ```
 
 === "Responses API"

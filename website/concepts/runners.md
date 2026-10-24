@@ -8,7 +8,7 @@ runtime-agnostic.
 
 !!! important "Runner ≠ backend"
     A **runner** is *what agent runtime* runs a case (`claude-code`, `cursor`,
-    `codex`, `cli`, `responses-api`) — chosen in `eval.yaml` via `runner.type`. A **backend** is
+    `codex`, `fullsend`, `cli`, `responses-api`) — chosen in `eval.yaml` via `runner.type`. A **backend** is
     *where* the eval runs (Local, [Harbor](../guides/harbor.md),
     [EvalHub](../guides/evalhub.md)) — always chosen by a **CLI flag** (`--runner`),
     never in the config. The same `eval.yaml` runs unchanged across all three
@@ -31,11 +31,13 @@ flowchart TD
     R -->|cursor| CU["CursorAgentRunner<br/>cursor-agent --print"]
     R -->|codex| CX["CodexRunner<br/>codex exec"]
     R -->|cli| CLI["CliRunner<br/>arbitrary command"]
+    R -->|fullsend| FS["FullsendRunner<br/>fullsend run"]
     R -->|responses-api| RA["ResponsesAPIRunner<br/>OpenAI Responses API"]
     CC --> RR["RunResult"]
     CU --> RR
     CX --> RR
     CLI --> RR
+    FS --> RR
     RA --> RR
     RR --> S["collect → judges → report → MLflow"]
 ```
@@ -51,6 +53,7 @@ flowchart TD
 | `cursor` | `CursorAgentRunner` | Cursor Agent CLI (`cursor-agent --print`) | Uses the local Cursor login/account, embeds `SKILL.md` prompts, supports isolated and repo-mode execution with project-local permission rules; rejects `inputs.tools`; unsupported native settings warn explicitly; local backend only |
 | `codex` | `CodexRunner` | Codex CLI (`codex exec --json`) | Native Codex execution with copied skill staging, sandbox-mode mapping, and JSONL usage parsing |
 | `cli` | `CliRunner` | Any command you provide | Opaque: harness only sees exit code, stdout/stderr, and an optional `metrics.json` |
+| `fullsend` | `FullsendRunner` | `fullsend run <agent>` (OpenShell sandbox) | Runs the skill through the project's own `.fullsend/` agent, the production path; maps fullsend's run directory (`metrics.json`, stream-json, subagent transcripts) back onto `RunResult`; skill mode only; local backend only |
 | `responses-api` | `ResponsesAPIRunner` | OpenAI Responses API (Shell tool + Skills API) | Apples-to-apples cross-runtime comparison; needs `pip install agent-eval-harness[openai]` |
 
 The default is `claude-code`, so `runner:` can be omitted entirely.
@@ -64,7 +67,7 @@ and implements three members:
 | Member | Purpose |
 | --- | --- |
 | `from_config(config, *, log_prefix=None, **overrides)` | Classmethod factory; each subclass pulls the config fields it needs. CLI overrides (resolved models, effort, permissions) take precedence. |
-| `name` | Short identifier (`"claude-code"`, `"cursor"`, `"codex"`, `"cli"`, `"responses-api"`). |
+| `name` | Short identifier (`"claude-code"`, `"cursor"`, `"codex"`, `"cli"`, `"fullsend"`, `"responses-api"`). |
 | `execute(target, args, workspace, model, ...)` | Run one case in a pre-staged workspace and return a `RunResult`. |
 
 `execute()` takes a uniform signature. The two most important arguments encode
@@ -373,6 +376,111 @@ report as `None` and cost tables in the report are empty. All fields are optiona
     input); `execution.env` adds keys on top with `$VAR` resolution, and `runner.env`
     is a no-op here (see [runner](../reference/config/runner.md)).
 
+## `fullsend`
+
+`FullsendRunner`
+([`fullsend.py`](https://github.com/opendatahub-io/agent-eval-harness/blob/main/agent_eval/agent/fullsend.py))
+executes the skill under test with `fullsend run`, against the project's own
+`.fullsend/` agent package, with the eval workspace as the target repository. The
+skill then runs the way production runs it: in an OpenShell sandbox with the
+Tirith and SSRF hooks, under the agent definition's system prompt, on the harness's
+pinned Claude Code build, with `env.sandbox` as the only environment contract.
+
+```yaml title="eval.yaml"
+runner:
+  type: fullsend
+  agent: rfe-creator-eval   # required: an agent registered in <fullsend_dir>/config.yaml
+  fullsend_dir: .fullsend   # default; resolved against the project root
+  binary: fullsend          # default: fullsend on PATH; a relative path with a
+                            # separator resolves against the project root
+  extra_args: []            # appended verbatim to `fullsend run`
+  term_grace_s: 30          # default; seconds from SIGTERM to SIGKILL on timeout
+  env: {}                   # extra variables for the fullsend process
+```
+
+**Prerequisites.** fullsend ≥ 0.48, a running OpenShell gateway with podman, and the
+agent's own credentials on the host (for rfe-creator: a Vertex service-account key).
+
+Per case (or once per batch) the runner:
+
+1. **Materialises the workspace.** fullsend uploads the target repository as a tar
+   that keeps symlinks, and an absolute link target does not exist inside the
+   sandbox. Every symlink at the workspace top level and under `.claude/` is
+   replaced by a real copy (nested links followed relative to the link's own
+   directory, dangling links dropped, `.git` excluded). A link whose real target
+   lies outside the project root and the configured `runner.plugin_dirs` is
+   dropped with a warning, so host files never reach the sandbox. The project root
+   is never modified. Each copy is built under a temporary name and swapped in last,
+   and a failure is reported as a failed case (exit `-1`).
+2. **Rewrites the workspace `.claude/settings.json`** for this runner. The harness
+   writes `env`, its own hook commands and `permissions.additionalDirectories` for
+   the other runners; they name host paths and values that mean nothing in the
+   sandbox, and fullsend uploads the file with the repository, so the runner removes
+   all three for the duration of the run and puts the original file back
+   afterwards, so a later non-fullsend step in the same workspace keeps its hooks,
+   env and directory grants. Because the hooks never reach the sandbox,
+   `inputs.tools` interception is not available with this runner and is rejected at
+   config load.
+3. **Sets the environment** of the fullsend process, on top of the caller's
+   environment (no env file is written, so no dotenv quoting applies). It holds
+   `FULLSEND_TASK="/<skill> <args>"`, `AGENT_EVAL_SUBAGENT_MODEL` (only when a
+   subagent model is set, never empty), plus every `execution.env`, `runner.env`
+   and hook-output entry (`$VAR` and `${VAR}` values resolve from the caller). When
+   `models.subagent` is set and nothing under `<fullsend_dir>` references
+   `AGENT_EVAL_SUBAGENT_MODEL`, the runner warns that the value will not take effect.
+4. **Invokes** `<binary> run <agent> --fullsend-dir <abs> --target-repo <workspace>
+   [--model <model>] [--effort <effort>] --output-dir <workspace>/.fullsend-runs
+   <extra_args>` from the workspace. `--effort` is passed only when `runner.effort`
+   / `--effort` is set. The output directory is a top-level child of the workspace,
+   so fullsend leaves it out of the target-repo upload and a run never sees an
+   earlier run's files; the run directory is the one fullsend creates during this
+   invocation, so a run that fails before fullsend writes anything maps nothing.
+5. **Maps the run directory** onto `RunResult`: `cost_usd`, `num_turns`,
+   `resolved_model` and `token_usage` (`input`, `output`, `cache_read`,
+   `cache_create`) from `metrics.json`, with `tool_calls`, `iterations` and the count
+   of `security/` files in `raw_output`. `stdout` is the concatenation of every
+   iteration's `output.jsonl` (Claude Code stream-json), so events, MLflow traces and
+   reasoning judges work unchanged. fullsend's own console output goes to `stderr`.
+   Per-model usage, turns and message ids come from those streams plus every
+   iteration's subagent transcripts (`transcripts/*-agent-*.jsonl`), which are copied
+   into `<workspace>/subagents/` (a name already taken by an earlier iteration gets an
+   `itN-` prefix). Hook block events in `run-telemetry.jsonl` become
+   `permission_denials` (best effort). Per-model turns and message ids cover only the
+   current invocation's transcripts. The exit code is fullsend's.
+6. **Collects artifacts from the workspace.** Repo-relative `outputs[*].path` reach
+   the workspace the way they do in production: the project's post-script, which
+   `fullsend run` executes after the agent, copies the agent's outputs into
+   `--target-repo` (the eval workspace), where `collect.py` reads them. The runner
+   never reads `iteration-N/output/` (fullsend's own export, including
+   `agent-result.json`) as the repository. A run whose post-script did not execute
+   produces no artifacts, so `--no-post-script` in `runner.extra_args` is rejected as
+   a failed case.
+
+!!! warning "Timeouts, budget and env references"
+    - Keep the fullsend harness's `timeout_minutes` **below** `execution.timeout`.
+      When the eval's timeout expires, the runner sends SIGTERM to the process group
+      (fullsend then tears its sandbox down), waits `runner.term_grace_s` (default
+      30 s, above a podman sandbox teardown), signals SIGKILL to the group only while
+      the leader is still unreaped, and records exit `-1` ("Timed out"). Raise
+      `term_grace_s` if your sandbox needs longer to stop. The run directory is
+      still mapped after a timeout: usage, stream stdout, subagent transcripts and
+      artifacts already copied into the workspace are kept.
+    - `max_budget_usd` is a hint only. The fullsend harness enforces its own budget.
+    - fullsend aborts before the pre-script when a `${VAR}` the harness file
+      references is unset on the host. An agent's eval harness may reference only
+      the variables listed in step 3 or variables from the caller's environment.
+      (Variables travel through the process environment, so none of the values
+      are quoted or escaped.)
+      fullsend 0.48 has an `--effort` flag, which the runner uses; it has no
+      subagent-model flag, so that value travels as
+      `${AGENT_EVAL_SUBAGENT_MODEL}`, which the agent definition must reference.
+
+Prompt mode (`execution.prompt`) is unsupported: it is rejected at config load, as
+is `type: fullsend` on an agent judge's `agent.runner`. `runner.system_prompt`
+and the harness system prompt are ignored, because the agent definition replaces
+the system prompt. Tool interception (`inputs.tools`) does not reach the sandbox.
+There is no Harbor or EvalHub equivalent.
+
 ## `responses-api`
 
 `ResponsesAPIRunner`
@@ -462,14 +570,17 @@ Runners are pluggable — the harness only ever talks to the ABC:
 1. Subclass `EvalRunner` and implement `from_config()`, `name`, and `execute()`,
    returning a normalized `RunResult`.
 2. Register it in the `RUNNERS` dict in `agent_eval/agent/__init__.py` under a new
-   `runner.type` key.
+   `runner.type` key, and add the same key to the `RUNNER_TYPES` frozenset in
+   `agent_eval/config.py`, which is what config load checks.
 3. Populate as many `RunResult` fields as your runtime can; leave the rest `None`.
 
-Once registered, that `runner.type` works across the Local and
-[EvalHub](../guides/evalhub.md) backends (which dispatch through `RUNNERS`
-directly). [Harbor](../guides/harbor.md) instead maps `runner.type` to a Harbor
-agent name, so a new opaque runtime is reached there via Harbor's own agent, not this
-registry.
+Once registered in both places, that `runner.type` is accepted at config load (a type
+missing from `RUNNER_TYPES` is rejected, even if it is in `RUNNERS`) and works on the
+Local backend. EvalHub dispatches through `RUNNERS`
+directly, but registration does not imply EvalHub support (`fullsend`, for one, is
+local-only). [Harbor](../guides/harbor.md) instead maps `runner.type` to a Harbor
+agent name, so a runtime that is not in that mapping is reached there with
+`--agent <harbor-agent>`, not through this registry.
 
 ## See also
 

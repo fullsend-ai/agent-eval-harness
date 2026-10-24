@@ -13,6 +13,8 @@ from typing import Optional, Union
 
 import yaml
 
+from agent_eval.config import resolve_env_value
+
 from .base import EvalRunner, RunResult
 
 _print_lock = threading.Lock()
@@ -229,12 +231,9 @@ class CliRunner(EvalRunner):
         """Build subprocess environment: inherit env, add extras."""
         env = os.environ.copy()
         for k, v in self._extra_env.items():
-            if isinstance(v, str) and v.startswith("$"):
-                resolved = os.environ.get(v[1:])
-                if resolved is not None:
-                    env[k] = resolved
-            else:
-                env[k] = str(v)
+            resolved = resolve_env_value(v)
+            if resolved is not None:
+                env[k] = resolved
         if extra_env:
             for k, v in extra_env.items():
                 env[k] = str(v)

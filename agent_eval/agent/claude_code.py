@@ -16,13 +16,15 @@ from typing import Optional
 from .base import EvalRunner, RunResult
 from .stream_capture import (
     make_prompt_event, inject_timestamp, extract_usage,
-    count_subagent_turns, count_subagent_turns_by_model, setup_subagent_hook,
+    count_subagent_turns, combine_per_model_turns,
+    setup_subagent_hook,
     assistant_message_id,
     classify_stream_errors,
     message_ids_for_run,
 )
 from agent_eval.tools.permissions import compile_permission_rules
-from agent_eval.config import resolve_plugin_dir, resolve_plugin_skill_roots
+from agent_eval.config import (
+    resolve_env_value, resolve_plugin_dir, resolve_plugin_skill_roots)
 from agent_eval.providers.base import parse_agent_model
 from agent_eval.providers.env import MANAGED_ENV_KEYS, settings_env_block
 
@@ -175,20 +177,6 @@ def stage_plugin_dir(plugin_dir: Path, workspace: Path) -> Path:
         shutil.rmtree(staging, ignore_errors=True)
         raise
     return dest
-
-
-def _per_model_turns(subagent_dir, stream_ids_by_model):
-    """Combine stream-level per-model turn IDs with subagent transcripts.
-
-    Returns ``{model: turn_count}`` summing stream IDs and any new IDs found
-    in subagent transcripts (deduplicated by message ID). Returns None if no
-    per-model data is available, so the field stays absent rather than {}."""
-    by_model = {m: set(ids) for m, ids in (stream_ids_by_model or {}).items()}
-    new_per_model = count_subagent_turns_by_model(subagent_dir, by_model) or {}
-    counts = {m: len(ids) for m, ids in by_model.items()}
-    for m, n in new_per_model.items():
-        counts[m] = counts.get(m, 0) + n
-    return counts or None
 
 
 # Public effort vocabulary — importable by Harbor orchestration without
@@ -534,7 +522,7 @@ class ClaudeCodeRunner(EvalRunner):
             subagent_turns = count_subagent_turns(workspace / "subagents", already_seen=stream_ids)
             if subagent_turns:
                 num_turns = (num_turns or 0) + subagent_turns
-            per_model_turns = _per_model_turns(
+            per_model_turns = combine_per_model_turns(
                 workspace / "subagents", stream_ids_by_model)
             # An evaluator timeout can land after the CLI already emitted
             # usage data — same under-reporting risk as the bg-kill path.
@@ -618,7 +606,7 @@ class ClaudeCodeRunner(EvalRunner):
         subagent_turns = count_subagent_turns(workspace / "subagents", already_seen=stream_ids)
         if subagent_turns:
             num_turns = (num_turns or 0) + subagent_turns
-        per_model_turns = _per_model_turns(
+        per_model_turns = combine_per_model_turns(
             workspace / "subagents", stream_ids_by_model)
 
         denial_list = _extract_denial_list(result_obj, permission_denials, result_denials)
@@ -887,12 +875,9 @@ class ClaudeCodeRunner(EvalRunner):
         for k, v in self._env.items():
             if v is None:
                 continue
-            if isinstance(v, str) and v.startswith("$"):
-                resolved = os.environ.get(v[1:])
-                if resolved is not None:
-                    env[k] = resolved
-            else:
-                env[k] = str(v)
+            resolved = resolve_env_value(v)
+            if resolved is not None:
+                env[k] = resolved
         if extra_env:
             for k, v in extra_env.items():
                 env[k] = str(v)

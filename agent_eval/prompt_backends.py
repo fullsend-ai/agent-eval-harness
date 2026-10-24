@@ -112,6 +112,21 @@ def resolve_judge_backend(model: Optional[str]) -> tuple[str, str]:
     return ("openai", bare)
 
 
+def require_sdk_judge_for_runner(runner_type: Optional[str], backend: str,
+                                 label: str) -> None:
+    """Reject a runner-backed judge when the evaluation runner is ``fullsend``.
+
+    ``fullsend`` only runs a skill (``FULLSEND_TASK='/<skill> …'``) and has no
+    prompt mode, so grading through it fails on every case after the skill run
+    has already spent its time and budget. ``label`` names the offending
+    setting in the error."""
+    if runner_type == "fullsend" and backend == "runner":
+        raise ValueError(
+            f"{label}: a runner-backed judge model ('runner:/…') cannot grade "
+            "through runner.type 'fullsend', which has no prompt mode; use an "
+            "SDK-backed judge model (a Claude id, 'anthropic:/…' or 'openai:/…')")
+
+
 @dataclass(frozen=True)
 class JudgeClientConfig:
     """How score.py builds the OpenAI-SDK client of a provider-backed judge.

@@ -79,6 +79,7 @@ _RUNNER_TO_HARBOR_AGENT = {
     "codex": "codex",
     "cursor": None,         # no Harbor equivalent
     "cli": None,            # CLI runner is generic — user must pass --agent explicitly
+    "fullsend": None,       # no Harbor equivalent
     "responses-api": None,  # no Harbor equivalent
 }
 _DEFAULT_AGENT = "claude-code"
@@ -691,12 +692,12 @@ def run_eval_on_harbor(
         mapped = _RUNNER_TO_HARBOR_AGENT.get(config.runner.type)
         if mapped:
             agent_name = mapped
-        elif config.runner.type in _RUNNER_TO_HARBOR_AGENT:
+        else:
+            # runner.type is validated against RUNNERS at config load, and every
+            # registered type is a key in _RUNNER_TO_HARBOR_AGENT.
             raise ValueError(
                 f"runner.type '{config.runner.type}' in eval.yaml has no Harbor "
                 f"agent equivalent. Pass --agent explicitly (e.g. --agent opencode).")
-        else:
-            agent_name = config.runner.type
 
     # Provider plan (spec 014, Decision 23): the same plan as the local runner.
     # podman delivers it through --agent-env; Kubernetes through the pod spec

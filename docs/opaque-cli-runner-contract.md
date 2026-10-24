@@ -5,6 +5,11 @@ command. This document defines the contract between the harness and the external
 command so that downstream features (judges, scoring, reporting, regression
 detection, MLflow) work correctly.
 
+To run a skill through `fullsend run`, use the first-class `runner.type: fullsend`
+rather than wrapping fullsend in a `cli` command. It maps fullsend's run directory
+(stream-json, `metrics.json`, subagent transcripts) onto the result for you (see
+[runners → fullsend](../website/concepts/runners.md#fullsend)).
+
 ## Placeholders
 
 The command template receives these placeholders, resolved before execution:

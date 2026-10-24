@@ -58,7 +58,7 @@ test -f <config> && echo "CONFIG_EXISTS" || echo "NO_CONFIG"
 
 Once config exists, read it to understand the eval setup — the skill under test, runner, dataset, outputs, judges, models, and any tool interception. The downstream scripts read the same config; you don't need to pass these fields through, just confirm they're present and warn the user about anything missing or surprising.
 
-`inputs.tools` is claude-code-only (codex/cursor reject it at load). For claude-code, if it has entries but the skill uses AskUserQuestion or external APIs, verify the handlers cover those tools — an unintercepted tool can hang headless execution.
+`inputs.tools` is claude-code-only (codex/cursor/fullsend reject it at load). For claude-code, if it has entries but the skill uses AskUserQuestion or external APIs, verify the handlers cover those tools — an unintercepted tool can hang headless execution.
 
 Persist parsed flags:
 
@@ -119,7 +119,7 @@ If the case count is 0, stop — the filter matched nothing.
 ## Step 3a: Resolve Tool Interception (if `inputs.tools` configured)
 
 If eval.yaml has `inputs.tools` entries, this step is **mandatory for Claude Code**.
-Codex and Cursor reject `inputs.tools` because their runtimes cannot consume the
+Codex, Cursor and fullsend reject `inputs.tools` because their runtimes cannot consume the
 harness interception handlers. `workspace.py` emits a skeleton in
 `tool_handlers.yaml`; you must resolve each handler's `prompt` into concrete runtime
 checks (`input_filters`, `env_checks`, `case_overrides`). Do not skip this even when

@@ -466,7 +466,7 @@ def main():
         print(f"ERROR: unknown runner '{agent}'. Available: {list(RUNNERS.keys())}",
               file=sys.stderr)
         sys.exit(1)
-    if agent in {"codex", "cursor"}:
+    if agent in {"codex", "cursor", "fullsend"}:
         # The config loader/runner enforces these for a declared runner;
         # an --agent override must not slip past the same guarantees.
         if config.inputs.tools:
@@ -474,7 +474,7 @@ def main():
                   "interception; use claude-code or remove the tool "
                   "interceptors", file=sys.stderr)
             sys.exit(1)
-        if (agent == "codex"
+        if (agent in {"codex", "fullsend"}
                 and getattr(config.runner, "workspace_mode", None) == "repo"):
             print(f"ERROR: runner '{agent}' does not support workspace_mode: "
                   "repo because repository answer-key protections cannot "
@@ -1550,12 +1550,12 @@ def _run_multi_step_case(runner, case_id, case_ws, output_dir, model,
                         f"Available: {list(RUNNERS)}")
                 step_cfg = copy.copy(config)
                 step_cfg.runner = step.runner
-                if rtype in {"codex", "cursor"}:
+                if rtype in {"codex", "cursor", "fullsend"}:
                     if config.inputs.tools:
                         raise ValueError(
                             f"runner '{rtype}' does not support inputs.tools "
                             "interception")
-                    if (rtype == "codex"
+                    if (rtype in {"codex", "fullsend"}
                             and step.runner.workspace_mode == "repo"):
                         raise ValueError(
                             f"runner '{rtype}' does not support "

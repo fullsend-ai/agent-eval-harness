@@ -32,7 +32,7 @@ flowchart LR
 
 - [**Architecture overview**](architecture.md) — The moving parts: config, runner, backend, judges, MLflow.
 - [**The execution model**](execution-model.md) — `case`/`batch` × `skill`/`prompt`: how many invocations, and what to run.
-- [**Runners**](runners.md) — The `EvalRunner` abstraction: `claude-code`, `cursor`, `codex`, `cli`, `responses-api`.
+- [**Runners**](runners.md) — The `EvalRunner` abstraction: `claude-code`, `cursor`, `codex`, `fullsend`, `cli`, `responses-api`.
 - [**Execution backends**](backends.md) — One `eval.yaml`, three execution paths: Local, Harbor, EvalHub.
 - [**Model providers**](providers.md) — Who serves each role's model: bare ids and `provider:/` URIs, the three families, credentials per backend, cost provenance.
 - [**Datasets & provenance**](datasets.md) — Case anatomy and the `skill` / `synthetic` / `from-traces` strategies.

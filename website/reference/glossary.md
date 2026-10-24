@@ -43,7 +43,7 @@ flowchart LR
 
 | Term | Definition | More |
 | --- | --- | --- |
-| **Runner** (agent runtime) | The agent CLI/harness that drives the model, selected by `runner.type` (`claude-code`, `cli`, …) with runtime-specific knobs (`effort`, `settings`, `plugin_dirs`, `env`, `system_prompt`, `command`, `workspace_mode`). | [Runners](../concepts/runners.md) · [runner config](config/runner.md) |
+| **Runner** (agent runtime) | The agent CLI/harness that drives the model, selected by `runner.type` (`claude-code`, `cli`, `fullsend`, …) with runtime-specific knobs (`effort`, `settings`, `plugin_dirs`, `env`, `system_prompt`, `command`, `workspace_mode`, and for `fullsend` `agent`, `fullsend_dir`, `binary`, `extra_args`, `term_grace_s`). | [Runners](../concepts/runners.md) · [runner config](config/runner.md) |
 | **Execution backend / substrate** | The environment the run executes in — Local, Harbor (containers), or EvalHub (platform Job pod). Chosen with a CLI flag, never in `eval.yaml`. | [Backends](../concepts/backends.md) |
 | **Workspace** | The isolated per-case directory the runner executes in. `dataset.workspace.files` whitelists per-case files and/or shared `{dest, source}` project/plugin resources to copy in; `runner.workspace_mode: repo` runs in the real repository instead of an isolated copy. | [dataset config](config/dataset.md) · [eval-run](../guides/eval-run.md) |
 | **Provider** (model access) | The service that serves a role's model, selected by the model id: a bare id goes wherever the runner (or, for judges, the SDK heuristic) is configured; `anthropic:/`, `openai:/`, `openrouter:/<author>/<slug>` and `runner:/` name it explicitly. Not an execution backend. | [Model providers](../concepts/providers.md) · [models.providers](config/providers.md) |

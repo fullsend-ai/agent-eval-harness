@@ -67,6 +67,7 @@ agent_eval/              # Python package (config, runner, state)
     claude_code.py       # Claude Code CLI runner (claude --print)
     codex.py             # OpenAI Codex CLI runner (codex exec --json)
     cli_runner.py        # Opaque CLI runner (arbitrary command templates)
+    fullsend.py          # fullsend runner (fullsend run <agent>; run dir → RunResult)
     stream_capture.py    # Stream-json processing (events, timestamps, usage, hooks)
   harbor/                # Harbor integration (containerized execution)
     tasks.py             # Generate self-contained Harbor task packages from eval.yaml
@@ -210,7 +211,7 @@ activate the venv itself (`orchestrate.py::_child_env`).
 
 Projects create an `eval.yaml` config file with:
 - `execution` — `mode` (`case` or `batch`), `skill` or `prompt` (mutually exclusive; skill mode vs prompt mode), `arguments` template with `{field}` placeholders, optional `timeout`/`max_budget_usd`/`parallelism` (concurrent case execution), `env` for injecting environment variables into workspaces (`$VAR` syntax resolves from caller's env), and `project_hooks` (default `true`) to carry the project's `.claude/settings.json` hooks into each workspace after the harness's own. A top-level `skill:` is still accepted (auto-normalized to `execution.skill`) but deprecated.
-- `runner` — `type` discriminator (`claude-code`, `cursor`, `codex`, etc.) plus runner-specific `effort`/`settings`/`plugin_dirs`/`env`/`system_prompt`. `cursor` is **local execution only** (not available in the Harbor or EvalHub backends) and rejects `inputs.tools`.
+- `runner` — `type` discriminator (`claude-code`, `cursor`, `codex`, `fullsend`, etc.; an unknown type is rejected at config load) plus runner-specific `effort`/`settings`/`plugin_dirs`/`env`/`system_prompt`. `fullsend` also takes `agent` (required), `fullsend_dir`, `binary`, `extra_args` and `term_grace_s`. `cursor` and `fullsend` are **local execution only** (not available in the Harbor or EvalHub backends); `cursor` and `fullsend` reject `inputs.tools`.
 - `models` — defaults for `skill`/`subagent`/`judge`/`hook` roles (CLI flags override). `hook` is the model for LLM-based AskUserQuestion answering. `judge_verdict` (`auto` | `json_schema` | `tool`, default `auto`) picks how SDK-backed LLM judges carry their verdict — the provider's structured output first, the forced tool call as the fallback (spec 015); a judge's own `verdict:` overrides it. The `judge` backend is chosen by the judge model's provider, independent of `runner.type` (so a Claude judge works with a Cursor/Codex runner and vice-versa): `anthropic:/…` or a bare Claude id → Anthropic SDK; `openai:/…` or any other bare id → OpenAI SDK (set `OPENAI_BASE_URL` for an OpenAI-compatible gateway); `runner:/…` → grade through the configured runner. An explicit unsupported provider (`gemini:/…`) is rejected at config load for a statically-set judge model (an env-only `EVAL_JUDGE_MODEL` is checked at judge build; `agent:` judges route through the runner). Resolution: `agent_eval/prompt_backends.resolve_judge_backend`.
 - `mlflow` — `experiment`, optional `tracking_uri`/`tags`
 - `permissions` — `allow`/`deny` tool patterns for headless execution

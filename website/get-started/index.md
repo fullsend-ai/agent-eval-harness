@@ -79,6 +79,6 @@ graph TD
 
 !!! tip "New to the terminology?"
     Two words are worth pinning down before you start: a **runner** is the *agent
-    runtime* (`claude-code`, `cursor`, `codex`, `cli`, `responses-api`), while an **execution backend**
+    runtime* (`claude-code`, `cursor`, `codex`, `fullsend`, `cli`, `responses-api`), while an **execution backend**
     is *where* it runs (Local, Harbor, EvalHub). See the
     [Glossary](../reference/glossary.md).

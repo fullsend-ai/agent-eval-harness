@@ -169,7 +169,7 @@ When a run is `DIRTY`, the three resolutions are:
 ## Tool interception
 
 If `eval.yaml` has `inputs.tools` entries, Step 3a is **mandatory** for Claude Code.
-Codex and Cursor reject `inputs.tools` explicitly because neither runner can consume
+Codex, Cursor and fullsend reject `inputs.tools` explicitly because none of these runners can consume
 the harness interception handlers. `workspace.py` emits a
 skeleton `tool_handlers.yaml`; you must resolve each handler's natural-language `prompt`
 into concrete runtime checks (`input_filters` for Bash, `env_checks` for services,
