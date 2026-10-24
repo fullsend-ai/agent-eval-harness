@@ -21,6 +21,7 @@ Parse `$ARGUMENTS` for:
 | `--skip-mlflow` | no | false | Skip MLflow setup entirely |
 | `--runs-dir <path>` | no | `eval/runs` | Directory where eval runs are stored |
 | `--harbor` | no | false | Install Harbor + Kubernetes for containerized execution (~650 MB) |
+| `--optimize` | no | false | Install cap-evolve-core + its skills tree for `/eval-optimize --engine capevolve` |
 
 ## Step 1: Install Dependencies (if needed)
 
@@ -63,6 +64,33 @@ if command -v uv &>/dev/null; then
 else
   "$VENV_DIR/bin/pip" install harbor 'litellm<1.107' 'kubernetes>=29.0,<37.0'
 fi
+```
+
+If `--optimize` was passed, also install the pinned cap-evolve engine
+dependency (`pip install -e '.[optimize]'` alone does not include
+cap-evolve's own skills tree — its phase/algorithm scripts, a separate
+checkout from the `cap_evolve` pip package):
+
+```bash
+VENV_DIR="${CLAUDE_SKILL_DIR}/../../.eval-venv"
+if command -v uv &>/dev/null; then
+  uv pip install --python "$VENV_DIR/bin/python3" -e "${CLAUDE_SKILL_DIR}/../..[optimize]"
+else
+  "$VENV_DIR/bin/pip" install -e "${CLAUDE_SKILL_DIR}/../..[optimize]"
+fi
+"$VENV_DIR/bin/python3" -c "import cap_evolve" 2>&1 && echo "cap-evolve-core: OK" || echo "cap-evolve-core: MISSING"
+```
+
+Then locate the cap-evolve skills tree so later `/eval-optimize --engine
+capevolve` calls don't need `--skills-dir` passed by hand every time: if a
+`CAPEVOLVE_SKILLS_DIR` env var or a sibling `cap-evolve/skills` checkout is
+found, use it; otherwise ask the user where their cap-evolve checkout lives.
+Record it for later sessions:
+
+```bash
+mkdir -p tmp
+python3 ${CLAUDE_SKILL_DIR}/scripts/agent_eval/state.py init tmp/optimize-config.yaml \
+  capevolve_skills_dir=<path>
 ```
 
 ## Step 2: Run Preflight Checks
