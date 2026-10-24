@@ -206,7 +206,13 @@ def _extract_verifiable_evidence(record):
     ])
 
 
-def load_case_record(case_dir, config, run_id=None, runs_dir=None):
+# Harness-created paths under a case's ``_modified/`` that are not skill edits.
+# Matched as prefixes of the path relative to ``_modified/``.
+_SKIP_MODIFIED_PREFIXES = (".work", "subagents", "hooks")
+
+
+def load_case_record(case_dir, config, run_id=None, runs_dir=None,
+                     load_files=True):
     """Load all outputs, execution metadata, and traces for a case.
 
     Returns a dict with:
@@ -214,6 +220,13 @@ def load_case_record(case_dir, config, run_id=None, runs_dir=None):
     - tool_calls: captured tool calls (from tool outputs)
     - Execution metadata: exit_code, duration_s, token_usage, cost_usd, num_turns
     - Logs: stdout, stderr (if traces config enables them)
+
+    ``load_files=False`` leaves ``files`` empty and skips the
+    ``<output>_content`` / ``modified_files`` keys derived from it, so a
+    scoring pass whose judges only need the artifacts on disk (agent judges,
+    which stage them by copying — see `_stage_agent_workspace`) never reads
+    every declared output tree into memory. `score_cases` decides this from
+    the configured judges (`_judges_read_files`).
     """
     runs_dir = Path(runs_dir) if runs_dir else _get_runs_dir(
         config.eval_name() if config else "")
@@ -265,6 +278,8 @@ def load_case_record(case_dir, config, run_id=None, runs_dir=None):
         if not artifact_dir.exists():
             continue
         _resolve_under(case_dir, artifact_dir)
+        if not load_files:
+            continue
         for f in sorted(artifact_dir.rglob("*")):
             if not f.is_file() or f.is_symlink():
                 continue
@@ -276,7 +291,7 @@ def load_case_record(case_dir, config, run_id=None, runs_dir=None):
                 record["files"][rel] = {"_binary": True, "path": str(f), "name": f.name}
 
     # Convenience keys for the first file in each path output dir
-    for output in config.outputs:
+    for output in config.outputs if load_files else ():
         if not output.path:
             continue
         artifact_dir = case_dir / output.path
@@ -293,16 +308,15 @@ def load_case_record(case_dir, config, run_id=None, runs_dir=None):
                 break
 
     # --- Modified files (in-place edits collected by collect.py) ---
-    _SKIP_MODIFIED_PREFIXES = {".work", "subagents", "hooks"}
     modified_dir = case_dir / "_modified"
-    if modified_dir.exists():
+    if load_files and modified_dir.exists():
         modified = {}
         for f in sorted(modified_dir.rglob("*")):
             if not f.is_file() or f.is_symlink():
                 continue
             _resolve_under(case_dir, f)
             rel = str(f.relative_to(modified_dir))
-            if any(rel.startswith(pfx) for pfx in _SKIP_MODIFIED_PREFIXES):
+            if rel.startswith(_SKIP_MODIFIED_PREFIXES):
                 continue
             try:
                 content = f.read_text()
@@ -1639,6 +1653,7 @@ def _reset_judge_call_meta():
     _JUDGE_CALL_META.verdict_transport = None
     _JUDGE_CALL_META.usage = None
     _JUDGE_CALL_META.denials = None
+    _JUDGE_CALL_META.staging_skips = None
 
 
 def _pop_verdict_transport():
@@ -1922,6 +1937,43 @@ def _pop_judge_denials():
     denials = getattr(_JUDGE_CALL_META, "denials", None)
     _JUDGE_CALL_META.denials = None
     return denials
+
+
+def _record_staging_skips(skips):
+    """Thread-local copy of the case-output entries staging left out.
+
+    A skipped hardlinked, sparse or over-limit file means the judge graded an
+    incomplete workspace. That is kept in the per-case result for the operator
+    to read; nothing consumes it and no threshold currently gates on it. It is
+    never shown to the judge: telling it content was omitted invites it to
+    discount the case for a reason unrelated to the agent under test.
+    """
+    _JUDGE_CALL_META.staging_skips = skips or None
+
+
+def _pop_staging_skips():
+    skips = getattr(_JUDGE_CALL_META, "staging_skips", None)
+    _JUDGE_CALL_META.staging_skips = None
+    return skips
+
+
+def _staging_skip_key(reason):
+    """The known skip-reason prefix `reason` starts with, else its first clause
+    (the text varies per entry: sizes, limits, OS error text)."""
+    for prefix in _STAGING_SKIP_REASONS + _CASE_OUTPUT_SKIP_REASONS:
+        if reason.startswith(prefix):
+            return prefix
+    return reason.split(";", 1)[0].split(" (", 1)[0]
+
+
+def _summarize_staging_skips(skips):
+    """`[(path, reason), ...]` -> `{"count": n, "reasons": {reason: n}}`, keyed
+    by reason prefix (the shape `_summarize_denials` has, by reason not tool)."""
+    reasons = {}
+    for _path, reason in skips or []:
+        key = _staging_skip_key(str(reason))
+        reasons[key] = reasons.get(key, 0) + 1
+    return {"count": len(skips or []), "reasons": reasons}
 
 
 def _summarize_denials(denials):
@@ -3216,6 +3268,49 @@ def _emit_stale_field_warnings(refs_by_judge, records):
             )
 
 
+_OUTPUTS_NAME_RE = re.compile(r"\boutputs\b")
+
+
+def _template_reads_outputs(template_text):
+    """Whether a Jinja template references ``outputs`` in an expression or
+    statement. Plain prose that happens to say "outputs" does not count.
+
+    Uses Jinja's own parser, so a delimiter inside a quoted string
+    (``{{ '}}' ~ outputs.files }}``) cannot hide a reference. A template that
+    does not parse is treated as reading ``outputs`` — an unneeded file load
+    costs memory, a missing one changes a verdict.
+    """
+    if not template_text:
+        return False
+    from jinja2 import Environment, meta
+    try:
+        ast = Environment().parse(template_text)
+    except Exception:
+        return True
+    return "outputs" in meta.find_undeclared_variables(ast)
+
+
+def _judges_read_files(judges):
+    """Whether any judge needs the case's output files loaded into the record.
+
+    Every judge kind reads ``outputs["files"]`` (templated prompts, pairwise,
+    inline checks, code/module and builtin judges) except an agent judge, which
+    gets the files staged on disk — unless its own prompt renders
+    ``{{ outputs }}``, which `_load_agent_judge` flags on the scorer. An ``if:``
+    condition sees the record as ``outputs``, so one that names it counts too.
+    Anything unrecognised loads the files: an unneeded read costs memory, a
+    missing one changes a verdict.
+    """
+    for _name, scorer, condition, judge_type, _n in judges:
+        if condition and _OUTPUTS_NAME_RE.search(str(condition)):
+            return True
+        if judge_type != "agent":
+            return True
+        if getattr(scorer, "reads_record_files", True):
+            return True
+    return False
+
+
 def score_cases(judges, case_dirs, config, run_id=None, samples_override=None):
     """Score all cases with all judges in parallel.
 
@@ -3241,10 +3336,12 @@ def score_cases(judges, case_dirs, config, run_id=None, samples_override=None):
     # not be failed against the [1, 5] default).
     judge_bounds = {jc.name: _numeric_bounds(jc)
                     for jc in config.judges if jc.score_range}
+    load_files = _judges_read_files(judges)
 
     def _score_case(case_dir):
         case_id = case_dir.name
-        record = load_case_record(case_dir, config, run_id=run_id)
+        record = load_case_record(case_dir, config, run_id=run_id,
+                                  load_files=load_files)
         case_results = {}
         for name, scorer, condition, judge_type, judge_samples in judges:
             # Step-scoped judges see that step's trace; others the whole case.
@@ -3286,6 +3383,7 @@ def score_cases(judges, case_dirs, config, run_id=None, samples_override=None):
             transports = []
             usages = []
             denials = []
+            staging_skips = []
 
             def _run_scorer():
                 # One judge call → (value, rationale). The usage record comes
@@ -3310,6 +3408,7 @@ def score_cases(judges, case_dirs, config, run_id=None, samples_override=None):
                     if mode and mode != "function":
                         modes.append(mode)
                     denials.extend(_pop_judge_denials() or [])
+                    staging_skips.extend(_pop_staging_skips() or [])
                     transport = _pop_verdict_transport()
                     if transport:
                         transports.append(transport)
@@ -3342,6 +3441,12 @@ def score_cases(judges, case_dirs, config, run_id=None, samples_override=None):
             if usages and isinstance(case_results.get(name), dict):
                 case_results[name]["usage"] = (usages[0] if len(usages) == 1
                                                else _sum_usage(usages))
+            if staging_skips and isinstance(case_results.get(name), dict):
+                # The judge graded a workspace missing these entries. Kept in
+                # the result for the operator (no threshold reads it);
+                # deliberately not in the judge's prompt (see `_record_staging_skips`).
+                case_results[name]["staging_skips"] = _summarize_staging_skips(
+                    staging_skips)
             if denials and isinstance(case_results.get(name), dict):
                 # Evidence that the tool policy did something. A judge that
                 # tried to leave its staged inputs and was stopped reads
@@ -3727,12 +3832,68 @@ _STAGING_SKIP_REASONS = (
     "symlink loop",
     "resolves outside",
     "name already staged",
+    "already staged via another path",
 )
 
 # `_copy_tree_dereferenced` recurses once per directory level. Real context
 # trees are shallow; a pathological one must not take the interpreter's
 # recursion limit with it and surface as something unrelated.
 _MAX_CONTEXT_DEPTH = 64
+
+# Skip reasons that only apply to case outputs (skill-produced, untrusted): a
+# tree over a staging limit is staged up to it, and a hardlinked or sparse file
+# is left out, rather than failing the judge. `agent.context` still raises.
+_CASE_OUTPUT_SKIP_REASONS = ("deeper than", "staging limit exceeded",
+                             "hardlinked file", "sparse file")
+
+# Cumulative bounds on one staging operation. Depth and ancestor-loop checks do
+# not stop an acyclic fan-out (two links per level to an already-visited
+# directory expands exponentially) and staging runs before the judge timeout
+# starts, so the copy itself carries limits. Exceeding one fails the judge for
+# `agent.context`; for case outputs (untrusted, skill-produced) it only skips
+# what is over the limit — see `_stage_agent_workspace`.
+_MAX_STAGE_ENTRIES = 1_000_000
+_MAX_STAGE_BYTES = 20 * 1024 ** 3
+_MAX_STAGE_SECONDS = 600
+
+# Untrusted-output copies refuse a sparse file that claims this much more
+# apparent size than it has allocated, and a copy that would leave less than
+# this much free disk beyond the file itself.
+_SPARSE_SLACK_BYTES = 1024 ** 2
+_MIN_FREE_DISK_BYTES = 100 * 1024 ** 2
+
+
+class _StagingBudget:
+    """Entry, byte and wall-clock allowance shared by one staging operation."""
+
+    def __init__(self, max_entries=_MAX_STAGE_ENTRIES,
+                 max_bytes=_MAX_STAGE_BYTES, max_seconds=_MAX_STAGE_SECONDS):
+        self.max_entries = max_entries
+        self.max_bytes = max_bytes
+        self.max_seconds = max_seconds
+        self.entries = 0
+        self.bytes = 0
+        self.exceeded = None
+        # Real paths of the directories already staged by this walk, so one
+        # reached again through another link is not copied twice.
+        self.staged_dirs = set()
+        self._deadline = time.monotonic() + max_seconds
+
+    def charge(self, nbytes=0, entries=1):
+        """Account for staged entries and bytes; returns a reason once a limit is hit
+        (and on every later call), else None."""
+        if self.exceeded is None:
+            self.entries += entries
+            self.bytes += nbytes
+            if self.entries > self.max_entries:
+                self.exceeded = f"more than {self.max_entries} entries"
+            elif self.bytes > self.max_bytes:
+                self.exceeded = f"more than {self.max_bytes} bytes"
+            elif time.monotonic() > self._deadline:
+                self.exceeded = f"longer than {self.max_seconds}s"
+        if self.exceeded is None:
+            return None
+        return f"staging limit exceeded ({self.exceeded}); not copied"
 
 
 def _copy_path(src, dest):
@@ -3753,16 +3914,19 @@ def _copy_path(src, dest):
     or duplicated dozens of times, with nothing anywhere saying so.
     """
     if src.is_dir():
-        return _copy_tree_dereferenced(src, dest, os.path.realpath(src), ())
+        return _copy_tree_dereferenced(src, dest, os.path.realpath(src), (),
+                                       budget=_StagingBudget())
     shutil.copy2(src, dest)
     return []
 
 
-def _copy_tree_dereferenced(src, dest, confine_root, ancestors):
+def _copy_tree_dereferenced(src, dest, confine_root, ancestors, skip=None,
+                            budget=None, *, untrusted=False, _deferred=None):
     """Recursive worker for :func:`_copy_path`.
 
-    ``confine_root`` is the real path of the declared ``agent.context`` entry.
-    Dereferencing follows links, so without it a link inside the tree
+    ``confine_root`` is the real path of the declared entry being staged (an
+    ``agent.context`` entry, or a case output dir). Dereferencing follows
+    links, so without it a link inside the tree
     (``docs/env-ref -> ../.env``, or just ``latest -> ..``) would pull material
     the author never declared into the judge's workspace — and an upward link
     can make the copy feed itself. Every resolved target must stay under it.
@@ -3770,7 +3934,35 @@ def _copy_tree_dereferenced(src, dest, confine_root, ancestors):
     ``ancestors`` holds the real paths of the directories above ``src`` in this
     walk, so a link back into one of them is reported as a loop instead of
     being followed.
+
+    ``skip``, when given, is called with each entry name directly under
+    ``src`` (this level only, not deeper); a true result leaves the entry out
+    without reporting it.
+
+    ``budget`` (a :class:`_StagingBudget`, shared by the whole walk) bounds the
+    entries, bytes and time one staging operation may spend; a fresh one is
+    made when omitted.
+
+    ``untrusted`` marks a tree written by the skill under test (case outputs),
+    as opposed to one the eval author declared (``agent.context``). Such a tree
+    may hold a hardlink to a file elsewhere on the host and a sparse file
+    sized to fill the disk; both are skipped rather than copied.
+
+    The walk makes two passes over the whole tree. Pass 1 descends only real
+    (non-symlink) directories and registers each real path in
+    ``budget.staged_dirs``; every directory symlink met on the way is set
+    aside. Pass 2 then handles those links, so one whose target is already
+    registered is the entry reported as "already staged" — never the real
+    directory, however the two are ordered in the tree (``a/link -> ../z/src``
+    visited before ``z/src``). ``_deferred`` is the internal list of set-aside
+    links, shared by the recursion of one pass 1; only the call that creates it
+    runs pass 2.
     """
+    if budget is None:
+        budget = _StagingBudget()
+    run_links = _deferred is None
+    if run_links:
+        _deferred = []
     if len(ancestors) >= _MAX_CONTEXT_DEPTH:
         return [(str(src), f"deeper than {_MAX_CONTEXT_DEPTH} levels; not copied")]
     try:
@@ -3781,43 +3973,130 @@ def _copy_tree_dereferenced(src, dest, confine_root, ancestors):
         return [(str(src), str(exc))]
     ancestors = ancestors + (os.path.realpath(src),)
     errors = []
+
+    def stage_dir(child, target, ancestors):
+        """Stage the directory `child` (real, or a link to one); charges the
+        budget and applies the confinement, loop and alias checks."""
+        over = budget.charge()
+        if over:
+            errors.append((str(child), over))
+            return False
+        real = os.path.realpath(child)
+        if real != confine_root and not real.startswith(
+                confine_root.rstrip(os.sep) + os.sep):
+            errors.append(
+                (str(child), "resolves outside the staged entry; not copied"))
+            return True
+        if real in ancestors:
+            errors.append((str(child), "symlink loop; not copied"))
+            return True
+        if real in budget.staged_dirs:
+            errors.append((str(child),
+                           "already staged via another path; not copied"))
+            return True
+        budget.staged_dirs.add(real)
+        # Recurse through the resolved path: walking via `child` would stack
+        # one more symlink per level, and the OS refuses to resolve more than
+        # a fixed number (ELOOP).
+        errors.extend(_copy_tree_dereferenced(
+            Path(real), target, confine_root, ancestors, budget=budget,
+            untrusted=untrusted, _deferred=_deferred))
+        return True
+
     for entry in entries:
+        if skip is not None and skip(entry.name):
+            continue
         child, target = Path(entry.path), dest / entry.name
         try:
+            if entry.is_symlink() and entry.is_dir(follow_symlinks=True):
+                # Pass 2: a real directory anywhere in the tree claims its
+                # path first.
+                _deferred.append((child, target, ancestors))
+                continue
+            if entry.is_dir(follow_symlinks=False):
+                if not stage_dir(child, target, ancestors):
+                    break
+                continue
+            over = budget.charge()
+            if over:
+                errors.append((str(child), over))
+                break
             real = os.path.realpath(child)
             if real != confine_root and not real.startswith(
                     confine_root.rstrip(os.sep) + os.sep):
                 errors.append(
-                    (str(child), "resolves outside the context entry; not copied"))
+                    (str(child), "resolves outside the staged entry; not copied"))
                 continue
             # follow_symlinks resolves a relative link against its OWN
             # directory — the part copytree gets wrong. A dangling link is
             # neither a dir nor a file here, and raises nothing.
-            if entry.is_dir(follow_symlinks=True):
-                if real in ancestors:
-                    errors.append((str(child), "symlink loop; not copied"))
-                    continue
-                errors.extend(_copy_tree_dereferenced(child, target,
-                                                      confine_root, ancestors))
-            elif entry.is_file(follow_symlinks=True):
+            if entry.is_file(follow_symlinks=True):
+                st = entry.stat(follow_symlinks=True)
+                if untrusted:
+                    if st.st_nlink > 1:
+                        errors.append((str(child),
+                                       "hardlinked file; not copied"))
+                        continue
+                    blocks = getattr(st, "st_blocks", None)
+                    if (blocks is not None
+                            and st.st_size - blocks * 512 > _SPARSE_SLACK_BYTES):
+                        errors.append((str(child), "sparse file; not copied"))
+                        continue
+                over = budget.charge(st.st_size, entries=0)
+                if over:
+                    errors.append((str(child), over))
+                    break
+                if (shutil.disk_usage(target.parent).free
+                        < st.st_size + _MIN_FREE_DISK_BYTES):
+                    errors.append((str(child),
+                                   "staging limit exceeded (not enough free "
+                                   "disk space); not copied"))
+                    break
                 shutil.copy2(child, target)
             else:
                 errors.append(
                     (str(child), "dangling symlink or special file; not copied"))
         except OSError as exc:
             errors.append((str(child), str(exc)))
+    if run_links:
+        # Pass 2: every real directory of the walk has claimed its path.
+        for child, target, link_ancestors in _deferred:
+            try:
+                if not stage_dir(child, target, link_ancestors):
+                    break
+            except OSError as exc:
+                errors.append((str(child), str(exc)))
     return errors
 
 
+def _escape_staging_text(text):
+    """Make a path or reason safe to print on a log line.
+
+    Paths come from skill-produced (untrusted) trees, so a name can carry a
+    newline, a carriage return or an ESC. Left raw, one could forge a
+    ``::error::``-style workflow command or a fake log line. ``repr`` escapes
+    every control character; a leading ``::`` is broken up as well so the
+    text can never start a workflow command.
+    """
+    text = repr(str(text))[1:-1]
+    return "\\:\\:" + text[2:] if text.startswith("::") else text
+
+
 def _format_staging_problems(problems, limit=10):
-    detail = "; ".join(f"{p}: {why[:200]}" for p, why in problems[:limit])
+    detail = "; ".join(
+        f"{_escape_staging_text(p)}: {_escape_staging_text(why[:200])}"
+        for p, why in problems[:limit])
     more = "" if len(problems) <= limit else f" (+{len(problems) - limit} more)"
     noun = "entry" if len(problems) == 1 else "entries"
     return f"{len(problems)} {noun}: {detail}{more}"
 
 
-def _report_staging_problems(problems):
-    """Split context-staging problems into "lost content" and "nothing to lose".
+def _report_staging_problems(problems, label="agent.context", extra_skip=()):
+    """Split staging problems into "lost content" and "nothing to lose".
+
+    ``label`` names what was being staged (``agent.context`` or the case
+    outputs) in the warning and the error. ``extra_skip`` lists reason
+    prefixes that count as skip reasons alongside `_STAGING_SKIP_REASONS`.
 
     Raises for the first — an unreadable file or an unlistable directory means
     the judge would grade a tree with holes in it and say nothing, which is
@@ -3826,66 +4105,128 @@ def _report_staging_problems(problems):
     entry) carries no gradeable content, so it is reported on stderr and the
     staging stands: a stale link in a snapshotted repo must not take every
     case of every judge down with it.
+
+    Returns the skipped ``(path, reason)`` list (empty when nothing was), so a
+    caller can record what the judge did not get to see.
     """
     if not problems:
-        return
-    skipped = [p for p in problems
-               if any(p[1].startswith(r) for r in _STAGING_SKIP_REASONS)]
+        return []
+    skip_reasons = tuple(_STAGING_SKIP_REASONS) + tuple(extra_skip)
+    skipped = [p for p in problems if p[1].startswith(skip_reasons)]
     lost = [p for p in problems if p not in skipped]
     if skipped:
-        print(f"  WARNING: agent.context skipped "
+        print(f"  WARNING: {label} skipped "
               f"{_format_staging_problems(skipped)}", file=sys.stderr)
     if lost:
         raise RuntimeError(
-            f"staging agent.context failed for {_format_staging_problems(lost)}")
+            f"staging {label} failed for {_format_staging_problems(lost)}")
+    return skipped
 
 
-def _stage_agent_workspace(workspace, record, stage_inputs, context_dirs, root):
+def _stage_case_outputs(workspace, case_dir, output_dirs, selected):
+    """Copy a case's declared output dirs, and collect.py's ``_modified/``,
+    from the case directory into the judge workspace.
+
+    Files are copied, never read into memory, so binary artifacts arrive
+    byte-identical and a large tree (a full checkout staged as an output)
+    costs disk I/O rather than RSS. Links are dereferenced but confined to the
+    output dir they sit in (`_copy_tree_dereferenced`), so an in-case link
+    becomes a regular file and one pointing out of the dir is not followed.
+
+    ``selected`` is the set of top-level names ``agent.inputs`` allows, or
+    None for everything. Returns the ``(path, reason)`` problem list.
+    """
+    def _skip_top(name):
+        # Reserved namespaces: the verdict dir (./output/) and staged context
+        # (./.context/). Case artifacts are skill-produced (untrusted); never let
+        # one pre-seed ./output/score.json and forge a passing verdict (CWE-345/20).
+        # Compared case-insensitively: on a case-insensitive filesystem
+        # `Output/` or `.Context/` is the same directory.
+        return (name.casefold() in ("output", ".context")
+                or (selected is not None and name not in selected))
+
+    # `_modified` is always staged below, with its harness dirs excluded. A
+    # plain declaration of it must not win the dedupe and drop that exclusion.
+    sources = [(str(p), ()) for p in output_dirs or ()
+               if os.path.normpath(str(p)) != "_modified"]
+    sources.append(("_modified", _SKIP_MODIFIED_PREFIXES))
+    normalized = [(os.path.normpath(raw), exclude) for raw, exclude in sources]
+    # Overlapping declarations ("." and "a", or "a" and "a/b") copy once. Drop a
+    # path whenever another declared path is its ancestor, whatever the order:
+    # copying a child first and its parent later would overwrite the child's
+    # read-only files (copy2 keeps the source mode) and fail with EACCES.
+    declared = [rel for rel, _ in normalized]
+    problems = []
+    seen = set()
+    budget = _StagingBudget()
+    for rel, exclude in normalized:
+        if rel in seen or any(
+                other != rel and (other == "." or rel.startswith(other + os.sep))
+                for other in declared):
+            continue
+        seen.add(rel)
+        src = case_dir / rel
+        if not src.is_dir():
+            continue
+        # Containment: an output path that resolves outside the case dir is
+        # never staged (CWE-22); load_case_record rejects it the same way.
+        src = _resolve_under(case_dir, src)
+        if rel == ".":
+            dest, skip = workspace, _skip_top
+        else:
+            if _skip_top(rel.split(os.sep, 1)[0]):
+                continue
+            dest = workspace / rel
+            skip = (lambda name, ex=exclude: name.startswith(ex)) if exclude else None
+        problems.extend(_copy_tree_dereferenced(src, dest, str(src), (),
+                                                skip=skip, budget=budget,
+                                                untrusted=True))
+    return problems
+
+
+def _stage_agent_workspace(workspace, record, stage_inputs, context_dirs, root,
+                           output_dirs=()):
     """Stage an isolated judge workspace.
 
-    - The case's output files (record["files"], relpath -> content), filtered
-      by ``stage_inputs`` (a list of output-dir names; "." or empty = all).
+    - The case's declared ``output_dirs`` (and ``_modified/``) COPIED from the
+      case directory (``record["case_dir"]``), filtered by ``stage_inputs`` (a
+      list of output-dir names; "." or empty = all) — see
+      :func:`_stage_case_outputs`. ``record["files"]`` is not consulted, so the
+      record need not hold the file contents at all.
     - Each ``context_dirs`` entry COPIED under ./.context/<name>, never
       symlinked: every judge can write (it has to, for output/score.json), so
       a link would let a prompt-injected judge write through to real project
       files (CWE-59/829).
     - A pre-created ./output/ dir for the verdict file.
 
-    Raises ``RuntimeError`` when gradeable content under an ``agent.context``
-    entry could not be copied: the judge is told to ground its verdict in that
-    material, so a silent hole in it is the #239 defect arriving by another
-    route. Entries with no content to copy by nature are reported on stderr
-    instead — see :func:`_report_staging_problems`.
+    Raises ``RuntimeError`` when gradeable content under a case output dir or
+    an ``agent.context`` entry could not be copied: the judge is told to ground
+    its verdict in that material, so a silent hole in it is the #239 defect
+    arriving by another route. Entries with no content to copy by nature are
+    reported on stderr instead — see :func:`_report_staging_problems`. So are
+    case-output trees that hit a staging limit, a hardlinked or sparse file:
+    they are skill-produced, and staging stops at the limit. An
+    ``agent.context`` tree over a limit still raises.
+
+    Returns the ``(path, reason)`` list of case-output entries that were
+    skipped, for the caller to record (`_record_staging_skips`).
     """
-    # 1. Output files from the case record.
+    # 1. Output dirs copied from the case directory.
     selected = None
     if stage_inputs:
         names = [str(s).strip("/").split("/")[0] for s in stage_inputs]
         if "." not in names:  # "." means stage everything
             selected = set(names)
-    wsr = workspace.resolve()
-    for rel, content in (record.get("files") or {}).items():
-        if isinstance(content, dict):
-            continue  # skip binary placeholders
-        top = rel.split("/", 1)[0]
-        # Reserved namespaces: the verdict dir (./output/) and staged context
-        # (./.context/). Case artifacts are skill-produced (untrusted); never let
-        # one pre-seed ./output/score.json and forge a passing verdict (CWE-345/20).
-        if top in ("output", ".context"):
-            continue
-        if selected is not None and top not in selected:
-            continue
-        dest = workspace / rel
-        # Containment: case file keys are untrusted (skill-produced); never let a
-        # '..'-bearing relpath write outside the judge workspace (CWE-22).
-        resolved = dest.resolve()
-        if resolved != wsr and wsr not in resolved.parents:
-            continue
-        try:
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.write_text(content)
-        except OSError:
-            pass
+    skips = []
+    case_dir = record.get("case_dir")
+    if case_dir:
+        skips = _report_staging_problems(
+            _stage_case_outputs(workspace, Path(case_dir).resolve(),
+                                output_dirs, selected),
+            "case outputs",
+            # Case outputs are skill-produced: a tree over a staging limit is
+            # staged up to it, not a reason to fail the judge.
+            extra_skip=_CASE_OUTPUT_SKIP_REASONS)
     # 2. Context dirs/files copied under ./.context/, so a judge write cannot
     #    escape through a link to real project files (CWE-59/829).
     if context_dirs:
@@ -3914,6 +4255,7 @@ def _stage_agent_workspace(workspace, record, stage_inputs, context_dirs, root):
         _report_staging_problems(problems)
     # 3. Verdict output dir.
     (workspace / "output").mkdir(parents=True, exist_ok=True)
+    return skips
 
 
 def _load_agent_judge(jc, config, project_root=None):
@@ -3970,6 +4312,7 @@ def _load_agent_judge(jc, config, project_root=None):
                                            agent.get("denied_tools"))
     stage_inputs = agent.get("inputs")  # None/[] => all files
     context_dirs = agent.get("context") or []
+    output_dirs = [o.path for o in config.outputs if o.path]
     is_bool = (jc.feedback_type == "bool")
     agent_timeout = agent.get("timeout")
     timeout_value = (agent_timeout if agent_timeout is not None
@@ -4021,9 +4364,10 @@ def _load_agent_judge(jc, config, project_root=None):
         workspace = Path(tempfile.mkdtemp(prefix="agent-judge-"))
         try:
             try:
-                _stage_agent_workspace(workspace, record, stage_inputs,
-                                       context_dirs, root)
-            except RuntimeError as exc:
+                _record_staging_skips(_stage_agent_workspace(
+                    workspace, record, stage_inputs, context_dirs, root,
+                    output_dirs))
+            except (RuntimeError, ValueError) as exc:
                 raise RuntimeError(f"Agent judge '{jc.name}': {exc}") from exc
             rendered = _render_judge_prompt(prompt, jc, config, arguments,
                                             record)
@@ -4088,6 +4432,9 @@ def _load_agent_judge(jc, config, project_root=None):
         finally:
             shutil.rmtree(workspace, ignore_errors=True)
 
+    # The workspace is staged from disk, so the record's file contents matter
+    # only to a prompt that renders them (see `_judges_read_files`).
+    scorer.reads_record_files = _template_reads_outputs(prompt)
     return scorer
 
 

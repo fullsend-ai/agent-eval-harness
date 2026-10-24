@@ -366,10 +366,14 @@ Every sub-key is optional.
 
 Per case, the harness:
 
-1. **Stages an isolated workspace** in a temp dir — the case's output files (filtered by
-   `agent.inputs`; default all of `outputs["files"]`) plus each `agent.context` entry
+1. **Stages an isolated workspace** in a temp dir — the case's declared output dirs and
+   `_modified/` (filtered by `agent.inputs`; default all), copied straight from the case
+   directory, plus each `agent.context` entry
    copied under `./.context/` are **staged inputs** (copies, so a judge write never reaches the project), and a pre-created
-   `./output/` dir is **writable** for the verdict.
+   `./output/` dir is **writable** for the verdict. Output files are copied, not loaded
+   into memory, so binary files arrive intact and a large tree costs disk I/O, not RAM;
+   a link inside an output dir is staged as a regular file, and one resolving outside it
+   is skipped with a line on stderr.
 2. **Instantiates the judge's own runner** (`RUNNERS[agent.runner.type]`, default
    `claude-code`) with `permissions={"allow": agent.allowed_tools, "deny": agent.denied_tools}`,
    so the judge gets its own runner and tool policy — independent of the skill-under-test, via a
@@ -442,6 +446,15 @@ Per case, the harness:
     content and could not be read **fails the judge**, rather than leaving it to
     grade a tree with holes in it.
 
+    Case outputs are skill-produced, so they are held to a different standard: a
+    hardlinked file, a sparse file, or a tree over a staging limit (entries, bytes,
+    time, depth, free disk) is **reported rather than fatal** — the skill under test
+    must not be able to fail its own grade by planting one. The judge then grades an
+    incomplete workspace, so each such case carries `staging_skips` in the run's
+    results (see [runs directory](../runs-directory.md)), and the judge's prompt is
+    left alone. Staging `agent.context` is unchanged: the same overruns still fail
+    the judge.
+
 ### Output contract
 
 The judge writes `./output/score.json`:
@@ -480,8 +493,9 @@ The judge reads model-generated, **untrusted** case artifacts, so isolation is e
     on a runner with OS-level sandboxing — no network, cleaned host credentials, path
     confinement — because the judge executes against untrusted material (CWE-78/CWE-200).
 
-- Untrusted case-file relpaths are **containment-checked**, so a `..`-bearing key cannot
-  escape the staged workspace (CWE-22).
+- Output paths are **containment-checked**, so one resolving outside the case dir is
+  never staged (CWE-22), and case artifacts named `output/` or `.context/` are never
+  staged over the reserved verdict and context dirs.
 - `runner.workspace_mode: repo` is **rejected** for agent judges — they must run in the
   isolated staged workspace, never the real repo tree (CWE-829).
 
