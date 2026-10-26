@@ -1965,6 +1965,18 @@ def _staging_skip_key(reason):
     return reason.split(";", 1)[0].split(" (", 1)[0]
 
 
+def _evidence_was_omitted(summary):
+    """Whether a `staging_skips` summary names an EVIDENCE-BEARING omission.
+
+    A dangling link, a socket or a loop carries nothing the judge could have
+    read, so it is benign. A hardlinked or sparse file, or content past a
+    staging limit, is material the judge should have seen and did not — and
+    the skill under test chooses what goes in its own output tree.
+    """
+    reasons = (summary or {}).get("reasons") or {}
+    return any(str(r).startswith(_CASE_OUTPUT_SKIP_REASONS) for r in reasons)
+
+
 def _summarize_staging_skips(skips):
     """`[(path, reason), ...]` -> `{"count": n, "reasons": {reason: n}}`, keyed
     by reason prefix (the shape `_summarize_denials` has, by reason not tool)."""
@@ -3320,7 +3332,8 @@ def score_cases(judges, case_dirs, config, run_id=None, samples_override=None):
     if not case_dirs:
         return {"per_case": {}, "aggregated": {n: {"values": [], "mean": None, "pass_rate": None} for n, *_ in judges}}
     per_case = {}
-    aggregated = {name: {"values": [], "errored_cases": 0}
+    aggregated = {name: {"values": [], "errored_cases": 0,
+                         "incomplete_cases": 0}
                   for name, *_ in judges}
     _reset_tool_choice_fallbacks()
     _reset_verdict_state()
@@ -3483,6 +3496,12 @@ def score_cases(judges, case_dirs, config, run_id=None, samples_override=None):
                 for name, result in case_results.items():
                     if name not in aggregated:
                         continue
+                    if _evidence_was_omitted(result.get("staging_skips")):
+                        # Counted as well as, not instead of, the error below:
+                        # the sample already failed, and this records WHY so a
+                        # score threshold can refuse to pass on the survivors.
+                        aggregated[name]["incomplete_cases"] = (
+                            aggregated[name].get("incomplete_cases", 0) + 1)
                     if result.get("value") is not None:
                         aggregated[name]["values"].append(result["value"])
                     elif result.get("error"):
@@ -5135,6 +5154,7 @@ def detect_regressions(current_results, thresholds, baseline_results=None):
         current = current_results.get(judge_name)
         if current is None:
             continue
+        incomplete = current.get("incomplete_cases") or 0
         # When a threshold is configured but its metric is unavailable (None),
         # surface it as a regression instead of silently skipping — a missing
         # metric usually means the judge was skipped for all cases or the
@@ -5169,6 +5189,23 @@ def detect_regressions(current_results, thresholds, baseline_results=None):
                     judge_name, "error_rate",
                     f"<= {threshold['max_error_rate']}", f"{rate:.3f}",
                     f"{errored} of {total} cases errored"))
+        # The sample already failed, so `max_error_rate` prices it like any
+        # other unjudgeable case — that gate is the author saying how much of
+        # the dataset may go unscored, and auto-failing it would make a
+        # tolerant error budget impossible. A SCORE threshold is different:
+        # errors leave the denominator, so `min_pass_rate` would pass on the
+        # survivors — which is the escape, one `ln` wide. No score threshold
+        # is satisfiable while the graded skill omitted evidence.
+        _SCORE_KEYS = ("min_mean", "min_pass_rate", "min_win_rate")
+        if incomplete and any(k in threshold for k in _SCORE_KEYS):
+            scored = current.get("scored_cases") or 0
+            errored = current.get("errored_cases") or 0
+            regressions.append(Regression(
+                judge_name, "incomplete_staging", "== 0", str(incomplete),
+                f"{incomplete} of {max(scored + errored, incomplete)} cases "
+                "omitted evidence from the judge's workspace (see "
+                "`staging_skips`); a score over the remaining cases is not a "
+                "measurement of the agent"))
         if "min_mean" in threshold:
             mean = current.get("mean")
             if mean is None:

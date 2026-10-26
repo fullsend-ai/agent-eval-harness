@@ -1783,3 +1783,92 @@ class TestAgentJudgeModelPrefix:
 
     def test_bare_alias_unchanged(self):
         assert self._model_seen("sonnet") == "sonnet"
+
+
+class TestIncompleteStagingCannotPass:
+    """#260 fails the sample when the graded skill omitted evidence, which
+    makes it an error — and errors leave the `min_pass_rate` denominator. So
+    nine clean passes plus one hardlink-suppressed case still passes a 0.9
+    gate unless the author opted into `max_error_rate`. These drive the real
+    `score_cases` so the bookkeeping itself is under test."""
+
+    def _runner(self):
+        class R:
+            @classmethod
+            def from_config(cls, config, *, log_prefix=None, **overrides):
+                return cls()
+
+            @property
+            def name(self):
+                return "stg"
+
+            def execute(self, target=None, args="", workspace=None,
+                        model=None, **kwargs):
+                out = Path(workspace) / "output"
+                out.mkdir(parents=True, exist_ok=True)
+                (out / "score.json").write_text(
+                    json.dumps({"passed": True, "rationale": "x"}))
+                return RunResult(exit_code=0, stdout="", stderr="",
+                                 duration_s=0.01)
+        return R
+
+    def _case(self, tmp_path, name, *, suppress=False, dangling=False):
+        case_dir = tmp_path / name
+        _make_case(case_dir, {"out/ok.md": "fine"})
+        if suppress:                      # evidence-bearing: a hardlink
+            outside = tmp_path / f"{name}-outside.txt"
+            outside.write_text("the failing artifact")
+            os.link(outside, case_dir / "out" / "linked.txt")
+        if dangling:                      # benign: nothing to read anyway
+            os.symlink("nowhere.txt", case_dir / "out" / "broken.txt")
+        return case_dir
+
+    def _run(self, tmp_path, cases):
+        import score
+        judge = _agent_judge(feedback_type="bool", inputs=["out"])
+        config = _config(judge, outputs=["out"])
+        with _patched_runners(self._runner()):
+            return score.score_cases(load_judges(config), cases, config)
+
+    def test_a_score_threshold_cannot_pass_on_the_survivors(self, tmp_path):
+        from score import detect_regressions
+        res = self._run(tmp_path,
+                        [self._case(tmp_path, "c0", suppress=True)]
+                        + [self._case(tmp_path, f"c{i}") for i in range(1, 10)])
+        agg = res["aggregated"]["arch_score"]
+        assert agg["incomplete_cases"] == 1
+        assert agg["errored_cases"] == 1     # as well as, not instead of
+        regs = detect_regressions(res["aggregated"],
+                                  {"arch_score": {"min_pass_rate": 0.9}})
+        assert "incomplete_staging" in [r.metric for r in regs]
+
+    def test_max_error_rate_still_prices_it_rather_than_auto_failing(
+            self, tmp_path):
+        from score import detect_regressions
+        res = self._run(tmp_path,
+                        [self._case(tmp_path, "c0", suppress=True)]
+                        + [self._case(tmp_path, f"c{i}") for i in range(1, 10)])
+        # 1 of 10 unscored; an author who budgeted 20% is not auto-failed.
+        assert detect_regressions(
+            res["aggregated"], {"arch_score": {"max_error_rate": 0.2}}) == []
+        assert detect_regressions(
+            res["aggregated"], {"arch_score": {"max_error_rate": 0.0}})
+
+    def test_a_benign_skip_does_not_block_a_score_threshold(self, tmp_path):
+        """A dangling link carries nothing the judge could have read."""
+        from score import detect_regressions
+        res = self._run(tmp_path,
+                        [self._case(tmp_path, "c0", dangling=True),
+                         self._case(tmp_path, "c1")])
+        agg = res["aggregated"]["arch_score"]
+        assert agg["incomplete_cases"] == 0
+        assert detect_regressions(
+            res["aggregated"], {"arch_score": {"min_pass_rate": 1.0}}) == []
+
+    def test_a_clean_run_is_unaffected(self, tmp_path):
+        from score import detect_regressions
+        res = self._run(tmp_path,
+                        [self._case(tmp_path, f"c{i}") for i in range(3)])
+        assert res["aggregated"]["arch_score"]["incomplete_cases"] == 0
+        assert detect_regressions(
+            res["aggregated"], {"arch_score": {"min_pass_rate": 1.0}}) == []
