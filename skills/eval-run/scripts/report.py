@@ -1113,6 +1113,14 @@ def _render_run_config(run_result, baseline_result=None, summary=None,
         ("Effort", "effort"),
         ("Agent", "agent"),
         ("Agent Version", "agent_version"),
+        # fullsend runner provenance (eval_params); absent for other runners.
+        ("fullsend Agent", "fullsend_agent"),
+        ("fullsend Version", "fullsend_version"),
+        ("OpenShell Version", "openshell_version"),
+        ("Sandbox Image", "sandbox_image"),
+        ("Sandbox Image Source", "sandbox_image_source"),
+        ("Sandbox Arch", "sandbox_arch"),
+        ("Agent Harness Commit", "agent_harness_commit"),
         ("Duration", "duration_s"),
         ("Cost", "cost_usd"),
         ("Turns", "num_turns"),
@@ -1123,6 +1131,14 @@ def _render_run_config(run_result, baseline_result=None, summary=None,
     # Optional fields that are hidden when not set on either run, to avoid
     # showing rows of "—" for knobs the user isn't using (e.g. effort).
     optional_fields = {"effort"}
+    # Shown only when the run (or baseline) recorded the key at all, so a
+    # recorded null renders as "—" while other runners show no row.
+    recorded_fields = {"fullsend_agent", "fullsend_version", "openshell_version",
+                       "sandbox_image", "sandbox_image_source", "sandbox_arch",
+                       "agent_harness_commit"}
+
+    def _recorded(rr, key):
+        return bool(rr) and (key in rr or key in (rr.get("eval_params") or {}))
 
     def _lookup(rr, key):
         if not rr:
@@ -1174,6 +1190,9 @@ def _render_run_config(run_result, baseline_result=None, summary=None,
         # avoid showing a row of "—" for a feature the user isn't using.
         if (key in optional_fields and cur == "—"
                 and (not has_bl or _fmt(key, _lookup(baseline_result, key)) == "—")):
+            continue
+        if (key in recorded_fields and not _recorded(run_result, key)
+                and not _recorded(baseline_result, key)):
             continue
         html += '<div class="kv">'
         html += f'<dt>{label}</dt>'

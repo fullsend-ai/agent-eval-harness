@@ -2065,7 +2065,8 @@ def _execute_per_case(args, config, runner, runner_cls,
         "agent": runner.name,
         "agent_version": getattr(runner, "version", ""),
         "execution_mode": config.execution.mode,
-        "eval_params": eval_params or {},
+        "eval_params": _with_runner_provenance(
+            eval_params, runner, _case_console_logs(output_dir, case_results)),
         "per_case": case_results,
         "message_ids": sorted({i for r in case_results.values()
                                for i in (r.get("message_ids") or [])}),
@@ -2089,6 +2090,40 @@ def _execute_per_case(args, config, runner, runner_cls,
           f"{sum(1 for r in case_results.values() if r['exit_code'] != 0)} FAIL)")
 
     sys.exit(worst_exit)
+
+
+def _with_runner_provenance(eval_params, runner, console_texts):
+    """``eval_params`` plus the runner's run-level provenance, for runners that
+    record one (fullsend: versions, sandbox image, harness commit). Other
+    runners' params are returned unchanged, so those fields stay absent."""
+    params = dict(eval_params or {})
+    provenance = getattr(runner, "provenance", None)
+    if not callable(provenance):
+        return params
+    try:
+        fields = provenance(console_texts)
+    except Exception as exc:  # provenance must never fail a run
+        print(f"WARNING: could not record {runner.name} provenance: {exc}",
+              file=sys.stderr)
+        return params
+    if isinstance(fields, dict):
+        params.update(fields)
+    return params
+
+
+def _case_console_logs(output_dir, case_results, max_chars=2_000_000):
+    """Each case's captured runner console output (``cases/<id>/stderr.log``)."""
+    texts = []
+    for case_id in sorted(case_results):
+        path = output_dir / "cases" / case_id / "stderr.log"
+        if path.is_symlink() or not path.is_file():
+            continue
+        try:
+            with open(path, errors="replace") as fh:
+                texts.append(fh.read(max_chars))
+        except OSError:
+            continue
+    return texts
 
 
 def _copy_input_files_batch(workspace, output_dir):
@@ -2146,7 +2181,7 @@ def _save_result(result, args, output_dir, runner, model, eval_params=None):
         "agent": runner.name,
         "agent_version": getattr(runner, "version", ""),
         "execution_mode": "batch",
-        "eval_params": eval_params or {},
+        "eval_params": _with_runner_provenance(eval_params, runner, [result.stderr]),
         "message_ids": result.message_ids or [],
         "cost_source": result.cost_source,
         "error_class": result.error_class,

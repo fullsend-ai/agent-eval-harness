@@ -30,6 +30,7 @@ except ImportError:
           file=sys.stderr)
     sys.exit(0)
 
+from agent_eval.agent.fullsend import PROVENANCE_KEYS as FULLSEND_PROVENANCE_KEYS
 from agent_eval.ci_context import (
     collect_ci_context,
     find_harness_snapshot,
@@ -342,6 +343,11 @@ def main():
             params["subagent_model"] = run_result["subagent_model"]
         if run_result.get("agent"):
             params["agent"] = run_result["agent"]
+        # fullsend runner provenance; absent (and not logged) for other runners.
+        eval_params = run_result.get("eval_params") or {}
+        for key in FULLSEND_PROVENANCE_KEYS:
+            if eval_params.get(key) is not None:
+                params[key] = str(eval_params[key])
         for key, value in params.items():
             if value:
                 mlflow.log_param(key, value)

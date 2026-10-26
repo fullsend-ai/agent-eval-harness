@@ -398,6 +398,29 @@ runner:
   extra_args: [--keep-sandbox]
 ```
 
+#### Run provenance
+
+A fullsend run records what executed it, so results stay comparable across runs.
+The fields go into `eval_params` in the run-level `run_result.json`. The report's
+Run Configuration header shows them, and `/eval-mlflow` logs the non-null ones as
+MLflow run parameters. The fields are captured once per run:
+
+| Field | Source |
+|---|---|
+| `fullsend_agent` | `runner.agent` |
+| `fullsend_version` | `<binary> version`, falling back to `<binary> --version` |
+| `openshell_version` | `openshell version` / `openshell --version` when `openshell` is on `PATH` |
+| `sandbox_image` | The `Image:` line in fullsend's console output (the run's captured `stderr.log`). Falls back to `image:` in `<fullsend_dir>/harness/<agent>.yaml` only when no invocation printed that line |
+| `sandbox_image_source` | `"fullsend-output"` or `"harness-file"`, depending on where `sandbox_image` came from |
+| `sandbox_arch` | The architecture fullsend printed next to the image or on an `Arch:` line, if it printed one |
+| `agent_harness_commit` | `git rev-parse HEAD` of `fullsend_dir` when it is inside a git checkout |
+
+The console output is authoritative for the image: `FULLSEND_SANDBOX_IMAGE` and
+`FULLSEND_SANDBOX_ARCH` in fullsend's environment (the runner passes the caller's
+environment through) replace the harness's pinned image and architecture. Every
+field is optional. A missing tool or a failed parse records `null` and prints a
+warning, and never fails the run. Other runners do not write these keys at all.
+
 ### `workspace_mode`
 
 Execution context. Validated at load time — only `None` or `"repo"` are accepted (a
