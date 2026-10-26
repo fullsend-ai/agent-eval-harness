@@ -3946,7 +3946,10 @@ def _copy_tree_dereferenced(src, dest, confine_root, ancestors, skip=None,
     ``untrusted`` marks a tree written by the skill under test (case outputs),
     as opposed to one the eval author declared (``agent.context``). Such a tree
     may hold a hardlink to a file elsewhere on the host and a sparse file
-    sized to fill the disk; both are skipped rather than copied.
+    sized to fill the disk; both are skipped rather than copied. Only such a
+    tree is deduplicated by real path: a directory reached through several
+    links is staged once. A trusted tree keeps every non-cyclic directory
+    alias as its own path (bounded by the ancestor check and ``budget``).
 
     The walk makes two passes over the whole tree. Pass 1 descends only real
     (non-symlink) directories and registers each real path in
@@ -3990,7 +3993,12 @@ def _copy_tree_dereferenced(src, dest, confine_root, ancestors, skip=None,
         if real in ancestors:
             errors.append((str(child), "symlink loop; not copied"))
             return True
-        if real in budget.staged_dirs:
+        # Only an untrusted tree is deduplicated. An `agent.context` tree is
+        # author-declared, and a directory alias in it (`vendor/lib ->
+        # ../src/lib`) is a path the judge may be told to read or import
+        # through, so it is materialized; the ancestor-loop check above and
+        # the staging budget still bound it.
+        if untrusted and real in budget.staged_dirs:
             errors.append((str(child),
                            "already staged via another path; not copied"))
             return True

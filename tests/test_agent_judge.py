@@ -897,35 +897,35 @@ class TestOutputStagingByCopy:
         with pytest.raises(RuntimeError, match="not enough free disk space"):
             _stage_agent_workspace(ws2, {"files": {}}, None, ["ctxdir"], tmp_path)
 
-    def test_directory_reached_twice_is_staged_once(self, tmp_path, capsys):
-        """Item 6: 18 levels of two links to the same next directory finish
-        quickly and do not raise, for both callers."""
+    @staticmethod
+    def _build_fanout(root, levels):
+        """`levels` levels of two links to the same next directory."""
+        cur = root
+        cur.mkdir(parents=True)
+        for _ in range(levels):
+            nxt = cur / "real"
+            nxt.mkdir()
+            os.symlink("real", cur / "a")
+            os.symlink("real", cur / "b")
+            cur = nxt
+        (cur / "leaf.txt").write_text("x")
+
+    def test_case_output_directory_reached_twice_is_staged_once(
+            self, tmp_path, capsys):
+        """18 levels of two links to the same next directory finish quickly
+        and do not raise for an untrusted case output."""
         import time
-        from score import _copy_path, _stage_agent_workspace
+        from score import _stage_agent_workspace
 
-        def build(root):
-            cur = root
-            cur.mkdir(parents=True)
-            for _ in range(18):
-                nxt = cur / "real"
-                nxt.mkdir()
-                os.symlink("real", cur / "a")
-                os.symlink("real", cur / "b")
-                cur = nxt
-            (cur / "leaf.txt").write_text("x")
-
-        build(tmp_path / "case" / "out")
-        build(tmp_path / "ctxdir")
+        self._build_fanout(tmp_path / "case" / "out", 18)
         ws = tmp_path / "ws"
         ws.mkdir()
         start = time.monotonic()
         _stage_agent_workspace(ws, {"files": {}, "case_dir": str(tmp_path / "case")},
-                               None, ["ctxdir"], tmp_path, ["out"])
+                               None, [], tmp_path, ["out"])
         assert time.monotonic() - start < 5
         err = capsys.readouterr().err
         assert "already staged via another path" in err
-        assert any(p.name == "leaf.txt" for p in (ws / "out").rglob("leaf.txt"))
-        assert any(p.name == "leaf.txt" for p in (ws / ".context").rglob("leaf.txt"))
         # The deepest file really is staged, at the real depth, and walking the
         # links never stacked enough of them for the OS to refuse (ELOOP).
         leaf = ws / "out"
@@ -934,11 +934,51 @@ class TestOutputStagingByCopy:
         assert (leaf / "leaf.txt").read_text() == "x"
         assert "too many levels of symbolic links" not in err
         assert "ELOOP" not in err
+
+    def test_context_directory_alias_is_materialized(self, tmp_path, capsys):
+        """`vendor/lib -> ../src/lib` in an agent.context tree stays readable
+        through the alias path, as well as through the real one."""
+        from score import _stage_agent_workspace
+        ctx = tmp_path / "ctxdir"
+        (ctx / "src" / "lib").mkdir(parents=True)
+        (ctx / "src" / "lib" / "mod.py").write_text("VALUE = 1")
+        (ctx / "vendor").mkdir()
+        os.symlink("../src/lib", ctx / "vendor" / "lib")
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        _stage_agent_workspace(ws, {"files": {}}, None, ["ctxdir"], tmp_path)
+        staged = ws / ".context" / "ctxdir"
+        assert (staged / "src" / "lib" / "mod.py").read_text() == "VALUE = 1"
+        assert (staged / "vendor" / "lib" / "mod.py").read_text() == "VALUE = 1"
+        assert not (staged / "vendor" / "lib").is_symlink()
+        assert "already staged" not in capsys.readouterr().err
+
+    def test_context_directory_alias_still_detects_a_loop(self, tmp_path):
+        """Materializing aliases does not follow a link back into an ancestor."""
+        from score import _copy_path
+        ctx = tmp_path / "ctxdir"
+        (ctx / "a").mkdir(parents=True)
+        (ctx / "a" / "f.txt").write_text("x")
+        os.symlink("..", ctx / "a" / "up")
+        problems = _copy_path(ctx, tmp_path / "dest")
+        assert any(why.startswith("symlink loop") for _p, why in problems)
+        assert (tmp_path / "dest" / "a" / "f.txt").read_text() == "x"
+
+    def test_context_alias_fanout_is_bounded_by_the_budget(self, tmp_path):
+        """Without alias dedupe, an acyclic fan-out in agent.context is cut off
+        by the staging budget instead of expanding without end."""
+        import time
+        from score import _StagingBudget, _copy_tree_dereferenced
+
+        self._build_fanout(tmp_path / "ctxdir", 18)
+        budget = _StagingBudget(max_entries=500)
         start = time.monotonic()
-        problems = _copy_path(tmp_path / "ctxdir", tmp_path / "dest")
+        errors = _copy_tree_dereferenced(
+            tmp_path / "ctxdir", tmp_path / "dest",
+            str((tmp_path / "ctxdir").resolve()), (), budget=budget)
         assert time.monotonic() - start < 5
-        assert any("already staged via another path" in why for _p, why in problems)
-        assert not any("symbolic links" in why for _p, why in problems)
+        assert any("staging limit exceeded" in why for _p, why in errors)
+        assert budget.entries <= 501
 
     def test_real_directory_is_staged_before_a_link_to_it(self, tmp_path, capsys):
         """`latest -> run-3`: `run-3/` is staged and the alias is the one
