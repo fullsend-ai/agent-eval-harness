@@ -40,7 +40,8 @@ and gives each its own throwaway workspace under
 `/tmp/agent-eval/<run-id>/cases/<case-id>/`. Each workspace gets:
 
 - the case's `input.yaml` (and `answers.yaml`, plus any `dataset.workspace.files`),
-- symlinks to project resources (`scripts`, `skills`, `.context`, `CLAUDE.md`, …),
+- symlinks to project resources (`scripts`, `skills`, `.context`, `CLAUDE.md`, …, plus any
+  [`execution.symlinks`](../reference/config/execution.md#staging-extra-project-entries) entries),
 - freshly-generated output directories from the `outputs` block,
 - a per-workspace `.claude/settings.json` (the project's permissions and hooks
   carried over, the harness's own hooks, injected env, and the synthesized

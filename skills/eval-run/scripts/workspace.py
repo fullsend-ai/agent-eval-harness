@@ -29,7 +29,7 @@ from pathlib import Path
 
 import yaml
 
-from agent_eval.config import EvalConfig, deep_merge
+from agent_eval.config import EvalConfig, deep_merge, workspace_source_roots
 from agent_eval.tools.interception import extract_tool_patterns
 from agent_eval.tools.permissions import compile_permission_rules
 from agent_eval.workspace_provisioning import materialize_shared_files
@@ -178,7 +178,9 @@ def main():
     # the project's .claude/ directory instead.
     project_root = Path.cwd()
     symlink_names, configured = _resolve_symlink_names(config, args)
-    _link_project_entries(workspace, project_root, symlink_names, configured, set())
+    _link_project_entries(
+        workspace, project_root, symlink_names, configured, set(), config
+    )
 
     # .claude is skipped for hooks, so symlink its subdirectories (skills/, …)
     claude_dir = project_root / ".claude"
@@ -283,7 +285,7 @@ def _create_per_case_workspace(workspace, case_dirs, config, args):
 
         # Symlink project resources (skip .claude — we create our own)
         _link_project_entries(
-            case_ws, project_root, symlink_names, configured, warned_missing
+            case_ws, project_root, symlink_names, configured, warned_missing, config
         )
 
         # Symlink .claude subdirectories (skills/, etc.)
@@ -334,14 +336,28 @@ def _resolve_symlink_names(config, args):
     return names, set(extra) - set(DEFAULT_SYMLINKS)
 
 
-def _link_project_entries(dest, project_root, names, configured, warned):
+class StagingError(RuntimeError):
+    """Workspace staging cannot proceed (e.g. a configured entry's path is taken)."""
+
+
+def _link_project_entries(dest, project_root, names, configured, warned, config):
     """Symlink each of *names* from *project_root* into *dest*.
 
     ``.claude`` is always skipped (the workspace gets its own settings.json).
-    An existing link is left alone. A missing entry is skipped — silently for
-    a default, with one warning per run (tracked in *warned*) for a configured
-    ``execution.symlinks`` entry, so a typo surfaces without failing the run.
+    Defaults keep the lenient behaviour: absent from the project or already
+    present in *dest* → skipped silently. A configured ``execution.symlinks``
+    entry is stricter:
+
+    - missing from the project, or whose real location lies outside the
+      project root and the configured plugin dirs
+      (:func:`workspace_source_roots`) → skipped with one warning per run
+      (tracked in *warned*), so a typo or an escaping symlink surfaces
+      without failing the run;
+    - its destination already exists → left alone if it is a symlink to the
+      intended project path, otherwise a :class:`StagingError` (e.g. a copied
+      input file with the same name).
     """
+    roots = None
     for name in names:
         if name == ".claude":
             continue
@@ -351,16 +367,44 @@ def _link_project_entries(dest, project_root, names, configured, warned):
             continue
         target = project_root / name
         link = dest / name
-        if target.exists():
-            if not link.exists():
+        if name not in configured:
+            if target.exists() and not os.path.lexists(link):
                 link.symlink_to(target.resolve())
-        elif name in configured and name not in warned:
-            warned.add(name)
-            print(
-                f"WARNING: execution.symlinks entry {name!r} not found in "
+            continue
+
+        if not target.exists():
+            _warn_once(
+                warned, name,
+                f"execution.symlinks entry {name!r} not found in "
                 f"{project_root}; not linked into the workspace",
-                file=sys.stderr,
             )
+            continue
+        real = target.resolve()
+        if roots is None:
+            roots = workspace_source_roots(config)
+        if not any(real.is_relative_to(root) for root in roots):
+            _warn_once(
+                warned, name,
+                f"execution.symlinks entry {name!r} resolves to {real}, outside "
+                "the project root and runner.plugin_dirs; not linked into the "
+                "workspace",
+            )
+            continue
+        if os.path.lexists(link):
+            if link.is_symlink() and link.resolve() == real:
+                continue
+            raise StagingError(
+                f"execution.symlinks entry {name!r} cannot be linked: "
+                f"{link} already exists in the workspace and is not a link to "
+                f"{real}"
+            )
+        link.symlink_to(real)
+
+
+def _warn_once(warned, name, message):
+    if name not in warned:
+        warned.add(name)
+        print(f"WARNING: {message}", file=sys.stderr)
 
 
 def _create_in_repo_workspace(workspace, case_dirs, config, args):
@@ -1074,4 +1118,8 @@ def _setup_tool_hooks(workspace, config):
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except StagingError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(1)

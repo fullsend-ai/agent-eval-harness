@@ -15,7 +15,7 @@ task-oriented walkthroughs, see [Guides](../guides/index.md).
 
 - [**eval.yaml schema**](../reference/eval-yaml.md) — Every top-level key, with two minimal configs and a fully annotated example
 - [**extends**](../reference/config/extends.md) — Layer a profile over a base config: merge policy, `!replace`, `config_chain`
-- [**execution**](../reference/config/execution.md) — `mode` (case/batch), `skill`/`prompt`, `arguments`, `timeout`, `max_budget_usd`, `parallelism`, `env`
+- [**execution**](../reference/config/execution.md) — `mode` (case/batch), `skill`/`prompt`, `arguments`, `timeout`, `max_budget_usd`, `parallelism`, `env`, `symlinks`
 - [**runner**](../reference/config/runner.md) — `type`, `effort`, `settings`, `plugin_dirs`, `env`, `system_prompt`, `workspace_mode`
 - [**models**](../reference/config/models.md) — `skill`, `subagent`, `judge`, `hook` roles and CLI precedence
 - [**models.providers**](../reference/config/providers.md) — The `openrouter` block behind `provider:/` ids: key variables, routing table, enforcement, judge client

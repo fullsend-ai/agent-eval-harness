@@ -10,6 +10,7 @@ with one warning, never a failure — a missing default stays silent.
 All tests run under a temp HOME and a temp project as cwd.
 """
 
+import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -210,3 +211,240 @@ def test_batch_mode_links_configured_entry(tmp_path, monkeypatch, capsys):
     assert (ws / "scripts").is_symlink()
     assert not (ws / "nope").exists()
     assert err.count("WARNING: execution.symlinks entry 'nope' not found") == 1
+
+
+# ── Loader: absent/null vs. wrong type ───────────────────────────────────
+
+
+@pytest.mark.parametrize("value", ["false", "'types'", "0", "{a: b}"])
+def test_non_list_value_is_rejected_not_defaulted(tmp_path, value):
+    """Falsy-but-present values must reach ExecutionConfig's type check."""
+    with pytest.raises(ValueError, match="list of names"):
+        _config(tmp_path, f"  symlinks: {value}\n")
+
+
+# ── Reserved names ───────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "name",
+    sorted(
+        {
+            "batch.yaml",
+            "case_order.yaml",
+            "cases",
+            "subagents",
+            "repo_snapshot_before.txt",
+            "input.yaml",
+            "answers.yaml",
+            "_metadata.yaml",
+            "hooks",
+            "tool_handlers.yaml",
+            "output",
+            "repo_modifications.txt",
+            ".claude",
+            ".fullsend-runs",
+        }
+    ),
+)
+def test_static_reserved_names_rejected(tmp_path, name):
+    with pytest.raises(ValueError, match="reserved") as exc:
+        _config(tmp_path, f"  symlinks: [{name}]\n")
+    assert repr(name) in str(exc.value)
+    assert "execution.symlinks" in str(exc.value)
+
+
+def test_output_dir_first_component_is_reserved(tmp_path):
+    text = (
+        "name: t\nexecution:\n  skill: s\n  symlinks: [results]\n"
+        "outputs:\n  - path: results/nested\n"
+    )
+    with pytest.raises(ValueError, match="reserved") as exc:
+        EvalConfig.from_yaml(_write(tmp_path, text))
+    assert "outputs[0].path" in str(exc.value)
+    assert "'results'" in str(exc.value)
+
+
+def test_workspace_file_dest_first_component_is_reserved(tmp_path):
+    text = (
+        "name: t\nexecution:\n  skill: s\n  symlinks: [docs]\n"
+        "dataset:\n  workspace:\n    files:\n"
+        "      - {dest: docs/SKILL.md, source: SKILL.md}\n"
+    )
+    with pytest.raises(ValueError, match="reserved") as exc:
+        EvalConfig.from_yaml(_write(tmp_path, text))
+    assert "dataset.workspace.files[0].dest" in str(exc.value)
+
+
+def test_unrelated_output_does_not_reserve(tmp_path):
+    text = (
+        "name: t\nexecution:\n  skill: s\n  symlinks: [types]\n"
+        "outputs:\n  - path: results\n"
+    )
+    assert EvalConfig.from_yaml(_write(tmp_path, text)).execution.symlinks == ["types"]
+
+
+# ── Staging never writes through into the project ────────────────────────
+
+_INTERCEPT = (
+    "inputs:\n  tools:\n    - match: AskUserQuestion\n      prompt: answer yes\n"
+)
+
+
+def _snapshot(root):
+    """Every file under *root* (symlinks not followed) -> (bytes, mtime_ns)."""
+    snap = {}
+    for p in sorted(root.rglob("*")):
+        if p.is_file() and not p.is_symlink():
+            snap[str(p.relative_to(root))] = (p.read_bytes(), p.stat().st_mtime_ns)
+    return snap
+
+
+def _project_with_claude(tmp_path, monkeypatch):
+    project = _project(tmp_path, monkeypatch)
+    (project / ".claude" / "skills").mkdir(parents=True)
+    (project / ".claude" / "settings.json").write_text('{"permissions": {}}\n')
+    (project / "CLAUDE.md").write_text("# project\n")
+    return project
+
+
+def test_per_case_staging_with_interception_leaves_project_untouched(
+    tmp_path, monkeypatch
+):
+    project = _project_with_claude(tmp_path, monkeypatch)
+    cfg = _config(
+        project,
+        "  symlinks: [types]\n" + _INTERCEPT,
+    )
+    before = _snapshot(project)
+    case_ws = _per_case(tmp_path, project, cfg)
+
+    assert (case_ws / "types").is_symlink()
+    assert (case_ws / ".claude" / "settings.json").is_file()
+    assert not (case_ws / ".claude").is_symlink()
+    assert (case_ws / "hooks").is_dir() and not (case_ws / "hooks").is_symlink()
+    assert _snapshot(project) == before
+
+
+def test_batch_staging_with_interception_leaves_project_untouched(
+    tmp_path, monkeypatch, capsys
+):
+    project = _project_with_claude(tmp_path, monkeypatch)
+    _write(
+        project,
+        "name: t\nexecution:\n  mode: batch\n  skill: s\n  symlinks: [types]\n"
+        "dataset:\n  path: cases\n" + _INTERCEPT,
+    )
+    before = _snapshot(project)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["workspace.py", "--config", "eval.yaml", "--run-id", "symlinks-reserved-test"],
+    )
+    workspace.main()
+    out = capsys.readouterr().out
+    ws = Path(
+        next(line for line in out.splitlines() if line.startswith("WORKSPACE:"))
+        .split(":", 1)[1]
+        .strip()
+    )
+
+    assert (ws / "types").is_symlink()
+    assert (ws / ".claude" / "settings.json").is_file()
+    assert not (ws / ".claude").is_symlink()
+    assert (ws / "tool_handlers.yaml").is_file() or (ws / "hooks").is_dir()
+    assert _snapshot(project) == before
+
+
+# ── Existing destination ─────────────────────────────────────────────────
+
+
+def test_colliding_copied_input_file_fails_staging(tmp_path, monkeypatch):
+    """A per-case input file named like a configured entry must not be skipped."""
+    project = _project(tmp_path, monkeypatch)
+    (project / "cases" / "case-001" / "types").write_text("mine\n")
+    cfg = _config(
+        project,
+        "  symlinks: [types]\ndataset:\n  workspace:\n    files: [types]\n",
+    )
+    with pytest.raises(workspace.StagingError) as exc:
+        _per_case(tmp_path, project, cfg)
+    msg = str(exc.value)
+    assert "'types'" in msg
+    assert str(tmp_path / "ws" / "cases" / "case-001" / "types") in msg
+
+
+def test_existing_link_to_intended_path_is_left_alone(tmp_path, monkeypatch):
+    project = _project(tmp_path, monkeypatch)
+    cfg = _config(project, "  symlinks: [types]\n")
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    (dest / "types").symlink_to(project / "types")
+    workspace._link_project_entries(dest, project, ["types"], {"types"}, set(), cfg)
+    assert (dest / "types").resolve() == (project / "types").resolve()
+
+
+def test_existing_link_elsewhere_fails_staging(tmp_path, monkeypatch):
+    project = _project(tmp_path, monkeypatch)
+    cfg = _config(project, "  symlinks: [types]\n")
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    (dest / "types").symlink_to(project / "scripts")
+    with pytest.raises(workspace.StagingError, match="'types'"):
+        workspace._link_project_entries(dest, project, ["types"], {"types"}, set(), cfg)
+
+
+def test_existing_default_destination_is_skipped_silently(
+    tmp_path, monkeypatch, capsys
+):
+    project = _project(tmp_path, monkeypatch)
+    cfg = _config(project)
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    (dest / "scripts").write_text("copied\n")
+    workspace._link_project_entries(dest, project, ["scripts"], set(), set(), cfg)
+    assert (dest / "scripts").read_text() == "copied\n"
+    assert capsys.readouterr().err == ""
+
+
+# ── Source containment ───────────────────────────────────────────────────
+
+
+def test_configured_symlink_escaping_project_is_skipped_with_warning(
+    tmp_path, monkeypatch, capsys
+):
+    project = _project(tmp_path, monkeypatch, extra_dirs=())
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret").write_text("s\n")
+    (project / "types").symlink_to(outside)
+    case_ws = _per_case(tmp_path, project, _config(project, "  symlinks: [types]\n"))
+
+    assert not os.path.lexists(case_ws / "types")
+    err = capsys.readouterr().err
+    assert err.count("execution.symlinks entry 'types'") == 1
+    assert "outside" in err
+
+
+def test_configured_symlink_into_plugin_dir_is_linked(tmp_path, monkeypatch):
+    project = _project(tmp_path, monkeypatch, extra_dirs=())
+    plugin = tmp_path / "plugin"
+    (plugin / "types").mkdir(parents=True)
+    (project / "types").symlink_to(plugin / "types")
+    cfg = _config(
+        project,
+        f"  symlinks: [types]\nrunner:\n  type: claude-code\n  plugin_dirs: ['{plugin}']\n",
+    )
+    case_ws = _per_case(tmp_path, project, cfg)
+    assert (case_ws / "types").is_symlink()
+
+
+def test_default_entry_escaping_project_is_still_linked(tmp_path, monkeypatch):
+    """Containment applies to configured entries only; defaults are unchanged."""
+    project = _project(tmp_path, monkeypatch, extra_dirs=())
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (project / "skills").symlink_to(outside)
+    case_ws = _per_case(tmp_path, project, _config(project))
+    assert (case_ws / "skills").is_symlink()
+    assert (case_ws / "skills").resolve() == outside.resolve()

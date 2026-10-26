@@ -17,7 +17,7 @@ How data flows from dataset cases through execution, collection, and scoring.
   against the project root or `runner.plugin_dirs`. The same materialization
   (`agent_eval/workspace_provisioning.py::materialize_shared_files`) is reused by the Harbor
   task packager and the S3/EvalHub export step, so shared files behave identically everywhere.
-- Symlinks project resources (`.claude/`, `CLAUDE.md`, `scripts/`, `skills/`, `.context/`, plus any top-level entries listed in `execution.symlinks`; `--symlinks` replaces the list)
+- Symlinks project resources (`.claude/`, `CLAUDE.md`, `scripts/`, `skills/`, `.context/`, plus any top-level entries listed in `execution.symlinks` — reserved harness-written names are rejected at config load; a configured entry that is missing or resolves outside the project root and plugin dirs is skipped with a warning, and one whose workspace path already exists fails staging; `--symlinks` replaces the list)
 - If `inputs.tools` configured, generates `tool_handlers.yaml` and `.claude/settings.json` with hooks
 
 **Workspace structure**:

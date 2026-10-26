@@ -274,8 +274,19 @@ execution:
 
 - Each entry is a single name under the project root — no path separators, no `..`, not
   absolute (a config load error otherwise). Duplicates are dropped, order kept.
-- A configured entry that does not exist in the project root is **skipped with one
-  warning**; the run goes on. A missing default is skipped silently, as before.
+- Names the harness itself writes into a workspace are **reserved** and rejected at config
+  load: `batch.yaml`, `case_order.yaml`, `cases`, `subagents`, `repo_snapshot_before.txt`,
+  `input.yaml`, `answers.yaml`, `_metadata.yaml`, `hooks`, `tool_handlers.yaml`, `output`,
+  `repo_modifications.txt`, `.claude`, `.fullsend-runs`, plus the first path component of
+  every `outputs[].path` and every shared `dataset.workspace.files[].dest`. Linking one
+  would let the harness write through the symlink into the project.
+- A configured entry that does not exist in the project root, or whose real location lies
+  outside the project root and every `runner.plugin_dirs` entry, is **skipped with one
+  warning**; the run goes on. A missing default is skipped silently, as before, and
+  defaults are not containment-checked.
+- A configured entry whose destination already exists in the workspace (for example a
+  per-case input file of the same name) **fails staging** with an error naming the entry
+  and the colliding path; an existing symlink to the intended project path is left as is.
 - Under [`extends:`](extends.md) the list follows the scalar-list policy: the profile's
   entries append to the base's, deduplicated.
 - `workspace.py --symlinks a,b` replaces the whole list — the defaults **and** the
@@ -284,6 +295,9 @@ execution:
   [Harbor](../../guides/harbor.md) and [EvalHub](../../guides/evalhub.md) ship project
   resources separately — baked into the task image, bind-mounted, or from a ConfigMap of
   `.claude/skills/`, `scripts/`, `.context/` and `CLAUDE.md` — and do not read this key.
+  Staging that must also work under Harbor or EvalHub should use
+  [`dataset.workspace.files`](dataset.md) `{dest, source}` instead, which is materialized
+  as a real file and carried into Harbor task packages and EvalHub S3 packaging.
 
 ## Precedence
 
@@ -309,6 +323,7 @@ These errors are raised at **config load time** (`EvalConfig.from_yaml`), not mi
 | `project_hooks` not a boolean | `execution.project_hooks must be a boolean` |
 | `symlinks` not a list of names | `execution.symlinks must be a list of names` |
 | A `symlinks` entry with a separator, `..` or empty | `execution.symlinks[] must be a single path segment …` |
+| A `symlinks` entry naming a harness-written path | `execution.symlinks entry 'hooks' is reserved: …` |
 | Required template field missing at run time | `Missing required field in template: …` |
 
 !!! note "Deprecated top-level `skill:`"
