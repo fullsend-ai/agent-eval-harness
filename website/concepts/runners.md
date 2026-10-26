@@ -418,7 +418,10 @@ Per case (or once per batch) the runner:
    sandbox, and fullsend uploads the file with the repository, so the runner removes
    all three for the duration of the run and puts the original file back
    afterwards, so a later non-fullsend step in the same workspace keeps its hooks,
-   env and directory grants. Because the hooks never reach the sandbox,
+   env and directory grants. The rewrite happens before the copies of step 1 are
+   made, so a workspace link that resolves to the file is copied already stripped;
+   a `.claude` directory or `settings.json` that is itself a symlink cannot be
+   stripped in place and fails the case. Because the hooks never reach the sandbox,
    `inputs.tools` interception is not available with this runner and is rejected at
    config load.
 3. **Sets the environment** of the fullsend process, on top of the caller's

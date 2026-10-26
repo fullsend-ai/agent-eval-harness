@@ -172,7 +172,9 @@ class FullsendRunner(EvalRunner):
                 # Sanitise before materialising: a workspace link that resolves
                 # to .claude/settings.json (the workspace is an allowed root)
                 # is copied as a regular file, and that copy must already be
-                # free of the host-only env, hooks and directory grants.
+                # free of the host-only env, hooks and directory grants. The
+                # sanitiser refuses a symlinked canonical path, so nothing
+                # unsanitised is left for the materialisation to copy.
                 original_settings = _sanitize_settings(workspace)
                 # Links resolving inside this invocation's own workspace (e.g.
                 # a relative link in an isolated workspace) are always allowed.
@@ -505,13 +507,22 @@ def _sanitize_settings(
     the other runners. fullsend uploads the settings file with the repository,
     and the agent definition owns the sandbox's environment and hooks, so those
     keys are removed here. Raises ``ValueError`` when the file exists but cannot
-    be parsed, so the run is refused instead of uploading it unsanitised.
+    be parsed, or when it or its ``.claude`` directory is a symlink, so the run
+    is refused instead of uploading the file unsanitised.
 
     Returns ``(original bytes, original permission bits)`` when the file was
     rewritten (so the caller can restore both for later pipeline steps), else
     ``None``. The mode is ``None`` if it could not be read."""
     path = workspace / ".claude" / "settings.json"
-    if _has_symlink_component(workspace, path) or not path.is_file():
+    if _has_symlink_component(workspace, path):
+        # Fail closed: a symlinked .claude or settings.json cannot be sanitised
+        # in place (writing would follow the link), and once materialised its
+        # copy would be uploaded unsanitised, env credentials included.
+        raise ValueError(
+            f"{path} or its .claude directory is a symlink; the fullsend runner "
+            "cannot sanitise it before upload to the sandbox — replace the link "
+            "with a regular file or directory")
+    if not path.is_file():
         return None
     try:
         original = path.read_bytes()

@@ -378,7 +378,8 @@ The process environment carries `FULLSEND_TASK="/<skill> <args>"`,
 must reference it, or the runner warns), and every `execution.env`, `runner.env` and
 hook-output entry, on top of the caller's environment. The workspace
 `.claude/settings.json` is stripped of `env`, hooks and
-`permissions.additionalDirectories` before the upload. Artifacts reach the workspace
+`permissions.additionalDirectories` before the upload and before symlinks are
+materialised; a symlinked `.claude` or `settings.json` fails the case. Artifacts reach the workspace
 through the project's post-script copy into `--target-repo`; `iteration-N/output/`
 is not read. All iterations' streams and subagent transcripts are mapped. fullsend
 aborts before the pre-script when a `${VAR}` the agent's harness references is unset

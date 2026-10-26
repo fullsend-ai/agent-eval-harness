@@ -1225,6 +1225,42 @@ class TestSettingsFailClosed:
         assert "literal-secret-value" not in result.stderr
         assert not fake_fullsend.exists()  # fullsend never launched
 
+    def test_symlinked_settings_file_refuses_the_run(self, tmp_path, fake_fullsend):
+        """A symlinked canonical settings.json cannot be sanitised in place, and
+        its materialised copy would be uploaded unsanitised: refuse the run."""
+        ws = _workspace(tmp_path)
+        (ws / ".claude").mkdir()
+        secret = ws / "secret-settings.json"
+        secret.write_text(json.dumps({"env": {"API_TOKEN": "literal-secret-value"}}))
+        link = ws / ".claude" / "settings.json"
+        link.symlink_to(Path("..") / "secret-settings.json")
+        result = _runner(tmp_path).execute(
+            target="s", args="", workspace=ws, model="m", timeout_s=60)
+        assert result.exit_code == -1
+        assert "settings.json" in result.stderr
+        assert "literal-secret-value" not in result.stderr
+        assert not fake_fullsend.exists()  # fullsend never launched
+        assert link.is_symlink()  # the link and its target are left alone
+        assert json.loads(secret.read_text()) == {
+            "env": {"API_TOKEN": "literal-secret-value"}}
+
+    def test_symlinked_claude_dir_refuses_the_run(self, tmp_path, fake_fullsend):
+        ws = _workspace(tmp_path)
+        real = ws / "claude-elsewhere"
+        real.mkdir()
+        (real / "settings.json").write_text(
+            json.dumps({"env": {"API_TOKEN": "literal-secret-value"}}))
+        (ws / ".claude").symlink_to("claude-elsewhere")
+        result = _runner(tmp_path).execute(
+            target="s", args="", workspace=ws, model="m", timeout_s=60)
+        assert result.exit_code == -1
+        assert ".claude" in result.stderr
+        assert "literal-secret-value" not in result.stderr
+        assert not fake_fullsend.exists()
+        assert (ws / ".claude").is_symlink()
+        assert json.loads((real / "settings.json").read_text()) == {
+            "env": {"API_TOKEN": "literal-secret-value"}}
+
 
 class TestRunDirContainment:
     def _run_dir(self, tmp_path):
