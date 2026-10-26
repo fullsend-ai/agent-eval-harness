@@ -777,6 +777,27 @@ runner: {type: fullsend, agent: a, workspace_mode: repo}
 """))
 
 
+def test_per_judge_model_checked_only_on_judges_that_call_a_model(tmp_path):
+    """A check judge never calls its `model:`, so a runner-backed one loads
+    under fullsend; an LLM judge carrying the same model is still rejected."""
+    cfg = EvalConfig.from_yaml(_write(tmp_path, """
+name: t
+execution: {skill: s}
+runner: {type: fullsend, agent: a}
+judges:
+  - {name: c, check: 'return True, ""', model: 'runner:/opus'}
+"""))
+    assert cfg.judges[0].model == "runner:/opus"
+    with pytest.raises(ValueError, match=r"judge 'j' model:.*SDK-backed"):
+        EvalConfig.from_yaml(_write(tmp_path, """
+name: t
+execution: {skill: s}
+runner: {type: fullsend, agent: a}
+judges:
+  - {name: j, prompt: rate it, model: 'runner:/opus'}
+"""))
+
+
 def test_discovery_skips_hidden_files_and_dirs(tmp_path):
     """Hidden entries under eval/ are working files, never configs — a
     git-ignored .entity-map.yaml surfacing as an eval config turns

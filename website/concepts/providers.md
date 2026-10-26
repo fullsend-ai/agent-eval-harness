@@ -121,8 +121,8 @@ The rules behind the cells, each enforced at config load:
   requests, and the hook's, go through the same environment and a Claude slug would
   404 there.
 - **`openrouter:/` on the skill needs `runner.type: claude-code`**, per-step runners
-  included. `cursor` has no base-URL knob; `codex`, `cli` and `responses-api` have no
-  OpenRouter transport.
+  included. `cursor` has no base-URL knob; `codex`, `cli`, `fullsend` and `responses-api`
+  have no OpenRouter transport.
 - **Bare-id footgun.** With the `openrouter` block declared but no plan active, a
   bare agent id that has a routing entry or is not an Anthropic id is rejected —
   write `openrouter:/<id>` or drop the pins.

@@ -14,6 +14,7 @@ import os
 import subprocess
 import sys
 import textwrap
+import time
 from pathlib import Path
 
 import pytest
@@ -931,6 +932,43 @@ class TestMaterializeSymlinks:
         assert not (ws / "toplevel").exists() and not (ws / "toplevel").is_symlink()
         assert not list(ws.rglob("credentials"))
 
+    def test_self_referential_link_dropped(self, tmp_path, capsys):
+        """``alias -> .`` with the workspace in allowed_roots: the copy would
+        be staged inside its own target and grow without end."""
+        project = tmp_path / "project"
+        (project / "scripts").mkdir(parents=True)
+        (project / "scripts" / "ok.sh").write_text("ok")
+        ws = _workspace(tmp_path)
+        (ws / "alias").symlink_to(".")
+        (ws / "scripts").symlink_to(project / "scripts")
+
+        materialize_symlinks(ws, [project.resolve(), ws.resolve()])
+
+        assert not (ws / "alias").exists() and not (ws / "alias").is_symlink()
+        assert not list(ws.glob(".alias.fullsend-*"))
+        assert not (ws / "scripts").is_symlink()
+        assert (ws / "scripts" / "ok.sh").is_file()
+        assert "not copying symlink 'alias'" in capsys.readouterr().out
+
+    def test_nested_link_back_into_workspace_skips_staging_dir(self, tmp_path):
+        """A nested link back into the workspace must not descend into the
+        copy being staged there."""
+        project = tmp_path / "project"
+        (project / "scripts").mkdir(parents=True)
+        (project / "scripts" / "ok.sh").write_text("ok")
+        ws = _workspace(tmp_path)
+        (ws / "note.txt").write_text("n")
+        (project / "scripts" / "back").symlink_to(ws)
+        (ws / "scripts").symlink_to(project / "scripts")
+
+        materialize_symlinks(ws, [project.resolve(), ws.resolve()])
+
+        copied = ws / "scripts"
+        assert (copied / "ok.sh").is_file()
+        assert (copied / "back" / "note.txt").read_text() == "n"
+        assert not list(copied.rglob(".scripts.fullsend-*"))
+        assert not list(ws.glob(".scripts.fullsend-*"))
+
 
 def _run_script(script_name, args, cwd, env):
     cmd = [sys.executable, str(SCRIPTS / script_name)] + args
@@ -1123,9 +1161,9 @@ class TestInterruptCleanup:
             def communicate(self, *args, **kwargs):
                 if not interrupted:
                     interrupted.append(True)
-                    deadline = __import__("time").monotonic() + 10
-                    while not pidfile.exists() and __import__("time").monotonic() < deadline:
-                        __import__("time").sleep(0.05)
+                    deadline = time.monotonic() + 10
+                    while not pidfile.exists() and time.monotonic() < deadline:
+                        time.sleep(0.05)
                     raise KeyboardInterrupt
                 return super().communicate(*args, **kwargs)
 
@@ -1134,9 +1172,9 @@ class TestInterruptCleanup:
         with pytest.raises(KeyboardInterrupt):
             runner._run([sys.executable, "-c", code], ws, dict(os.environ), 60)
         leader, child = json.loads(pidfile.read_text())
-        deadline = __import__("time").monotonic() + 5
-        while (_alive(leader) or _alive(child)) and __import__("time").monotonic() < deadline:
-            __import__("time").sleep(0.05)
+        deadline = time.monotonic() + 5
+        while (_alive(leader) or _alive(child)) and time.monotonic() < deadline:
+            time.sleep(0.05)
         assert not _alive(leader)
         if _killpg_permitted():
             assert not _alive(child)

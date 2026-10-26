@@ -589,6 +589,14 @@ def _materialize_link(path: Path, allowed_roots: Optional[list] = None) -> None:
         _warn_outside_roots(path)
         path.unlink()
         return
+    # A link to its own directory or an ancestor of it (``alias -> .``) would
+    # copy the staging directory into itself without end: the copy is staged
+    # next to the link, inside the target.
+    parent = _resolve_link(path.parent)
+    if parent is not None and (target == parent or target in parent.parents):
+        _warn_self_referential(path)
+        path.unlink()
+        return
     if not (target.is_dir() or target.is_file()):
         path.unlink()
         return
@@ -596,7 +604,7 @@ def _materialize_link(path: Path, allowed_roots: Optional[list] = None) -> None:
     try:
         staged = scratch / path.name
         if target.is_dir():
-            _copy_tree(target, staged, allowed_roots, (target,))
+            _copy_tree(target, staged, allowed_roots, (target,), scratch.resolve())
         else:
             shutil.copy2(target, staged)
         path.unlink()
@@ -605,12 +613,14 @@ def _materialize_link(path: Path, allowed_roots: Optional[list] = None) -> None:
         shutil.rmtree(scratch, ignore_errors=True)
 
 
-def _copy_tree(src: Path, dest: Path, allowed_roots, active: tuple) -> None:
+def _copy_tree(src: Path, dest: Path, allowed_roots, active: tuple,
+               staging: Optional[Path] = None) -> None:
     """Copy ``src`` into ``dest`` as real files, following symlinks.
 
     Each nested link resolves relative to its own parent. Dangling links,
-    links leaving ``allowed_roots`` and links back into a directory already
-    being copied (cycles) are skipped; ``.git`` is excluded."""
+    links leaving ``allowed_roots``, links back into a directory already
+    being copied (cycles) and the ``staging`` directory this copy is being
+    built in are skipped; ``.git`` is excluded."""
     dest.mkdir(parents=True, exist_ok=True)
     for entry in sorted(src.iterdir()):
         if entry.name == ".git":
@@ -624,8 +634,11 @@ def _copy_tree(src: Path, dest: Path, allowed_roots, active: tuple) -> None:
                 _warn_outside_roots(entry)
                 continue
         if real.is_dir():
+            if staging is not None and _resolve_link(real) == staging:
+                continue
             if real not in active:
-                _copy_tree(real, dest / entry.name, allowed_roots, active + (real,))
+                _copy_tree(real, dest / entry.name, allowed_roots, active + (real,),
+                           staging)
         elif real.is_file():
             shutil.copy2(real, dest / entry.name)
 
@@ -635,6 +648,13 @@ def _warn_outside_roots(path: Path) -> None:
         print(f"  WARNING: not copying symlink {path.name!r} into the fullsend "
               f"workspace: its target is outside the project and plugin "
               f"directories", flush=True)
+
+
+def _warn_self_referential(path: Path) -> None:
+    with _print_lock:
+        print(f"  WARNING: not copying symlink {path.name!r} into the fullsend "
+              f"workspace: its target is the link's own directory or an "
+              f"ancestor of it", flush=True)
 
 
 def _run_base(workspace: Path) -> Path:
