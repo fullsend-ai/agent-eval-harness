@@ -120,7 +120,9 @@ idempotent — `merge_records` deduplicates, so it's safe to re-run.
 Logs a single MLflow run named after the `--run-id`:
 
 - **Params** — `skill`, `eval_name`, `runner` (type), `model`, `run_id`, plus
-  `subagent_model`/`agent` when present.
+  `subagent_model`/`agent` when present, and — for the fullsend runner — the recorded
+  provenance (`fullsend_agent`, `fullsend_version`, `openshell_version`, `sandbox_image`,
+  `sandbox_image_source`, `sandbox_arch`, `agent_harness_commit`) when non-null.
 - **Metrics** — per-judge `{judge}/mean` and `{judge}/pass_rate`; execution
   `duration_s`, `cost_usd`, `num_turns`, `tokens/{input,output,cache_read,cache_create}`;
   and a per-model `model/<name>/...` cost + token breakdown.

@@ -1241,6 +1241,69 @@ class TestProvenance:
         assert prov["agent_harness_commit"] == sha
 
 
+class TestProvenanceUsesInvocationEnvironment:
+    def test_runner_env_path_selects_the_probed_installs(
+            self, tmp_path, fake_fullsend, monkeypatch):
+        """runner.env.PATH pins a different fullsend/OpenShell than the
+        caller's PATH; provenance records the pinned ones."""
+        pinned = tmp_path / "pinned"
+        pinned.mkdir()
+        for name, text in (("fullsend", "fullsend version 9.9.9"),
+                           ("openshell", "openshell 7.7.7")):
+            exe = pinned / name
+            exe.write_text(f"#!{sys.executable}\nimport sys\n"
+                           f"print({text!r}) if sys.argv[1:] == ['version'] "
+                           "else sys.exit(2)\n")
+            exe.chmod(0o755)
+        # The caller's PATH has the fake fullsend (0.49.0), not these installs.
+        runner = _runner(tmp_path, runner_env={"PATH": str(pinned)})
+        prov = runner.provenance([])
+        assert prov["fullsend_version"] == "9.9.9"
+        assert prov["openshell_version"] == "7.7.7"
+
+    def test_without_override_the_caller_path_is_used(self, tmp_path, fake_fullsend):
+        assert _runner(tmp_path).provenance([])["fullsend_version"] == "0.49.0"
+
+
+class TestCaseConsoleLogs:
+    def test_multi_step_case_collects_every_step_log(self, tmp_path):
+        """The case-root stderr.log holds only the final step; an earlier
+        fullsend step's Image: line (an override) must still be found."""
+        import execute
+        case_dir = tmp_path / "cases" / "case-001"
+        for step, text in (("a", f"Image: override:2\nArch: arm64\n"),
+                           ("b", "no image line here\n")):
+            (case_dir / "steps" / step).mkdir(parents=True)
+            (case_dir / "steps" / step / "stderr.log").write_text(text)
+        (case_dir / "stderr.log").write_text("no image line here\n")
+        texts = execute._case_console_logs(
+            tmp_path, {"case-001": {"steps": {"a": {}, "b": {}}}})
+        assert len(texts) == 2
+        assert fullsend_mod.parse_sandbox_image(texts[0]) == ("override:2", "arm64")
+
+    def test_single_step_case_reads_root_log(self, tmp_path):
+        import execute
+        case_dir = tmp_path / "cases" / "case-001"
+        case_dir.mkdir(parents=True)
+        (case_dir / "stderr.log").write_text("Image: x:1\n")
+        assert execute._case_console_logs(
+            tmp_path, {"case-001": {"exit_code": 0}}) == ["Image: x:1\n"]
+
+    def test_provenance_keeps_override_from_earlier_step(
+            self, tmp_path, fake_fullsend, monkeypatch):
+        import execute
+        case_dir = tmp_path / "out" / "cases" / "case-001"
+        for step, text in (("fs", "Image: override:2\n"), ("other", "plain\n")):
+            (case_dir / "steps" / step).mkdir(parents=True)
+            (case_dir / "steps" / step / "stderr.log").write_text(text)
+        (case_dir / "stderr.log").write_text("plain\n")
+        texts = execute._case_console_logs(
+            tmp_path / "out", {"case-001": {"steps": {"fs": {}, "other": {}}}})
+        prov = _runner(tmp_path).provenance(texts)
+        assert prov["sandbox_image"] == "override:2"
+        assert prov["sandbox_image_source"] == "fullsend-output"
+
+
 def test_execute_py_case_mode_records_provenance_in_report(tmp_path, fake_bin):
     """A case-mode run writes the provenance fields into the run-level
     run_result.json, and the report's run header shows them."""

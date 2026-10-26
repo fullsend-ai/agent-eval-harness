@@ -171,14 +171,23 @@ class FullsendRunner(EvalRunner):
         which). ``sandbox_arch`` is set only when fullsend printed it. Every
         field is ``None`` when it cannot be determined, with a warning; this
         never raises."""
+        # Probe with the environment fullsend itself runs in (execution.env and
+        # runner.env over the process environment), so a PATH override that
+        # selects a pinned fullsend/OpenShell install is the one recorded.
+        probe_env = os.environ.copy()
+        probe_env.update(self._env_entries("", None))
+        probe_env.pop("FULLSEND_TASK", None)
+
         fullsend_version = probe_version(
-            self._binary, ("fullsend", Path(self._binary).name))
+            self._binary, ("fullsend", Path(self._binary).name), env=probe_env)
         if fullsend_version is None:
             _warn_provenance(f"could not read the version of {self._binary!r} "
                              f"(tried 'version' and '--version')")
 
-        openshell = shutil.which("openshell")
-        openshell_version = probe_version(openshell, ("openshell",)) if openshell else None
+        openshell = shutil.which("openshell", path=probe_env.get("PATH"))
+        openshell_version = (
+            probe_version(openshell, ("openshell",), env=probe_env)
+            if openshell else None)
         if openshell is None:
             _warn_provenance("openshell is not on PATH; openshell_version is null")
         elif openshell_version is None:
@@ -926,8 +935,9 @@ def _warn_provenance(message: str) -> None:
         print(f"  WARNING: fullsend provenance: {message}", flush=True)
 
 
-def probe_version(binary: Optional[str], names=()) -> Optional[str]:
-    """``<binary> version``, falling back to ``<binary> --version``.
+def probe_version(binary: Optional[str], names=(), env=None) -> Optional[str]:
+    """``<binary> version``, falling back to ``<binary> --version``, run with
+    ``env`` (default: the process environment).
 
     Returns the first non-empty output line with a leading tool name (any of
     ``names``) and ``version`` word removed — ``fullsend version 212d119`` gives
@@ -939,7 +949,7 @@ def probe_version(binary: Optional[str], names=()) -> Optional[str]:
         try:
             proc = subprocess.run(
                 [binary, *args], capture_output=True, text=True,
-                stdin=subprocess.DEVNULL, timeout=_PROBE_TIMEOUT_S)
+                stdin=subprocess.DEVNULL, timeout=_PROBE_TIMEOUT_S, env=env)
         except (OSError, subprocess.SubprocessError, ValueError):
             continue
         if proc.returncode != 0:

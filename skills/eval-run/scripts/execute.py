@@ -2111,18 +2111,33 @@ def _with_runner_provenance(eval_params, runner, console_texts):
     return params
 
 
+def _read_console_log(path, max_chars):
+    if path.is_symlink() or not path.is_file():
+        return None
+    try:
+        with open(path, errors="replace") as fh:
+            return fh.read(max_chars)
+    except OSError:
+        return None
+
+
 def _case_console_logs(output_dir, case_results, max_chars=2_000_000):
-    """Each case's captured runner console output (``cases/<id>/stderr.log``)."""
+    """Each case's captured runner console output. A multi-step case keeps one
+    log per executed step (``steps/<step>/stderr.log``, in step order) because
+    the case-root ``stderr.log`` holds only the final step; other cases have
+    just the root log."""
     texts = []
     for case_id in sorted(case_results):
-        path = output_dir / "cases" / case_id / "stderr.log"
-        if path.is_symlink() or not path.is_file():
-            continue
-        try:
-            with open(path, errors="replace") as fh:
-                texts.append(fh.read(max_chars))
-        except OSError:
-            continue
+        case_dir = output_dir / "cases" / case_id
+        steps = case_results[case_id].get("steps")
+        step_ids = list(steps) if isinstance(steps, dict) else []
+        paths = [case_dir / "steps" / sid / "stderr.log" for sid in step_ids
+                 if isinstance(sid, str) and Path(sid).name == sid]
+        found = [t for t in (_read_console_log(p, max_chars) for p in paths) if t]
+        if not found:
+            root = _read_console_log(case_dir / "stderr.log", max_chars)
+            found = [root] if root else []
+        texts.extend(found)
     return texts
 
 

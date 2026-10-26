@@ -120,7 +120,7 @@ python3 ${CLAUDE_SKILL_DIR}/scripts/log_results.py \
 ```
 
 This logs:
-- **Params**: skill, runner.type, model, run_id
+- **Params**: skill, runner.type, model, run_id, plus the fullsend runner provenance (fullsend_agent, fullsend_version, openshell_version, sandbox_image, sandbox_image_source, sandbox_arch, agent_harness_commit) when recorded and non-null
 - **Metrics**: per-judge mean and pass_rate, execution metrics (duration, cost, turns), per-model cost/token breakdown
 - **Artifacts**: summary.yaml
 - **Table**: per-case results with case_id, judge, value, rationale

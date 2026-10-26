@@ -52,7 +52,7 @@ flowchart TD
 
 | Section | Source | Notes |
 | --- | --- | --- |
-| Run Configuration | `run_result.json` + `summary.yaml` | Model, effort, agent, duration, cost, turns, exit code, then **Judge Cost** / **Total Cost** rows from `summary.yaml` (`judge_usage`, `total_cost_source`), plus a **Model Usage** table (per-model tokens, cache hit rate, cost/turn, cost/Mtok). |
+| Run Configuration | `run_result.json` + `summary.yaml` | Model, effort, agent, runner provenance rows for the fullsend runner (fullsend/OpenShell versions, sandbox image, harness commit; shown only when recorded), duration, cost, turns, exit code, then **Judge Cost** / **Total Cost** rows from `summary.yaml` (`judge_usage`, `total_cost_source`), plus a **Model Usage** table (per-model tokens, cache hit rate, cost/turn, cost/Mtok). |
 | Cost Provenance | `run_result.json` | Between the configuration grid and Model Usage; rendered only when the run-level `run_result.json` carries a `cost_source` — a batch-mode `claude-code` run or any provider-plan run; absent in case mode without a plan. One **Cost source** row for a batch-mode Anthropic run; for a provider-routed run, the full provenance and routing-audit record with red/amber banners. See [below](#cost-provenance-and-routing-audit). |
 | Analysis | `analysis.md` | The agent's recommendation, rendered as markdown in a highlighted callout. Optional YAML frontmatter (`agent`, `model`, `date`) drives the subtitle. |
 | Scoring Summary | `summary.yaml` + `thresholds` | One row per judge: type, metric (`pass_rate` or `mean`), value, threshold, PASS/FAIL/SKIP/ERROR. Pairwise gets its own row. |

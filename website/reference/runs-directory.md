@@ -113,6 +113,7 @@ breakdown; judges read it when `traces.metrics` is on.
 | `cost_source`, `cost_usd_estimate`, `cost_confidence`, `cost_coverage`, `cost_warnings`, `hook_cost_usd`, `providers`, `routing`, `provider`, `budget` | Cost provenance — see below. Absent on runs that never touched a provider. |
 | `permission_denials` | Tool calls denied by permissions, as `[{tool_name, tool_use_id, tool_input}]` from the CLI result event (`[]` when none). Per case inside `per_case` entries (and per step under a multi-step case's `steps`); the top level carries the concatenation across cases (batch/single-run mode: that run's own list) |
 | `execution_mode` | `case` or `batch` |
+| `eval_params` | Run-level parameters, including the config chain and — for `runner.type: fullsend` — the runner provenance fields (`fullsend_agent`, `fullsend_version`, `openshell_version`, `sandbox_image`, `sandbox_image_source`, `sandbox_arch`, `agent_harness_commit`; see [fullsend runner](config/runner.md)). Provenance fields are absent for other runners. |
 | `per_case` | Per-case dict of the same metrics plus `permission_denials`, keyed by case ID |
 
 #### Cost provenance
