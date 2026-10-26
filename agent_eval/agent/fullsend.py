@@ -25,6 +25,7 @@ unchanged, and every iteration's subagent transcripts copied into
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -157,7 +158,7 @@ class FullsendRunner(EvalRunner):
                 "it runs a skill as FULLSEND_TASK='/<skill> <args>' — set "
                 "execution.skill")
 
-        if "--no-post-script" in self._extra_args:
+        if _no_post_script(self._extra_args):
             return RunResult(
                 exit_code=-1, stdout="", duration_s=0.0,
                 stderr=("fullsend runner: runner.extra_args contains "
@@ -172,7 +173,7 @@ class FullsendRunner(EvalRunner):
                 # Sanitise before materialising: a workspace link that resolves
                 # to .claude/settings.json (the workspace is an allowed root)
                 # is copied as a regular file, and that copy must already be
-                # free of the host-only env, hooks and directory grants. The
+                # free of the host-only env, harness hooks and directory grants. The
                 # sanitiser refuses a symlinked canonical path, so nothing
                 # unsanitised is left for the materialisation to copy.
                 original_settings = _sanitize_settings(workspace)
@@ -189,7 +190,8 @@ class FullsendRunner(EvalRunner):
                 target, args, workspace, output_dir, model, timeout_s, extra_env)
         finally:
             # The workspace is shared with later (non-fullsend) pipeline
-            # steps, which still need the hooks, env and directory grants.
+            # steps, which still need the harness hooks, env and directory
+            # grants.
             _restore_settings(workspace, original_settings)
 
     def _launch(self, target, args, workspace, output_dir, model, timeout_s,
@@ -459,6 +461,28 @@ def _sum_iteration_usage(streams: list) -> tuple:
             models_seen, per_model_usage, ids_by_model or None)
 
 
+_FALSE_SPELLINGS = frozenset({"false", "0", "no", "off", "n", "f"})
+
+
+def _no_post_script(extra_args) -> bool:
+    """Whether ``runner.extra_args`` asks fullsend to skip the post-script.
+
+    Matches the bare ``--no-post-script`` and the ``--no-post-script=<value>``
+    form; any value other than a false-y spelling (``false``, ``0``, ``no``,
+    ``off``) enables it, so a misspelt value fails the case rather than
+    letting a run without artifacts through."""
+    for arg in extra_args or ():
+        if not isinstance(arg, str):
+            continue
+        if arg == "--no-post-script":
+            return True
+        if arg.startswith("--no-post-script="):
+            value = arg.split("=", 1)[1].strip().lower()
+            if value not in _FALSE_SPELLINGS:
+                return True
+    return False
+
+
 def _restore_settings(workspace: Path,
                       original: Optional[tuple[bytes, Optional[int]]]) -> None:
     """Put back the ``.claude/settings.json`` bytes and permission bits saved by
@@ -502,13 +526,20 @@ def _sanitize_settings(
     """Drop the host-only parts of the workspace ``.claude/settings.json``.
 
     The harness writes ``env`` (execution.env, already passed to fullsend through
-    its own environment), its hook commands (host paths that do not exist in the
-    sandbox) and ``permissions.additionalDirectories`` (host directories) for
-    the other runners. fullsend uploads the settings file with the repository,
-    and the agent definition owns the sandbox's environment and hooks, so those
-    keys are removed here. Raises ``ValueError`` when the file exists but cannot
-    be parsed, or when it or its ``.claude`` directory is a symlink, so the run
-    is refused instead of uploading the file unsanitised.
+    its own environment), its own hook entries (``SubagentStop`` capture and
+    ``PreToolUse`` interception, whose commands name host-absolute paths under
+    the workspace's ``hooks/`` directory, which do not exist in the sandbox) and
+    ``permissions.additionalDirectories`` (host directories) for the other
+    runners. fullsend uploads the settings file with the repository, and the
+    agent definition owns the sandbox's environment, so those are removed here.
+    The project's own hooks, carried over from ``<project>/.claude/settings.json``
+    by ``workspace.py`` (relative commands such as ``python3 scripts/...`` that
+    resolve inside the uploaded repository), are kept: production fullsend runs
+    load exactly those from the checkout, and stripping them would run the eval
+    with less recovery machinery than production. See ``_is_harness_hook``.
+    Raises ``ValueError`` when the file exists but cannot be parsed, or when it
+    or its ``.claude`` directory is a symlink, so the run is refused instead of
+    uploading the file unsanitised.
 
     Returns ``(original bytes, original permission bits)`` when the file was
     rewritten (so the caller can restore both for later pipeline steps), else
@@ -536,10 +567,17 @@ def _sanitize_settings(
     if not isinstance(settings, dict):
         return None
     changed = False
-    for key in ("env", "hooks"):
-        if key in settings:
-            del settings[key]
+    if "env" in settings:
+        del settings["env"]
+        changed = True
+    if "hooks" in settings:
+        kept = _project_hooks(settings["hooks"])
+        if kept != settings["hooks"]:
             changed = True
+            if kept:
+                settings["hooks"] = kept
+            else:
+                del settings["hooks"]
     perms = settings.get("permissions")
     if isinstance(perms, dict) and "additionalDirectories" in perms:
         del perms["additionalDirectories"]
@@ -558,6 +596,60 @@ def _sanitize_settings(
     return original, mode
 
 
+def _project_hooks(hooks):
+    """The ``hooks`` block without the harness-injected entries.
+
+    Each event's list keeps only the groups ``_is_harness_hook`` rejects; an
+    event left empty is dropped. A block that is not a mapping is returned
+    as-is (the CLI rejects it either way)."""
+    if not isinstance(hooks, dict):
+        return hooks
+    kept = {}
+    for event, groups in hooks.items():
+        if not isinstance(groups, list):
+            kept[event] = groups
+            continue
+        remaining = [g for g in groups if not _is_harness_hook(g)]
+        if remaining:
+            kept[event] = remaining
+    return kept
+
+
+def _is_harness_hook(group) -> bool:
+    """Whether a hook group was injected by the harness for the other runners.
+
+    ``workspace.py`` sets no marker on its entries, but every one it writes
+    (``setup_subagent_hook``, ``generate_interception``) runs a script by its
+    host-absolute path under the staged workspace's ``hooks/`` directory,
+    while the project's hooks are copied verbatim from the checkout and run
+    relative commands that resolve inside the uploaded repository. So a group
+    is the harness's when any of its command handlers names an absolute path
+    (a ``shlex`` token starting with ``/``; a command that does not tokenise
+    is checked for a ``/``-led token textually). Such a path cannot exist in
+    the sandbox anyway, so a project hook that names one would not work there
+    either."""
+    if not isinstance(group, dict) or not isinstance(group.get("hooks"), list):
+        return False
+    for handler in group["hooks"]:
+        if not isinstance(handler, dict):
+            continue
+        command = handler.get("command")
+        if isinstance(command, str) and _names_absolute_path(command):
+            return True
+    return False
+
+
+_ABS_TOKEN = re.compile(r"""(?:^|[\s"'=])/""")
+
+
+def _names_absolute_path(command: str) -> bool:
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return bool(_ABS_TOKEN.search(command))
+    return any(tok.startswith("/") for tok in tokens)
+
+
 def materialize_symlinks(workspace: Path, allowed_roots: Optional[list] = None) -> None:
     """Replace every symlink at the workspace top level and under ``.claude/``
     with a real copy.
@@ -572,12 +664,15 @@ def materialize_symlinks(workspace: Path, allowed_roots: Optional[list] = None) 
     copy is built under a temporary name and swapped in for the link last, so
     a failed copy leaves the link in place.
     """
+    # The workspace's own settings file is sanitised before this runs, so a
+    # link to it may be copied; a link to any other settings file may not.
+    canonical = _resolve_link(workspace / ".claude" / "settings.json")
     for entry in sorted(workspace.iterdir()):
-        _materialize_link(entry, allowed_roots)
+        _materialize_link(entry, allowed_roots, canonical)
     claude_dir = workspace / ".claude"
     if claude_dir.is_dir():
         for entry in sorted(claude_dir.iterdir()):
-            _materialize_link(entry, allowed_roots)
+            _materialize_link(entry, allowed_roots, canonical)
 
 
 def _resolve_link(path: Path) -> Optional[Path]:
@@ -593,7 +688,8 @@ def _within_roots(path: Path, allowed_roots: Optional[list]) -> bool:
     return any(path == root or root in path.parents for root in allowed_roots)
 
 
-def _materialize_link(path: Path, allowed_roots: Optional[list] = None) -> None:
+def _materialize_link(path: Path, allowed_roots: Optional[list] = None,
+                      canonical_settings: Optional[Path] = None) -> None:
     if not path.is_symlink():
         return
     target = _resolve_link(path)
@@ -610,6 +706,14 @@ def _materialize_link(path: Path, allowed_roots: Optional[list] = None) -> None:
     parent = _resolve_link(path.parent)
     if parent is not None and (target == parent or target in parent.parents):
         _warn_self_referential(path)
+        path.unlink()
+        return
+    # A link to a Claude Code settings file other than this workspace's own
+    # (already sanitised) one would upload host settings the sanitiser never
+    # saw, e.g. <project>/.claude/settings.local.json.
+    if (_is_settings_file(target)
+            and (canonical_settings is None or target != canonical_settings)):
+        _warn_settings_link(path)
         path.unlink()
         return
     if not (target.is_dir() or target.is_file()):
@@ -633,9 +737,13 @@ def _copy_tree(src: Path, dest: Path, allowed_roots, active: tuple,
     """Copy ``src`` into ``dest`` as real files, following symlinks.
 
     Each nested link resolves relative to its own parent. Dangling links,
-    links leaving ``allowed_roots``, links back into a directory already
-    being copied (cycles) and the ``staging`` directory this copy is being
-    built in are skipped; ``.git`` is excluded."""
+    links leaving ``allowed_roots``, links to a ``.claude/settings.json`` or
+    ``.claude/settings.local.json`` file under any root (host settings the
+    sanitiser never saw), links back into a directory already being copied
+    (cycles) and the ``staging`` directory this copy is being built in are
+    skipped; ``.git`` is excluded. A regular file with one of those names,
+    reached without a link, is part of the tree the user chose to stage and
+    is copied."""
     dest.mkdir(parents=True, exist_ok=True)
     for entry in sorted(src.iterdir()):
         if entry.name == ".git":
@@ -647,6 +755,9 @@ def _copy_tree(src: Path, dest: Path, allowed_roots, active: tuple,
                 continue
             if not _within_roots(real, allowed_roots):
                 _warn_outside_roots(entry)
+                continue
+            if _is_settings_file(real):
+                _warn_settings_link(entry)
                 continue
         if real.is_dir():
             if staging is not None and _resolve_link(real) == staging:
@@ -663,6 +774,24 @@ def _warn_outside_roots(path: Path) -> None:
         print(f"  WARNING: not copying symlink {path.name!r} into the fullsend "
               f"workspace: its target is outside the project and plugin "
               f"directories", flush=True)
+
+
+_SETTINGS_FILE_NAMES = frozenset({"settings.json", "settings.local.json"})
+
+
+def _is_settings_file(real: Path) -> bool:
+    """``real`` (a resolved link target) is a Claude Code settings file: a
+    file named ``settings.json`` or ``settings.local.json`` whose parent
+    directory is ``.claude``."""
+    return (real.name in _SETTINGS_FILE_NAMES and real.parent.name == ".claude"
+            and real.is_file())
+
+
+def _warn_settings_link(path: Path) -> None:
+    with _print_lock:
+        print(f"  WARNING: not copying symlink {path.name!r} into the fullsend "
+              f"workspace: its target is a .claude settings file, which would "
+              f"be uploaded unsanitised", flush=True)
 
 
 def _warn_self_referential(path: Path) -> None:

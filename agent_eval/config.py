@@ -2855,8 +2855,10 @@ class EvalConfig:
             step.runner for step in config.execution.steps if step.runner)
         for runner in runners:
             # codex, cursor and fullsend do not support tool interception
-            # (fullsend strips the workspace hooks); reject at load (same
-            # altitude as codex) rather than only at runner construction.
+            # (fullsend strips the harness's interception hooks from the
+            # uploaded workspace settings, keeping only the project's own);
+            # reject at load (same altitude as codex) rather than only at
+            # runner construction.
             if (runner.type in ("codex", "cursor", "fullsend")
                     and config.inputs.tools):
                 raise ValueError(

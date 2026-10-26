@@ -409,21 +409,36 @@ Per case (or once per batch) the runner:
    replaced by a real copy (nested links followed relative to the link's own
    directory, dangling links dropped, `.git` excluded). A link whose real target
    lies outside the project root and the configured `runner.plugin_dirs` is
-   dropped with a warning, so host files never reach the sandbox. The project root
+   dropped with a warning, so host files never reach the sandbox; so is a link,
+   top-level or nested, whose target is a `.claude/settings.json` or `.claude/settings.local.json`
+   file under any root, which the rewrite of step 2 never saw (the
+   workspace's own, already rewritten, file is the one exception) (a regular file of
+   that name reached without a link is part of the tree you chose to stage and is
+   copied). The project root
    is never modified. Each copy is built under a temporary name and swapped in last,
    and a failure is reported as a failed case (exit `-1`).
 2. **Rewrites the workspace `.claude/settings.json`** for this runner. The harness
-   writes `env`, its own hook commands and `permissions.additionalDirectories` for
+   writes `env`, its own hook entries (the `SubagentStop` transcript capture and
+   the `PreToolUse` interception hooks) and `permissions.additionalDirectories` for
    the other runners; they name host paths and values that mean nothing in the
    sandbox, and fullsend uploads the file with the repository, so the runner removes
    all three for the duration of the run and puts the original file back
    afterwards, so a later non-fullsend step in the same workspace keeps its hooks,
-   env and directory grants. The rewrite happens before the copies of step 1 are
+   env and directory grants. The project's own hooks — the ones `execution.project_hooks`
+   carries over from `<project>/.claude/settings.json`, such as a `SessionStart`
+   recovery hook or a `Stop` guard — are kept: a production fullsend run loads
+   exactly those from the checkout, so the eval keeps the same recovery machinery.
+   The two are told apart by their command: a harness hook runs a script by its
+   host-absolute path under the workspace's `hooks/` directory, a project hook
+   runs a relative command (`python3 scripts/...`) that resolves inside the
+   uploaded repository, so a hook entry is removed when any of its commands
+   names an absolute path and kept otherwise; an event whose entries were all
+   removed is dropped. The rewrite happens before the copies of step 1 are
    made, so a workspace link that resolves to the file is copied already stripped;
    a `.claude` directory or `settings.json` that is itself a symlink cannot be
-   stripped in place and fails the case. Because the hooks never reach the sandbox,
-   `inputs.tools` interception is not available with this runner and is rejected at
-   config load.
+   stripped in place and fails the case. Because the interception hooks never
+   reach the sandbox, `inputs.tools` interception is not available with this
+   runner and is rejected at config load.
 3. **Sets the environment** of the fullsend process, on top of the caller's
    environment (no env file is written, so no dotenv quoting applies). It holds
    `FULLSEND_TASK="/<skill> <args>"`, `AGENT_EVAL_SUBAGENT_MODEL` (only when a
@@ -481,8 +496,8 @@ Per case (or once per batch) the runner:
 Prompt mode (`execution.prompt`) is unsupported: it is rejected at config load, as
 is `type: fullsend` on an agent judge's `agent.runner`. `runner.system_prompt`
 and the harness system prompt are ignored, because the agent definition replaces
-the system prompt. Tool interception (`inputs.tools`) does not reach the sandbox.
-There is no Harbor or EvalHub equivalent.
+the system prompt. Tool interception (`inputs.tools`) does not reach the sandbox
+(the project's own hooks do). There is no Harbor or EvalHub equivalent.
 
 ## `responses-api`
 

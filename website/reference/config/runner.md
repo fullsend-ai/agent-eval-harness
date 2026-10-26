@@ -377,9 +377,13 @@ The process environment carries `FULLSEND_TASK="/<skill> <args>"`,
 `AGENT_EVAL_SUBAGENT_MODEL` (only when a subagent model is set; the agent definition
 must reference it, or the runner warns), and every `execution.env`, `runner.env` and
 hook-output entry, on top of the caller's environment. The workspace
-`.claude/settings.json` is stripped of `env`, hooks and
-`permissions.additionalDirectories` before the upload and before symlinks are
-materialised; a symlinked `.claude` or `settings.json` fails the case. Artifacts reach the workspace
+`.claude/settings.json` is stripped of `env`, the harness's own hook entries
+(`SubagentStop` capture and `PreToolUse` interception, recognised by their
+host-absolute commands) and `permissions.additionalDirectories` before the upload
+and before symlinks are materialised; the project's own hooks (relative commands
+carried over by `execution.project_hooks`) stay in the file, as in production; a
+symlinked `.claude` or `settings.json` fails the case, and a link to any other
+`.claude` settings file (`settings.json`, `settings.local.json`) is not copied. Artifacts reach the workspace
 through the project's post-script copy into `--target-repo`; `iteration-N/output/`
 is not read. All iterations' streams and subagent transcripts are mapped. fullsend
 aborts before the pre-script when a `${VAR}` the agent's harness references is unset
