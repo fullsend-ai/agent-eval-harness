@@ -1181,9 +1181,10 @@ class TestRecordFilesGating:
         assert staged["pr-head/a.txt"] == b"alpha"
         assert staged["pr-head/b.bin"] == b"\xff\xfe\x00"
 
-    def test_staging_skips_are_recorded_on_the_judge_result(self, tmp_path):
-        """A hardlinked and a sparse case output are skipped, and the judge's
-        result says so (`staging_skips`) while its prompt does not."""
+    def test_incomplete_staging_invalidates_the_judge_result(self, tmp_path):
+        """A hardlinked and a sparse case output are left out, so the verdict
+        would rest on incomplete evidence: the sample is an error (not a
+        passing value), `staging_skips` records why, and the judge never runs."""
         import score
         case_dir = tmp_path / "case-001"
         _make_case(case_dir, {"out/ok.md": "fine"})
@@ -1203,13 +1204,28 @@ class TestRecordFilesGating:
         with _patched_runners(self._staging_runner(staged)):
             result = score.score_cases(load_judges(config), [case_dir], config)
         cell = result["per_case"]["case-001"]["arch_score"]
-        assert cell["value"] is True
+        assert cell["value"] is None
+        assert "case outputs incomplete" in cell["error"]
         assert cell["staging_skips"] == {
             "count": 2,
             "reasons": {"hardlinked file": 1, "sparse file": 1}}
+        assert staged == {}  # the judge was never invoked
+
+    def test_benign_staging_skip_does_not_invalidate_the_result(self, tmp_path):
+        """A dangling link carries no gradeable content: still a verdict."""
+        import score
+        case_dir = tmp_path / "case-001"
+        _make_case(case_dir, {"out/ok.md": "fine"})
+        os.symlink(tmp_path / "missing", case_dir / "out" / "dangling")
+        judge = _agent_judge(feedback_type="bool", inputs=["out"])
+        config = _config(judge, outputs=["out"])
+        staged = {}
+        with _patched_runners(self._staging_runner(staged)):
+            result = score.score_cases(load_judges(config), [case_dir], config)
+        cell = result["per_case"]["case-001"]["arch_score"]
+        assert cell["value"] is True
         assert staged["out/ok.md"] == b"fine"
-        # The judge is not told: that invites it to discount the case.
-        for word in (b"omitted", b"skipped", b"staging", b"hardlinked", b"sparse"):
+        for word in (b"omitted", b"skipped", b"staging", b"dangling"):
             assert word not in staged["_args"].encode()
 
     def test_clean_staging_leaves_no_staging_skips_field(self, tmp_path):

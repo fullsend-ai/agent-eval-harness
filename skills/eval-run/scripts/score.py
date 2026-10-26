@@ -1942,11 +1942,10 @@ def _pop_judge_denials():
 def _record_staging_skips(skips):
     """Thread-local copy of the case-output entries staging left out.
 
-    A skipped hardlinked, sparse or over-limit file means the judge graded an
-    incomplete workspace. That is kept in the per-case result for the operator
-    to read; nothing consumes it and no threshold currently gates on it. It is
-    never shown to the judge: telling it content was omitted invites it to
-    discount the case for a reason unrelated to the agent under test.
+    A skipped hardlinked, sparse or over-limit file means the workspace is
+    incomplete. The judge's scorer fails the sample in that case (an error
+    sample, counted by `max_error_rate`); the entries are kept in the per-case
+    result for the operator. They are never shown to the judge.
     """
     _JUDGE_CALL_META.staging_skips = skips or None
 
@@ -3442,9 +3441,9 @@ def score_cases(judges, case_dirs, config, run_id=None, samples_override=None):
                 case_results[name]["usage"] = (usages[0] if len(usages) == 1
                                                else _sum_usage(usages))
             if staging_skips and isinstance(case_results.get(name), dict):
-                # The judge graded a workspace missing these entries. Kept in
-                # the result for the operator (no threshold reads it);
-                # deliberately not in the judge's prompt (see `_record_staging_skips`).
+                # Entries staging left out. Evidence-bearing ones already failed
+                # the sample; kept here for the operator, and deliberately not
+                # in the judge's prompt (see `_record_staging_skips`).
                 case_results[name]["staging_skips"] = _summarize_staging_skips(
                     staging_skips)
             if denials and isinstance(case_results.get(name), dict):
@@ -3842,7 +3841,8 @@ _MAX_CONTEXT_DEPTH = 64
 
 # Skip reasons that only apply to case outputs (skill-produced, untrusted): a
 # tree over a staging limit is staged up to it, and a hardlinked or sparse file
-# is left out, rather than failing the judge. `agent.context` still raises.
+# is left out. Staging itself does not raise; the agent judge then fails the
+# sample (the verdict would rest on incomplete evidence). `agent.context` raises.
 _CASE_OUTPUT_SKIP_REASONS = ("deeper than", "staging limit exceeded",
                              "hardlinked file", "sparse file")
 
@@ -4120,8 +4120,9 @@ def _report_staging_problems(problems, label="agent.context", extra_skip=()):
     if not problems:
         return []
     skip_reasons = tuple(_STAGING_SKIP_REASONS) + tuple(extra_skip)
-    skipped = [p for p in problems if p[1].startswith(skip_reasons)]
-    lost = [p for p in problems if p not in skipped]
+    skipped, lost = [], []
+    for p in problems:
+        (skipped if p[1].startswith(skip_reasons) else lost).append(p)
     if skipped:
         print(f"  WARNING: {label} skipped "
               f"{_format_staging_problems(skipped)}", file=sys.stderr)
@@ -4213,11 +4214,12 @@ def _stage_agent_workspace(workspace, record, stage_inputs, context_dirs, root,
     arriving by another route. Entries with no content to copy by nature are
     reported on stderr instead — see :func:`_report_staging_problems`. So are
     case-output trees that hit a staging limit, a hardlinked or sparse file:
-    they are skill-produced, and staging stops at the limit. An
+    they are skill-produced, and staging stops at the limit (the caller then
+    fails the judge sample, as the evidence is incomplete). An
     ``agent.context`` tree over a limit still raises.
 
     Returns the ``(path, reason)`` list of case-output entries that were
-    skipped, for the caller to record (`_record_staging_skips`).
+    skipped, for the caller to record (`_record_staging_skips`) and gate on.
     """
     # 1. Output dirs copied from the case directory.
     selected = None
@@ -4372,9 +4374,18 @@ def _load_agent_judge(jc, config, project_root=None):
         workspace = Path(tempfile.mkdtemp(prefix="agent-judge-"))
         try:
             try:
-                _record_staging_skips(_stage_agent_workspace(
+                skips = _stage_agent_workspace(
                     workspace, record, stage_inputs, context_dirs, root,
-                    output_dirs))
+                    output_dirs)
+                _record_staging_skips(skips)
+                # An omitted hardlinked/sparse/over-limit artifact is evidence
+                # the judge never saw: its verdict is not a valid sample.
+                missing = [s for s in skips
+                           if str(s[1]).startswith(_CASE_OUTPUT_SKIP_REASONS)]
+                if missing:
+                    raise RuntimeError(
+                        "case outputs incomplete, verdict not trusted "
+                        f"({_format_staging_problems(missing)})")
             except (RuntimeError, ValueError) as exc:
                 raise RuntimeError(f"Agent judge '{jc.name}': {exc}") from exc
             rendered = _render_judge_prompt(prompt, jc, config, arguments,

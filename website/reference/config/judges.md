@@ -446,14 +446,19 @@ Per case, the harness:
     content and could not be read **fails the judge**, rather than leaving it to
     grade a tree with holes in it.
 
-    Case outputs are skill-produced, so they are held to a different standard: a
-    hardlinked file, a sparse file, or a tree over a staging limit (entries, bytes,
-    time, depth, free disk) is **reported rather than fatal** — the skill under test
-    must not be able to fail its own grade by planting one. The judge then grades an
-    incomplete workspace, so each such case carries `staging_skips` in the run's
-    results (see [runs directory](../runs-directory.md)), and the judge's prompt is
-    left alone. Staging `agent.context` is unchanged: the same overruns still fail
-    the judge.
+    Case outputs are skill-produced, so staging them is held to a different
+    standard: a hardlinked file, a sparse file, or a tree over a staging limit
+    (entries, bytes, time, depth, free disk) is left uncopied rather than aborting
+    staging. The judge is then **not run** and that sample is an **error**: a
+    verdict over a workspace with evidence missing is not a valid score, and the
+    skill under test must not be able to hide an unfavourable artifact by
+    hardlinking it. An error sample is dropped from the mean, so set
+    `max_error_rate` in `thresholds` to make such cases fail the run. Each such case
+    carries `staging_skips` in the run's results (see
+    [runs directory](../runs-directory.md)). Entries with nothing to grade (a
+    dangling link, a link resolving outside the output dir) are still just
+    reported on stderr. Staging `agent.context` is unchanged: the same overruns
+    still fail the judge.
 
 ### Output contract
 
