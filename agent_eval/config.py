@@ -663,6 +663,13 @@ class ExecutionConfig:
       SubagentStop/PreToolUse hooks), so a skill keeps the hooks it has in
       production — a SessionStart/compact recovery banner, a Stop guard.
       Default True; set False to run the skill with the harness hooks only.
+    - symlinks: additional top-level project entries (files or directories)
+      to link into each staged workspace in addition to the defaults
+      (``scripts``, ``.claude``, ``CLAUDE.md``, ``.context``, ``skills``).
+      Single names only — no path separators, no ``..``, not absolute. An
+      entry missing from the project root is skipped with one warning.
+      Local workspace staging only (Harbor/EvalHub ship project resources
+      their own way); ``workspace.py --symlinks`` replaces the whole list.
     """
 
     mode: str = "case"
@@ -674,6 +681,9 @@ class ExecutionConfig:
     parallelism: Optional[int] = None
     env: dict = field(default_factory=dict)
     project_hooks: bool = True
+    # Extra top-level project entries linked into each staged workspace, on
+    # top of workspace.py's defaults (see the class docstring).
+    symlinks: list = field(default_factory=list)
     # Multi-step pipeline. When non-empty, REPLACES skill/prompt/arguments —
     # each entry is one agent invocation run sequentially in the shared per-case
     # workspace (see StepConfig). Mutually exclusive with skill/prompt; case
@@ -693,6 +703,22 @@ class ExecutionConfig:
                 "execution.project_hooks must be a boolean, got: "
                 f"{self.project_hooks!r}"
             )
+
+        # Each entry becomes a path component under the project root and the
+        # workspace — a single relative segment, never absolute or '..'
+        # (CWE-22). Duplicates are dropped, order kept.
+        if not isinstance(self.symlinks, list) or any(
+            not isinstance(n, str) for n in self.symlinks
+        ):
+            raise ValueError(
+                f"execution.symlinks must be a list of names, got: {self.symlinks!r}"
+            )
+        seen = []
+        for name in self.symlinks:
+            _validate_path_segment(name, "execution.symlinks[]")
+            if name not in seen:
+                seen.append(name)
+        self.symlinks = seen
 
         # Validate skill/prompt mutual exclusivity
         has_skill = bool(self.skill and self.skill.strip())
@@ -2274,6 +2300,7 @@ class EvalConfig:
             parallelism=exec_raw.get("parallelism"),
             env=exec_raw.get("env") or {},
             project_hooks=exec_raw.get("project_hooks", True),
+            symlinks=exec_raw.get("symlinks") or [],
             steps=steps,
         )
 

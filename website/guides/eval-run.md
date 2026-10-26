@@ -34,7 +34,7 @@ flowchart TD
 | 0 Discover | `discover.py` | Auto-find `eval.yaml` (or use `--config`); parse flags; read the skill/prompt, runner, judges, models |
 | 1 Dataset | — | Read `dataset.path`; verify at least one case directory exists |
 | 2 Preflight | `preflight.py` | Check for stale artifacts and run-id / baseline collisions |
-| 3 Workspace | `workspace.py` | Build an isolated per-case (or batch) workspace with symlinked project resources |
+| 3 Workspace | `workspace.py` | Build an isolated per-case (or batch) workspace with symlinked project resources (`scripts/`, `.claude/`, `CLAUDE.md`, `.context/`, `skills/`, plus any [`execution.symlinks`](../reference/config/execution.md#staging-extra-project-entries) entries) |
 | 3a Interception | `workspace.py` | If `inputs.tools` is set, resolve `tool_handlers.yaml` into concrete runtime checks; this feature is supported by Claude Code only |
 | 4 Execute | `execute.py` | Invoke the agent headlessly, capture stdout/stderr, write `run_result.json` |
 | 5 Collect | `collect.py` | Distribute workspace outputs into per-case dirs; detect in-place edits via git diff |
