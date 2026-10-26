@@ -483,6 +483,37 @@ class TestFullsendExecute:
         assert "hooks" not in uploaded  # the run itself saw the sanitised file
         assert settings.read_text() == original
 
+    def test_settings_alias_is_materialised_sanitised(self, tmp_path, fake_fullsend):
+        """A workspace link to .claude/settings.json is copied as a regular file
+        (the workspace is an allowed root); sanitising runs first, so the copy
+        never carries the host-only env, hooks or directory grants."""
+        ws = _workspace(tmp_path)
+        (ws / ".claude").mkdir()
+        original = json.dumps({
+            "env": {"SECRET": "x"},
+            "hooks": {"PreToolUse": [{"hooks": [{"command": "/host/tools.py"}]}]},
+            "permissions": {"allow": ["Bash(ls)"],
+                            "additionalDirectories": ["/host/dir"]},
+            "model": "opus",
+        }, indent=4)
+        settings = ws / ".claude" / "settings.json"
+        settings.write_text(original)
+        (ws / "backup.json").symlink_to(Path(".claude") / "settings.json")
+        (ws / ".claude" / "alias.json").symlink_to("settings.json")
+
+        result = _runner(tmp_path).execute(target="s", args="", workspace=ws,
+                                           model="m", timeout_s=60)
+
+        assert result.exit_code == 0
+        for copy in (ws / "backup.json", ws / ".claude" / "alias.json"):
+            assert copy.is_file() and not copy.is_symlink()
+            uploaded = json.loads(copy.read_text())
+            assert "env" not in uploaded and "hooks" not in uploaded
+            assert uploaded["permissions"] == {"allow": ["Bash(ls)"]}
+            assert uploaded["model"] == "opus"
+        # Only the canonical file gets its host-only keys back after the run.
+        assert settings.read_text() == original
+
     def test_workspace_settings_restored_when_launch_fails(self, tmp_path):
         ws = _workspace(tmp_path)
         (ws / ".claude").mkdir()

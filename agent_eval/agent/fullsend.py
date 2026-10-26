@@ -169,12 +169,16 @@ class FullsendRunner(EvalRunner):
         original_settings = None
         try:
             try:
+                # Sanitise before materialising: a workspace link that resolves
+                # to .claude/settings.json (the workspace is an allowed root)
+                # is copied as a regular file, and that copy must already be
+                # free of the host-only env, hooks and directory grants.
+                original_settings = _sanitize_settings(workspace)
                 # Links resolving inside this invocation's own workspace (e.g.
                 # a relative link in an isolated workspace) are always allowed.
                 roots = (None if self._allowed_roots is None
                          else [*self._allowed_roots, workspace])
                 materialize_symlinks(workspace, roots)
-                original_settings = _sanitize_settings(workspace)
                 output_dir = _run_base(workspace)
             except (OSError, ValueError, shutil.Error) as e:
                 return RunResult(
