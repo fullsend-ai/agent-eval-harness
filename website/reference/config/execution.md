@@ -277,9 +277,12 @@ execution:
 - Names the harness itself writes into a workspace are **reserved** and rejected at config
   load: `batch.yaml`, `case_order.yaml`, `cases`, `subagents`, `repo_snapshot_before.txt`,
   `input.yaml`, `answers.yaml`, `_metadata.yaml`, `hooks`, `tool_handlers.yaml`, `output`,
-  `repo_modifications.txt`, `.claude`, `.fullsend-runs`, plus the first path component of
-  every `outputs[].path` and every shared `dataset.workspace.files[].dest`. Linking one
-  would let the harness write through the symlink into the project.
+  `repo_modifications.txt`, `.claude`, `.fullsend-runs`, the runners' staging directories
+  (`.staged-plugins`, `.agents`, `.cursor`, `.skills`) and the post-run files (`stdout.log`,
+  `stderr.log`, `events.json`, `events.jsonl`, `hook_outputs.yaml`, `steps`, `_modified`),
+  plus the first path component of every `outputs[].path` and every shared
+  `dataset.workspace.files[].dest`. Linking one would let the harness write through the
+  symlink into the project.
 - A configured entry that does not exist in the project root, or whose real location lies
   outside the project root and every `runner.plugin_dirs` entry, is **skipped with one
   warning**; the run goes on. A missing default is skipped silently, as before, and

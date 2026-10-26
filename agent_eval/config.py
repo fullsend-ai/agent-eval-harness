@@ -351,9 +351,12 @@ def _validate_path_segment(value: str, name: str) -> str:
 # An ``execution.symlinks`` entry with one of these names would be a symlink
 # into the project, and the harness would then write through it into the
 # project tree. Defined here rather than in workspace.py (a skill script) so
-# config load can use it without an import cycle.
+# config load can use it without an import cycle. This is the single place for
+# the guard: when you add a runner or a collect step that writes at the
+# workspace or case root, add its names to the matching group below.
 RESERVED_WORKSPACE_NAMES = frozenset(
     {
+        # Written by workspace.py staging (workspace and case directories).
         "batch.yaml",
         "case_order.yaml",
         "cases",
@@ -368,6 +371,22 @@ RESERVED_WORKSPACE_NAMES = frozenset(
         "repo_modifications.txt",
         ".claude",
         ".fullsend-runs",
+        # Runner staging directories: ClaudeCodeRunner (plugin staging).
+        ".staged-plugins",
+        # CodexRunner and CursorRunner (skill tree).
+        ".agents",
+        # CursorRunner (project-local CLI config).
+        ".cursor",
+        # ResponsesApiRunner (skills).
+        ".skills",
+        # Post-run files written by the runners and the collect step.
+        "stdout.log",
+        "stderr.log",
+        "events.json",
+        "events.jsonl",
+        "hook_outputs.yaml",
+        "steps",
+        "_modified",
     }
 )
 

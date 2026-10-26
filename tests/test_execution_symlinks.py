@@ -244,6 +244,19 @@ def test_non_list_value_is_rejected_not_defaulted(tmp_path, value):
             "repo_modifications.txt",
             ".claude",
             ".fullsend-runs",
+            # Runner staging directories.
+            ".staged-plugins",
+            ".agents",
+            ".cursor",
+            ".skills",
+            # Post-run files.
+            "stdout.log",
+            "stderr.log",
+            "events.json",
+            "events.jsonl",
+            "hook_outputs.yaml",
+            "steps",
+            "_modified",
         }
     ),
 )
