@@ -383,9 +383,8 @@ command runs a script from the workspace's own `hooks/` directory) and `permissi
 and before symlinks are materialised; the project's own hooks (carried over by
 `execution.project_hooks`) stay in the file, as in production; a
 symlinked `.claude` or `settings.json` fails the case, and `.claude` settings files
-(`settings.json`, `settings.local.json`) are never copied from a followed link or
-tree — the one exception is a top-level link to the workspace's own, already
-stripped, `settings.json`. Artifacts reach the workspace
+and `.claude` directories, however reached, are never copied; only the workspace's own
+top-level settings link is. Artifacts reach the workspace
 through the project's post-script copy into `--target-repo`; `iteration-N/output/`
 is not read. All iterations' streams and subagent transcripts are mapped. fullsend
 aborts before the pre-script when a `${VAR}` the agent's harness references is unset

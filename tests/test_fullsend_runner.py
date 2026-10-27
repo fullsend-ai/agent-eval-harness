@@ -1226,11 +1226,72 @@ class TestMaterializeSymlinks:
 
         materialize_symlinks(ws, [project.resolve()])
 
-        claude = ws / "fixtures" / ".claude"
-        assert (claude / "other.json").is_file()
-        assert not (claude / "settings.json").exists()
-        assert not (claude / "settings.local.json").exists()
-        assert "not copying 'settings.json'" in capsys.readouterr().out
+        # The nested ``.claude`` directory is a settings container: not copied.
+        assert not (ws / "fixtures" / ".claude").exists()
+        assert not list(ws.rglob("settings.json"))
+        assert not list(ws.rglob("settings.local.json"))
+        assert "not copying '.claude'" in capsys.readouterr().out
+
+    def test_link_to_nested_claude_dir_renamed_uploads_nothing(self, tmp_path, capsys):
+        """``skills/x/host-config -> <project>/components/app/.claude``: the
+        destination is named ``host-config``, but the source is a ``.claude``
+        directory, so nothing under it is copied and the warning names the
+        link."""
+        project = tmp_path / "project"
+        nested = project / "components" / "app" / ".claude"
+        nested.mkdir(parents=True)
+        (nested / "settings.local.json").write_text(
+            json.dumps({"env": {"LOCAL_TOKEN": "literal-local-secret"}}))
+        (nested / "other.json").write_text("{}")
+        skill = project / "skills" / "x"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text("# x")
+        (skill / "host-config").symlink_to(
+            Path("..") / ".." / "components" / "app" / ".claude")
+        ws = _workspace(tmp_path)
+        (ws / "skills").symlink_to(project / "skills")
+
+        materialize_symlinks(ws, [project.resolve()])
+
+        assert (ws / "skills" / "x" / "SKILL.md").is_file()
+        assert not (ws / "skills" / "x" / "host-config").exists()
+        assert not list(ws.rglob("settings.local.json"))
+        assert not list(ws.rglob("other.json"))
+        out = capsys.readouterr().out
+        assert "not copying 'host-config'" in out
+        assert "literal-local-secret" not in out
+
+    def test_top_level_link_to_nested_claude_dir_dropped(self, tmp_path, capsys):
+        project = tmp_path / "project"
+        nested = project / "components" / "app" / ".claude"
+        nested.mkdir(parents=True)
+        (nested / "settings.local.json").write_text('{"env": {"C": "d"}}')
+        ws = _workspace(tmp_path)
+        (ws / "host-config").symlink_to(nested)
+
+        materialize_symlinks(ws, [project.resolve()])
+
+        assert not (ws / "host-config").exists()
+        assert not (ws / "host-config").is_symlink()
+        assert "not copying 'host-config'" in capsys.readouterr().out
+
+    def test_nested_claude_dir_reached_directly_skipped(self, tmp_path, capsys):
+        """A ``.claude`` directory inside a followed tree (no link to it) is
+        skipped as well."""
+        project = tmp_path / "project"
+        nested = project / "components" / "app" / ".claude"
+        nested.mkdir(parents=True)
+        (nested / "settings.local.json").write_text('{"env": {"C": "d"}}')
+        (project / "components" / "app" / "main.py").write_text("print(1)")
+        ws = _workspace(tmp_path)
+        (ws / "components").symlink_to(project / "components")
+
+        materialize_symlinks(ws, [project.resolve()])
+
+        assert (ws / "components" / "app" / "main.py").is_file()
+        assert not (ws / "components" / "app" / ".claude").exists()
+        assert not list(ws.rglob("settings.local.json"))
+        assert "not copying '.claude'" in capsys.readouterr().out
 
     def test_directory_link_to_project_claude_uploads_no_settings(self, tmp_path):
         project = tmp_path / "project"
@@ -1263,7 +1324,7 @@ class TestMaterializeSymlinks:
         materialize_symlinks(ws, [project.resolve()])
 
         assert (ws / "proj" / "README.md").is_file()
-        assert (ws / "proj" / ".claude" / "skills" / "s.md").is_file()
+        assert not (ws / "proj" / ".claude").exists()
         assert not list(ws.rglob("settings.json"))
         assert not list(ws.rglob("settings.local.json"))
 

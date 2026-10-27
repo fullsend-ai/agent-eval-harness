@@ -409,17 +409,20 @@ Per case (or once per batch) the runner:
    replaced by a real copy (nested links followed relative to the link's own
    directory, dangling links dropped, `.git` excluded). A link whose real target
    lies outside the project root and the configured `runner.plugin_dirs` is
-   dropped with a warning, so host files never reach the sandbox. Claude Code settings
-   files are never copied from a followed tree, because the rewrite of step 2 never saw
-   them: an entry whose destination would be `.claude/settings.json` or
-   `.claude/settings.local.json` is skipped (regular file or link, however the tree was
-   reached), and so is any entry, link or file, whose real path is one of the
-   `settings.json` / `settings.local.json` files or `.claude` directories of the project
-   root, the plugin directories or the workspace (for example a link to `.claude`, a
-   `.claude` that is itself a link to a differently named directory, or a
-   `settings.local.json` that links to a file elsewhere). The one exception covers only a
-   top-level link to the workspace's own, already rewritten, `settings.json`; a nested
-   link to it is dropped. The project root
+   dropped with a warning, so host files never reach the sandbox. `.claude` settings
+   files and `.claude` directories, however reached, are never copied; only the
+   workspace's own top-level settings link is, because the rewrite of step 2 has already
+   seen it. The decision is by what an entry resolves to as well as by where it lands:
+   an entry whose destination would be `.claude/settings.json` or
+   `.claude/settings.local.json`, any entry (link or file) that resolves to a
+   `settings.json` / `settings.local.json` file inside a `.claude` directory, and any
+   directory that resolves to one named `.claude` (for example a link renamed
+   `host-config` that points at a nested `.claude`) are skipped with a warning, as are
+   the `settings.json` / `settings.local.json` files or `.claude` directories of the
+   project root, the plugin directories or the workspace reached through a link of any
+   name (including a `.claude` that is itself a link to a differently named directory,
+   or a `settings.local.json` that links to a file elsewhere). A nested link to the
+   workspace's own settings file is dropped too. The project root
    is never modified. Each copy is built under a temporary name and swapped in last,
    and a failure is reported as a failed case (exit `-1`).
 2. **Rewrites the workspace `.claude/settings.json`** for this runner. The harness

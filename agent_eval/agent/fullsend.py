@@ -761,6 +761,12 @@ def _materialize_link(path: Path, allowed_roots: Optional[list] = None,
         _warn_settings_link(path)
         path.unlink()
         return
+    # A link to any directory named ``.claude`` (a nested one inside the
+    # project, say, however the link itself is named) is a settings container.
+    if _is_claude_dir(target):
+        _warn_settings_container(path)
+        path.unlink()
+        return
     if not (target.is_dir() or target.is_file()):
         path.unlink()
         return
@@ -791,7 +797,9 @@ def _copy_tree(src: Path, dest: Path, allowed_roots, active: tuple,
     be ``.claude/settings.json`` or ``.claude/settings.local.json``, a file
     that is one of ``settings_ids`` and a link resolving to one of them (a
     ``.claude`` directory included), regular or linked and however the tree
-    was reached."""
+    was reached. Entries are also judged by what they resolve to: a resolved
+    ``.claude/settings*.json`` file is skipped, and a resolved directory
+    named ``.claude`` is not copied at all."""
     dest.mkdir(parents=True, exist_ok=True)
     for entry in sorted(src.iterdir()):
         if entry.name == ".git":
@@ -807,9 +815,19 @@ def _copy_tree(src: Path, dest: Path, allowed_roots, active: tuple,
             if not _within_roots(real, allowed_roots):
                 _warn_outside_roots(entry)
                 continue
-            if _is_settings_file(real):
+        # Decide by source identity too, whether or not the entry is a link:
+        # a resolved ``.claude/settings*.json`` file is never copied, and a
+        # resolved ``.claude`` directory is a settings container that is not
+        # copied at all.
+        if _is_settings_file(real):
+            if entry.is_symlink():
                 _warn_settings_link(entry)
-                continue
+            else:
+                _warn_settings_entry(entry)
+            continue
+        if _is_claude_dir(real):
+            _warn_settings_container(entry)
+            continue
         if real in settings_ids and (entry.is_symlink() or real.is_file()):
             _warn_settings_entry(entry)
             continue
@@ -841,6 +859,12 @@ def _is_settings_file(real: Path) -> bool:
             and real.is_file())
 
 
+def _is_claude_dir(real: Path) -> bool:
+    """``real`` (a resolved path) is a directory named ``.claude``: a settings
+    container, whatever the name of the link that reached it."""
+    return real.name == ".claude" and real.is_dir()
+
+
 def _is_settings_destination(path: Path) -> bool:
     """``path`` (where an entry will land) is ``<...>/.claude/settings.json`` or
     ``.../settings.local.json``."""
@@ -859,6 +883,14 @@ def _warn_settings_link(path: Path) -> None:
         print(f"  WARNING: not copying symlink {path.name!r} into the fullsend "
               f"workspace: its target is a .claude settings file, which would "
               f"be uploaded unsanitised", flush=True)
+
+
+def _warn_settings_container(path: Path) -> None:
+    with _print_lock:
+        print(f"  WARNING: not copying {path.name!r} into the fullsend "
+              f"workspace: it is, or links to, a .claude directory, which "
+              f"may hold settings that would be uploaded unsanitised",
+              flush=True)
 
 
 def _warn_self_referential(path: Path) -> None:
