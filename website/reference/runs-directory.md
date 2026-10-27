@@ -346,7 +346,9 @@ $AGENT_EVAL_RUNS_DIR/<eval-name>/
 
 ### `condition.json`
 
-Stamped on every cell by `orchestrate.py` after the run completes:
+Stamped on every cell by `orchestrate.py` before the cell runs, so a cell that fails
+after writing a scored `summary.yaml` still keeps its factor levels and is grouped
+under its real condition:
 
 ```json
 {"condition_id": "a59751750104", "levels": {"context": "none", "model": "claude-sonnet-4-6"}}
