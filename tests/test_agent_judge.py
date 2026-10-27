@@ -2097,7 +2097,6 @@ class TestEvidenceLostBeforeStaging:
         invalid UTF-8 escapes the `(YAMLError, OSError)` handlers the same
         way.)
         """
-        import score
         elsewhere = tmp_path / "elsewhere"
         (elsewhere / "out").mkdir(parents=True)
         (elsewhere / "out" / "hidden.md").write_text("FAILING EVIDENCE")
@@ -2219,3 +2218,91 @@ class TestEvidenceLostBeforeStaging:
         assert res["aggregated"]["only_x"]["incomplete_cases"] == 1
         assert "incomplete_staging" in self._gate(
             res, {"only_x": {"min_pass_rate": 0.9}})
+
+
+class TestPairwiseEvidenceLoss:
+    """`load_case_record` raises when a case directory cannot be read. The
+    pairwise path called it twice with no guard and read the futures with no
+    guard either, so one `chmod 000` directory in EITHER run took the whole
+    `score.py pairwise` invocation down with a traceback — and recorded
+    nothing about the case it lost."""
+
+    @contextmanager
+    def _unreadable(self, path):
+        mode = path.stat().st_mode & 0o777
+        path.chmod(0)
+        try:
+            yield
+        finally:
+            path.chmod(mode)
+
+    def _runs(self, tmp_path):
+        for run in ("a", "b"):
+            for cid in ("c0", "c1"):
+                _make_case(tmp_path / run / "cases" / cid,
+                           {"out/r.md": f"{run} {cid}"})
+        return tmp_path / "a", tmp_path / "b"
+
+    def _compare(self, a, b, cases):
+        import score
+        config = _config(_agent_judge(), outputs=["out"])
+        with patch("score._format_outputs_for_pairwise", return_value="output"), \
+                patch("score._call_judge",
+                      return_value=({"preferred": "A", "reasoning": "r"}, None)), \
+                patch("score._get_anthropic_client", return_value=object()):
+            return score.compare_runs(a, b, config, cases,
+                                      model="claude-sonnet-4-6")
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file modes")
+    def test_one_unreadable_case_does_not_abort_the_comparison(self, tmp_path):
+        a, b = self._runs(tmp_path)
+        bad = b / "cases" / "c0" / "out" / "sub"
+        bad.mkdir()
+        (bad / "evidence.md").write_text("FAILING EVIDENCE")
+        with self._unreadable(bad):
+            res = self._compare(a, b, ["c0", "c1"])
+        assert "error" not in res
+        assert res["cases_compared"] == 2        # c1 still compared
+        assert res["incomplete_cases"] == 1
+        bad_row = next(r for r in res["per_case"] if r["case_id"] == "c0")
+        assert bad_row["winner"] == "error"
+        assert "content not staged" in bad_row["error"]
+        assert next(r for r in res["per_case"]
+                    if r["case_id"] == "c1")["winner"] != "error"
+
+    def test_a_clean_pair_reports_no_evidence_loss(self, tmp_path):
+        a, b = self._runs(tmp_path)
+        res = self._compare(a, b, ["c0", "c1"])
+        assert res["incomplete_cases"] == 0
+        assert res["errors"] == 0
+
+
+class TestModifiedTreeContainment:
+    """`_modified` is agent-produced and `exists()` follows a symlink, so the
+    listability probe and `rglob` would both enumerate an outside target
+    before any boundary check ran."""
+
+    def test_a_symlinked_modified_dir_is_refused_before_listing(self, tmp_path):
+        import score
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "secret.md").write_text("not the agent's to show")
+        case_dir = tmp_path / "case-001"
+        _make_case(case_dir, {"out/r.md": "fine"})
+        os.symlink(outside, case_dir / "_modified")
+
+        config = _config(_agent_judge(), outputs=["out"])
+        scanned = []
+        real_scandir = os.scandir
+
+        def watched(path, *a, **kw):
+            # RESOLVED: `_modified` is a symlink, so the path handed to
+            # scandir is inside the case even when its target is not.
+            scanned.append(os.path.realpath(path))
+            return real_scandir(path, *a, **kw)
+
+        with patch("score.os.scandir", side_effect=watched):
+            with pytest.raises(ValueError, match="escapes root"):
+                score.load_case_record(case_dir, config, load_files=True)
+        assert str(outside.resolve()) not in scanned, (
+            f"listed outside the case before validating: {scanned}")

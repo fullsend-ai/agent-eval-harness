@@ -330,9 +330,16 @@ def load_case_record(case_dir, config, run_id=None, runs_dir=None,
     modified_dir = case_dir / "_modified"
     if load_files and modified_dir.exists():
         modified = {}
+        # Containment BEFORE listing. `_modified` is agent-produced, and
+        # `exists()` follows a symlink — so a `_modified` pointing out of the
+        # case would otherwise have its target enumerated (by this probe, and
+        # by `rglob` after it) before any boundary check ran. The declared
+        # output dirs above are resolved on the way in; this one was not.
+        _resolve_under(case_dir, modified_dir)
         _require_listable(modified_dir)
         for f in sorted(modified_dir.rglob("*")):
             if f.is_dir() and not f.is_symlink():
+                _resolve_under(case_dir, f)
                 _require_listable(f)
                 continue
             if not f.is_file() or f.is_symlink():
@@ -4698,6 +4705,10 @@ class PairwiseResult:
     pref_ab: Optional[str] = None
     pref_ba: Optional[str] = None
     error: Optional[str] = None
+    # The comparison never happened because a side's record could not be
+    # built — distinct from a judge that ran and failed. Same condition
+    # `incomplete_cases` records for scoring judges.
+    evidence_lost: bool = False
     reasoning_ab: Optional[dict] = None
     reasoning_ba: Optional[dict] = None
     # Usage records of the two judge calls (spec 014 side channel).
@@ -4771,8 +4782,17 @@ def compare_runs(run_a_dir, run_b_dir, config, case_ids,
                                                   "judge_verdict", "auto") or "auto")
 
     def _compare_case(case_id):
-        record_a = load_case_record(run_a_dir / "cases" / case_id, config)
-        record_b = load_case_record(run_b_dir / "cases" / case_id, config)
+        # `load_case_record` raises when a side's case directory cannot be
+        # read (an unreadable file, an unlistable directory, a declared
+        # output resolving outside the case). Unguarded, one such case took
+        # the whole pairwise invocation down with a traceback and recorded
+        # nothing — the comparison is simply unavailable for that case.
+        try:
+            record_a = load_case_record(run_a_dir / "cases" / case_id, config)
+            record_b = load_case_record(run_b_dir / "cases" / case_id, config)
+        except Exception as e:
+            return PairwiseResult(case_id=case_id, evidence_lost=True,
+                                  error=f"{_CONTENT_LOST}: {e}")
 
         # Render the FULL artifact set per side (task + review + feasibility +
         # auto-fix reports, etc.) — not just the first file. Using _first_content
@@ -4822,7 +4842,10 @@ def compare_runs(run_a_dir, run_b_dir, config, case_ids,
     with ThreadPoolExecutor(max_workers=parallelism) as pool:
         futures = {pool.submit(_compare_case, cid): cid for cid in case_ids}
         for future in as_completed(futures):
-            r = future.result()
+            try:
+                r = future.result()
+            except Exception as e:                      # pragma: no cover
+                r = PairwiseResult(case_id=futures[future], error=str(e))
             results.append(r)
             with lock:
                 completed += 1
@@ -4840,6 +4863,11 @@ def compare_runs(run_a_dir, run_b_dir, config, case_ids,
         "cases_compared": len(results),
         "wins_a": wins_a, "wins_b": wins_b,
         "ties": ties, "errors": errors,
+        # Of those errors, the ones where no comparison was possible because
+        # a side's evidence could not be read. Reported rather than gated:
+        # `min_win_rate` reads a `win_rate` nothing in the harness writes
+        # yet, so there is no live gate to hang this on (see #281).
+        "incomplete_cases": sum(1 for r in results if r.evidence_lost),
         "per_case": [{"case_id": r.case_id, "winner": r.winner, "error": r.error,
                       "reasoning": r.reasoning}
                      for r in results],
