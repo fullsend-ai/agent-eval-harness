@@ -86,6 +86,36 @@ def test_cell_failure_is_skipped(tmp_path):
     assert len(produced) == 1  # only the "b" cell survived
 
 
+def test_cell_failing_after_scoring_keeps_its_condition(tmp_path):
+    """A cell that writes summary.yaml then fails (score.py exits 1 on a
+    threshold breach) is still rediscovered by analyze_runs — it must be
+    grouped under its full {model, effort} condition, not by model alone."""
+    from analyze import load_conditions_from_runs
+
+    conds = MatrixBuilder.expand_full_factorial({"model": ["a", "b"], "effort": ["low", "high"]})
+    rec = []
+    write_run = _stub(rec)
+
+    def breaching(**kw):
+        write_run(**kw)
+        if kw["model"] == "a" and kw["effort"] == "high":
+            raise RuntimeError("score.py failed (exit 1): regression detected")
+
+    runs_dir = tmp_path / "r" / "e"
+    produced = O.fan_out(NS(models=NS(skill=None)), "e.yaml", conds, ["c1"],
+                         replications=1, runs_dir=runs_dir, run_cell_fn=breaching)
+    assert len(produced) == 3 and len(rec) == 4
+
+    failed = next(p for p in runs_dir.iterdir() if p not in produced)
+    cj = json.loads((failed / "condition.json").read_text())
+    assert cj["levels"] == {"model": "a", "effort": "high"}
+
+    rows, factors, _ = load_conditions_from_runs(runs_dir, NS(reward=None))
+    assert set(factors) == {"model", "effort"}
+    assert all(r["effort"] in ("low", "high") for r in rows)
+    assert len({r["condition_id"] for r in rows}) == 4
+
+
 _EVAL_YAML = """
 execution:
   mode: case

@@ -203,7 +203,10 @@ def fan_out(
 
     ``run_cell_fn`` defaults to the real eval-run driver; tests inject a stub.
     A failure in one cell is logged and skipped so a partial matrix still
-    yields an analysis over the cells that succeeded.
+    yields an analysis over the cells that succeeded. Each run dir is stamped
+    with its ``condition.json`` before the cell runs, so a cell that fails
+    after writing a scored ``summary.yaml`` is still grouped under its real
+    condition when the runs directory is analysed.
     """
     run_cell_fn = run_cell_fn or _run_eval_for_condition
     runs_base = str(runs_dir.parent)
@@ -227,6 +230,11 @@ def fan_out(
         for rep in range(replications):
             run_id = _cell_run_id(date, cond.levels, rep, replications)
             output_dir = runs_dir / run_id
+            # Stamp before running: the levels are the design, known up front.
+            # A cell that fails late (score.py exits 1 on any threshold breach)
+            # still leaves a run dir that analyze_runs rediscovers — without the
+            # stamp it would be re-grouped by model alone.
+            _stamp_condition(output_dir, cond.levels, cond.condition_id)
             try:
                 run_cell_fn(
                     config_path=config_path, run_id=run_id, output_dir=output_dir,
@@ -237,7 +245,6 @@ def fan_out(
             except Exception as exc:  # noqa: BLE001 — keep the matrix going
                 logger.error("Cell %s failed, skipping: %s", run_id, exc)
                 continue
-            _stamp_condition(output_dir, cond.levels, cond.condition_id)
             produced.append(output_dir)
             print(f"  ✓ {run_id}", flush=True)
 
