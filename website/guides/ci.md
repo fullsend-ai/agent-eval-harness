@@ -107,7 +107,9 @@ Beyond absolute floors, you can gate a run **relative to a previous one** with
 - **`score.py regression --baseline <run-id>`** also does a direct aggregate comparison:
   for `mean` and `pass_rate`, a current value more than `0.5` below the baseline is
   flagged as `Degraded vs baseline` — catching drift even where no absolute floor was
-  crossed.
+  crossed. A comparable baseline also arms the
+  [incomplete evidence](../reference/runs-directory.md#incomplete-evidence) gate for
+  that judge, so a run missing evidence cannot clear the baseline on its survivors.
 
 ```bash
 # Score this run with a pairwise comparison against last week's baseline,

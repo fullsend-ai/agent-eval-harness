@@ -35,8 +35,8 @@ is off unless declared — one flaky judge run should not fail a suite by
 default.
 
 One class of error does not merely shrink the sample: a case where the judge
-was denied material it should have graded blocks every score threshold on its
-own, whether or not `max_error_rate` is set.
+was denied material it should have graded blocks every score threshold and
+every baseline comparison on its own, whether or not `max_error_rate` is set.
 See [incomplete evidence](../runs-directory.md#incomplete-evidence).
 
 You may set more than one key per judge; each is checked independently. The

@@ -453,8 +453,9 @@ Per case, the harness:
     verdict over a workspace with evidence missing is not a valid score, and the
     skill under test must not be able to hide an unfavourable artifact by
     hardlinking it. Such an error increments `incomplete_cases` and prevents any
-    score threshold (`min_mean`, `min_pass_rate`, `min_win_rate`) from passing on
-    the remaining cases: it is reported as an `incomplete_staging` regression.
+    score threshold (`min_mean`, `min_pass_rate`, `min_win_rate`) — or a
+    `--baseline` comparison, which gates on a score just the same — from passing
+    on the remaining cases: it is reported as an `incomplete_staging` regression.
     `max_error_rate` separately prices the case as unscored, and is not required
     for the gate. Staging is not the only way to lose evidence: an output file
     the harness cannot **read** fails the case before staging is reached and

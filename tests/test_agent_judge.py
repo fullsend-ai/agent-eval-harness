@@ -2133,6 +2133,66 @@ class TestEvidenceLostBeforeStaging:
         assert agg["incomplete_cases"] == 0
         assert self._gate(res, {"shape": {"max_error_rate": 1.0}}) == []
 
+    # A baseline comparison gates on a score exactly as `min_pass_rate` does,
+    # so enumerating the three score keys left the same escape one door along:
+    # with a tolerant `max_error_rate` as the only threshold, an incomplete run
+    # whose survivors match the baseline reported nothing at all.
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file modes")
+    def test_a_baseline_comparison_cannot_pass_on_the_survivors(self, tmp_path):
+        bad = self._case(tmp_path, "c0")
+        (bad / "out" / "bad.txt").write_text("FAILING EVIDENCE")
+        with self._unreadable(bad / "out" / "bad.txt"):
+            res = self._run(tmp_path, [bad] + self._rest(tmp_path))
+        # 1 of 10 unscored, and the author budgeted for half the dataset — so
+        # `max_error_rate` is satisfied and the survivors match the baseline
+        # exactly. Before this, that combination reported nothing.
+        assert self._gate(res, {"arch_score": {"max_error_rate": 0.5}}) == []
+        assert "incomplete_staging" in self._gate(
+            res, {"arch_score": {"max_error_rate": 0.5}},
+            {"arch_score": {"pass_rate": 1.0}})
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file modes")
+    def test_a_baseline_with_nothing_comparable_does_not_fire(self, tmp_path):
+        """The guard mirrors the comparison it protects: a baseline carrying no
+        `mean` or `pass_rate` compares nothing, so there is no score to refuse.
+        Firing on the mere presence of a baseline would make an error budget
+        impossible to use alongside one."""
+        bad = self._case(tmp_path, "c0")
+        (bad / "out" / "bad.txt").write_text("FAILING EVIDENCE")
+        with self._unreadable(bad / "out" / "bad.txt"):
+            res = self._run(tmp_path, [bad] + self._rest(tmp_path))
+        assert self._gate(res, {"arch_score": {"max_error_rate": 0.5}},
+                          {"arch_score": {"win_rate": 1.0}}) == []
+        assert self._gate(res, {"arch_score": {"max_error_rate": 0.5}},
+                          {"other_judge": {"pass_rate": 1.0}}) == []
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file modes")
+    def test_a_numeric_judge_arms_the_gate_through_mean(self, tmp_path):
+        """`mean` is the half a boolean judge cannot exercise.
+
+        A bool judge copies `pass_rate` into `mean`, so either term arms the
+        gate and dropping `"mean"` from the condition still passes. A numeric
+        judge sets `mean` and leaves `pass_rate` None, which makes `"mean"`
+        the only term that can.
+        """
+        import score
+        bad = self._case(tmp_path, "c0")
+        (bad / "out" / "bad.txt").write_text("FAILING EVIDENCE")
+        config = self._mixed_config(tmp_path)
+        config.judges = [JudgeConfig(name="depth", check="return 4.0, 'ok'")]
+        with self._unreadable(bad / "out" / "bad.txt"), \
+                _patched_runners(self._runner()):
+            res = score.score_cases(
+                load_judges(config, project_root=str(tmp_path)),
+                [bad] + self._rest(tmp_path), config)
+        agg = res["aggregated"]["depth"]
+        assert agg["mean"] == 4.0 and agg["pass_rate"] is None
+        assert agg["incomplete_cases"] == 1
+        assert self._gate(res, {"depth": {"max_error_rate": 0.5}}) == []
+        assert "incomplete_staging" in self._gate(
+            res, {"depth": {"max_error_rate": 0.5}}, {"depth": {"mean": 4.0}})
+
     @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file modes")
     def test_a_conditional_judge_is_charged_too(self, tmp_path):
         """Deliberate, and pinned here because it is a real cost.

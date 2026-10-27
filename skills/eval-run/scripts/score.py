@@ -5338,7 +5338,16 @@ def detect_regressions(current_results, thresholds, baseline_results=None):
         # survivors — which is the escape, one `ln` wide. No score threshold
         # is satisfiable while the graded skill omitted evidence.
         _SCORE_KEYS = ("min_mean", "min_pass_rate", "min_win_rate")
-        if incomplete and any(k in threshold for k in _SCORE_KEYS):
+        # A baseline comparison gates on a score just as a score key does, so
+        # enumerating the keys alone left the same escape one door along: with
+        # `max_error_rate` as the only threshold, an incomplete run whose
+        # survivors match the baseline passed. The test mirrors the comparison
+        # below, so the guard fires only where a number is really compared.
+        baseline = (baseline_results or {}).get(judge_name) or {}
+        gates_on_a_score = any(k in threshold for k in _SCORE_KEYS) or any(
+            current.get(k) is not None and baseline.get(k) is not None
+            for k in ("mean", "pass_rate"))
+        if incomplete and gates_on_a_score:
             scored = current.get("scored_cases") or 0
             errored = current.get("errored_cases") or 0
             regressions.append(Regression(
@@ -5368,7 +5377,6 @@ def detect_regressions(current_results, thresholds, baseline_results=None):
                 regressions.append(Regression(judge_name, "win_rate",
                                               f">= {threshold['min_win_rate']}", str(win_rate)))
         if baseline_results:
-            baseline = baseline_results.get(judge_name)
             if baseline and current:
                 for key in ("mean", "pass_rate"):
                     curr_val = current.get(key)

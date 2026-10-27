@@ -122,7 +122,8 @@ third row mainly through the `steps/` listing of a multi-step case.
 Why it is counted separately from `errored_cases`: an unscorable case leaves the
 denominator, so `min_pass_rate` would be satisfied by the survivors alone. While
 `incomplete_cases` is non-zero, no score threshold (`min_mean`, `min_pass_rate`,
-`min_win_rate`) can pass, and the run reports an `incomplete_staging` regression. `max_error_rate` is
+`min_win_rate`) and no `--baseline` comparison can pass — both gate on a score —
+and the run reports an `incomplete_staging` regression. `max_error_rate` is
 deliberately exempt: that gate is the author pricing how much of the dataset may
 go unscored, and auto-failing it would make a tolerant error budget impossible.
 
