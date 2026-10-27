@@ -185,6 +185,23 @@ class TestRunnerProvenanceParams:
         assert _runner_provenance_params("fullsend", {}) == {}
         assert _runner_provenance_params("fullsend", {"eval_params": None}) == {}
 
+    def test_recorded_runner_wins_over_the_configured_one(self):
+        from log_results import _runner_provenance_params
+
+        from agent_eval.agent import RUNNERS
+
+        keys = RUNNERS["fullsend"].PROVENANCE_KEYS
+        eval_params = {key: f"v-{key}" for key in keys}
+        # --agent fullsend over a claude-code config
+        rr = {"agent": "fullsend", "eval_params": eval_params}
+        assert _runner_provenance_params("claude-code", rr) == eval_params
+        # --agent claude-code over a fullsend config: nothing to log
+        rr = {"agent": "claude-code", "eval_params": eval_params}
+        assert _runner_provenance_params("fullsend", rr) == {}
+        # runs that never recorded the agent fall back to the config
+        rr = {"eval_params": eval_params}
+        assert _runner_provenance_params("fullsend", rr) == eval_params
+
     def test_log_results_does_not_import_the_concrete_runner_module(self):
         import log_results
 

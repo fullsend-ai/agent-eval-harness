@@ -47,11 +47,15 @@ from agent_eval.mlflow.trace_builder import build_trace, log_trace
 from agent_eval.harbor.results import _extract_transcript_metrics
 
 
-def _runner_provenance_params(runner_type, run_result):
+def _runner_provenance_params(config_runner_type, run_result):
     """The non-null run-level provenance fields in ``run_result["eval_params"]``
-    that the configured runner declares (``EvalRunner.PROVENANCE_KEYS``), as
-    strings. Empty for runners that record none."""
-    runner_cls = RUNNERS.get(runner_type)
+    that the runner declares (``EvalRunner.PROVENANCE_KEYS``), as strings.
+    Empty for runners that record none.
+
+    The runner is the one that actually ran (``run_result["agent"]``, which an
+    ``--agent`` override can make differ from the config), falling back to the
+    configured ``runner.type`` for runs that did not record it."""
+    runner_cls = RUNNERS.get(run_result.get("agent") or config_runner_type)
     eval_params = run_result.get("eval_params") or {}
     return {key: str(eval_params[key])
             for key in getattr(runner_cls, "PROVENANCE_KEYS", ())
