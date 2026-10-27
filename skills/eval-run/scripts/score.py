@@ -78,6 +78,20 @@ def _resolve_under(root: Path, candidate: Path) -> Path:
     return resolved
 
 
+def _require_listable(directory: Path) -> None:
+    """Raise `OSError` if `directory` cannot be opened for listing.
+
+    `Path.rglob` swallows a directory it cannot open: it yields the entry and
+    nothing beneath it, and raises nothing. An unreadable FILE at least fails
+    loudly, so `chmod 000` on a sub-directory was the quieter way to keep an
+    artifact out of the record — the case scored normally over what was left.
+    The output trees are agent-produced, so that has to fail rather than
+    silently shrink what the judge grades.
+    """
+    with os.scandir(directory):
+        pass
+
+
 # ---------------------------------------------------------------------------
 # Case record loading — reads all files, no schema interpretation
 # ---------------------------------------------------------------------------
@@ -281,7 +295,11 @@ def load_case_record(case_dir, config, run_id=None, runs_dir=None,
         _resolve_under(case_dir, artifact_dir)
         if not load_files:
             continue
+        _require_listable(artifact_dir)
         for f in sorted(artifact_dir.rglob("*")):
+            if f.is_dir() and not f.is_symlink():
+                _require_listable(f)
+                continue
             if not f.is_file() or f.is_symlink():
                 continue
             _resolve_under(case_dir, f)
@@ -312,7 +330,11 @@ def load_case_record(case_dir, config, run_id=None, runs_dir=None,
     modified_dir = case_dir / "_modified"
     if load_files and modified_dir.exists():
         modified = {}
+        _require_listable(modified_dir)
         for f in sorted(modified_dir.rglob("*")):
+            if f.is_dir() and not f.is_symlink():
+                _require_listable(f)
+                continue
             if not f.is_file() or f.is_symlink():
                 continue
             _resolve_under(case_dir, f)
@@ -3355,8 +3377,28 @@ def score_cases(judges, case_dirs, config, run_id=None, samples_override=None):
 
     def _score_case(case_dir):
         case_id = case_dir.name
-        record = load_case_record(case_dir, config, run_id=run_id,
-                                  load_files=load_files)
+        try:
+            record = load_case_record(case_dir, config, run_id=run_id,
+                                      load_files=load_files)
+        except Exception as e:
+            # Reading the case directory precedes every judge, so ANY failure
+            # here withholds evidence from all of them. `load_case_record`
+            # tolerates an UNDECODABLE file (recorded as binary) but not an
+            # UNREADABLE one, and propagating is right — swallowing it would
+            # drop the artifact silently. What must not happen is it arriving
+            # as a plain error, because `incomplete_cases` is what stops a
+            # score threshold passing on the remaining cases.
+            #
+            # Deliberately not a list of exception types. `OSError` alone
+            # would have been the same enumeration bug one layer down: a
+            # declared output dir symlinked out of the case raises ValueError
+            # from `_resolve_under`, and a file with invalid UTF-8 raises
+            # UnicodeDecodeError past the `(YAMLError, OSError)` handlers —
+            # both of them a case the judge cannot grade, neither an OSError.
+            # The SCOPE is what keeps this honest: the guard wraps this one
+            # call, so a failure anywhere later in the case stays an ordinary
+            # error and `max_error_rate` keeps pricing it.
+            raise CaseEvidenceUnavailable(case_dir, e) from e
         case_results = {}
         for name, scorer, condition, judge_type, judge_samples in judges:
             # Step-scoped judges see that step's trace; others the whole case.
@@ -3489,9 +3531,25 @@ def score_cases(judges, case_dirs, config, run_id=None, samples_override=None):
             except Exception as e:
                 case_dir = futures[future]
                 case_id = case_dir.name
-                case_results = {name: {"value": None, "error": str(e),
-                                       "judge_type": jt}
-                                for name, _, _, jt, _ in judges}
+                # Invariant, shared with the `StagingIncomplete` handler in the
+                # agent-judge scorer: a case where a judge did not see material
+                # it should have is counted in `incomplete_cases`, whichever
+                # step lost it. This loss precedes every judge, so it is
+                # recorded against all of them. Only an evidence failure is
+                # marked — an unrelated crash stays an ordinary error, the same
+                # line `agent.context` already draws.
+                lost = (e.skips
+                        if isinstance(e, CaseEvidenceUnavailable) else None)
+                case_results = {}
+                for name, _, _, jt, _ in judges:
+                    result = {"value": None, "error": str(e), "judge_type": jt}
+                    if lost:
+                        # Summarised per judge, not once and shared: `yaml.dump`
+                        # turns a repeated object into an `&id001`/`*id001`
+                        # anchor pair, and `summary.yaml` is read by things
+                        # other than PyYAML.
+                        result["staging_skips"] = _summarize_staging_skips(lost)
+                    case_results[name] = result
                 print(f"  [{completed}/{len(case_dirs)}] {case_id} ERROR: {e}",
                       file=sys.stderr, flush=True)
             per_case[case_id] = case_results
@@ -4137,6 +4195,34 @@ def _format_staging_problems(problems, limit=10):
     more = "" if len(problems) <= limit else f" (+{len(problems) - limit} more)"
     noun = "entry" if len(problems) == 1 else "entries"
     return f"{len(problems)} {noun}: {detail}{more}"
+
+
+class CaseEvidenceUnavailable(RuntimeError):
+    """A case's record could not be read, so no judge saw its material.
+
+    The third way a judge ends up grading nothing, after a reported skip and
+    `StagingIncomplete` — and the only one that happens BEFORE staging, while
+    `load_case_record` reads the case directory.
+
+    Mostly that means the declared output trees, which are read only when some
+    judge needs file contents (`_judges_read_files`); a run of nothing but
+    agent judges skips them, which is why hardening staging alone left this
+    open and why the tests for it need a mixed judge set. Not every read is
+    gated that way, though: the `steps/` listing of a multi-step case is not,
+    so an all-agent-judge run can still arrive here.
+
+    The case directory is agent-produced, so `chmod 000` on an unfavourable
+    artifact has to count as withheld evidence rather than as an ordinary
+    error: errors leave the `min_pass_rate` denominator, and a score over the
+    survivors would pass. ``skips`` carries that in the shape
+    `_summarize_staging_skips` consumes, so the loss is recorded exactly as a
+    staging loss is.
+    """
+
+    def __init__(self, case_dir, cause):
+        reason = f"{_CONTENT_LOST}: {cause}"
+        super().__init__(f"{case_dir}: {reason}")
+        self.skips = [(str(case_dir), reason)]
 
 
 class StagingIncomplete(RuntimeError):

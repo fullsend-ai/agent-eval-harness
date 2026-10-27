@@ -456,7 +456,10 @@ Per case, the harness:
     score threshold (`min_mean`, `min_pass_rate`, `min_win_rate`) from passing on
     the remaining cases: it is reported as an `incomplete_staging` regression.
     `max_error_rate` separately prices the case as unscored, and is not required
-    for the gate. Each such case
+    for the gate. Staging is not the only way to lose evidence: an output file
+    the harness cannot **read** fails the case before staging is reached and
+    counts the same, for every judge in the run (see
+    [runs directory](../runs-directory.md#incomplete-evidence)). Each such case
     carries `staging_skips` in the run's results (see
     [runs directory](../runs-directory.md)). Entries with nothing to grade (a
     dangling link, a link resolving outside the output dir) are still just

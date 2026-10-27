@@ -68,6 +68,10 @@ that is *not* silently ignored.
     good score with nine errors passes a `min_mean` outright. The report shows `ERROR` for
     the judge only when *no* case produced a value.
 
+    One class of error is exempt: a case where the judge was denied material it
+    should have graded fails the run on its own, with no `max_error_rate` set.
+    See [incomplete evidence](../reference/runs-directory.md#incomplete-evidence).
+
     ```yaml
     thresholds:
       completeness:

@@ -1953,3 +1953,209 @@ class TestIncompleteStagingCannotPass:
         assert agg["errored_cases"] == 10    # the judge could not be set up
         assert agg["incomplete_cases"] == 0  # but that is not withheld evidence
         assert "staging_skips" not in res["per_case"]["c0"]["arch_score"]
+
+
+class TestEvidenceLostBeforeStaging:
+    """Hardening staging closed two of the three ways a judge ends up grading
+    nothing. The third is upstream of it: `load_case_record` reads the declared
+    output trees whenever ANY judge needs file contents, and an unreadable file
+    raises there — before `_stage_agent_workspace` is ever called. That arrived
+    as a plain error, so `incomplete_cases` stayed 0 and a score threshold
+    passed on the survivors, exactly the escape the staging gate closes.
+
+    These drive the real `score_cases`; a helper that recomputed the
+    aggregation would pass against the bug.
+    """
+
+    def _runner(self):
+        class R:
+            @classmethod
+            def from_config(cls, config, *, log_prefix=None, **overrides):
+                return cls()
+
+            @property
+            def name(self):
+                return "stg"
+
+            def execute(self, target=None, args="", workspace=None,
+                        model=None, **kwargs):
+                out = Path(workspace) / "output"
+                out.mkdir(parents=True, exist_ok=True)
+                (out / "score.json").write_text(
+                    json.dumps({"passed": True, "rationale": "x"}))
+                return RunResult(exit_code=0, stdout="", stderr="",
+                                 duration_s=0.01)
+        return R
+
+    @contextmanager
+    def _unreadable(self, path):
+        mode = path.stat().st_mode & 0o777
+        path.chmod(0)
+        try:
+            yield
+        finally:
+            path.chmod(mode)
+
+    def _mixed_config(self, tmp_path):
+        """An agent judge AND a check judge.
+
+        The second judge is the whole point: `_judges_read_files` returns True
+        as soon as one non-agent judge is configured, which is what turns on
+        the record-loading pass this class is about. An all-agent-judge run
+        never reads the trees and never reaches the bug.
+        """
+        config = _config(_agent_judge(feedback_type="bool", inputs=["out"]),
+                         outputs=["out"])
+        config.judges = [config.judges[0],
+                         JudgeConfig(name="shape", check="return True, 'ok'")]
+        return config
+
+    def _run(self, tmp_path, cases):
+        import score
+        config = self._mixed_config(tmp_path)
+        with _patched_runners(self._runner()):
+            return score.score_cases(
+                load_judges(config, project_root=str(tmp_path)), cases, config)
+
+    def _case(self, tmp_path, name):
+        case_dir = tmp_path / name
+        _make_case(case_dir, {"out/ok.md": "fine"})
+        return case_dir
+
+    def _rest(self, tmp_path):
+        return [self._case(tmp_path, f"c{i}") for i in range(1, 10)]
+
+    def _gate(self, res, thresholds, baseline=None):
+        from score import detect_regressions
+        return [r.metric for r in detect_regressions(
+            res["aggregated"], thresholds, baseline)]
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file modes")
+    def test_an_unreadable_artifact_blocks_a_score_threshold(self, tmp_path):
+        bad = self._case(tmp_path, "c0")
+        target = bad / "out" / "bad.txt"
+        target.write_text("FAILING EVIDENCE")
+        with self._unreadable(target):
+            res = self._run(tmp_path, [bad] + self._rest(tmp_path))
+        for judge in ("arch_score", "shape"):
+            agg = res["aggregated"][judge]
+            # No judge ran on that case, so the omission is recorded against
+            # every one of them — including `shape`, which reads no files.
+            assert agg["incomplete_cases"] == 1, judge
+            assert agg["errored_cases"] == 1, judge
+            assert "incomplete_staging" in self._gate(
+                res, {judge: {"min_pass_rate": 0.9}}), judge
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file modes")
+    def test_an_unlistable_directory_blocks_a_score_threshold(self, tmp_path):
+        """The quieter half of the same hole, and the worse one.
+
+        An unreadable FILE raises out of the record load. An unreadable
+        DIRECTORY did not: `rglob` yields the entry and nothing beneath it
+        without raising, so the artifact simply left the record and the case
+        scored normally over what remained — no error, nothing to count.
+        """
+        bad = self._case(tmp_path, "c0")
+        sub = bad / "out" / "sub"
+        sub.mkdir()
+        (sub / "evidence.txt").write_text("FAILING EVIDENCE")
+        with self._unreadable(sub):
+            res = self._run(tmp_path, [bad] + self._rest(tmp_path))
+        for judge in ("arch_score", "shape"):
+            assert res["aggregated"][judge]["incomplete_cases"] == 1, judge
+            assert "incomplete_staging" in self._gate(
+                res, {judge: {"min_pass_rate": 0.9}}), judge
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file modes")
+    def test_the_omission_is_pointed_at_a_field_that_exists(self, tmp_path):
+        """The regression text says "see `staging_skips`", so the record-load
+        path has to write one rather than send the operator to a missing key."""
+        bad = self._case(tmp_path, "c0")
+        target = bad / "out" / "bad.txt"
+        target.write_text("FAILING EVIDENCE")
+        with self._unreadable(target):
+            res = self._run(tmp_path, [bad] + self._rest(tmp_path))
+        skips = res["per_case"]["c0"]["arch_score"]["staging_skips"]
+        assert skips["count"] == 1
+        assert skips["reasons"] == {"content not staged": 1}
+        # Each judge gets its OWN summary object. Summarising once and sharing
+        # it makes `yaml.dump` write the second occurrence as an `*id001`
+        # alias into summary.yaml, which not every reader of that file handles.
+        other = res["per_case"]["c0"]["shape"]["staging_skips"]
+        assert other == skips and other is not skips
+        import yaml
+        assert "*id001" not in yaml.dump(res["per_case"],
+                                         default_flow_style=False)
+
+    def test_an_output_dir_pointing_out_of_the_case_counts(self, tmp_path):
+        """Not an `OSError`, and the reason the guard does not name types.
+
+        A declared output that is a symlink out of the case dir makes
+        `_resolve_under` raise `ValueError`, so a guard spelled `except
+        OSError` would have been the same enumeration bug one layer down: the
+        judge sees nothing and the run passes on the survivors. (A file with
+        invalid UTF-8 escapes the `(YAMLError, OSError)` handlers the same
+        way.)
+        """
+        import score
+        elsewhere = tmp_path / "elsewhere"
+        (elsewhere / "out").mkdir(parents=True)
+        (elsewhere / "out" / "hidden.md").write_text("FAILING EVIDENCE")
+        bad = tmp_path / "c0"
+        bad.mkdir()
+        os.symlink(elsewhere / "out", bad / "out")
+        res = self._run(tmp_path, [bad] + self._rest(tmp_path))
+        agg = res["aggregated"]["shape"]
+        assert agg["incomplete_cases"] == 1
+        assert agg["errored_cases"] == 1
+        assert "incomplete_staging" in self._gate(
+            res, {"shape": {"min_pass_rate": 0.9}})
+
+    def test_a_failure_after_the_record_stays_an_ordinary_error(self, tmp_path):
+        """The guard wraps the record load and nothing else.
+
+        Scope is what keeps the previous test from becoming "any exception
+        fails the run": a judge that blows up has not been DENIED evidence,
+        and `max_error_rate` must keep pricing it. This is the same line
+        `agent.context` draws (see
+        `TestIncompleteStagingCannotPass.test_an_agent_context_failure_...`).
+        """
+        import score
+        cases = [self._case(tmp_path, f"c{i}") for i in range(10)]
+        config = self._mixed_config(tmp_path)
+        config.judges = [JudgeConfig(name="shape",
+                                     check="raise RuntimeError('boom')")]
+        with _patched_runners(self._runner()):
+            res = score.score_cases(
+                load_judges(config, project_root=str(tmp_path)), cases, config)
+        agg = res["aggregated"]["shape"]
+        assert agg["errored_cases"] == 10
+        assert agg["incomplete_cases"] == 0
+        assert self._gate(res, {"shape": {"max_error_rate": 1.0}}) == []
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file modes")
+    def test_a_conditional_judge_is_charged_too(self, tmp_path):
+        """Deliberate, and pinned here because it is a real cost.
+
+        An `if:` condition is evaluated against the case record, so when the
+        record cannot be read there is no way to know whether the judge would
+        have graded the case or skipped it. Charging every judge is the
+        conservative read: letting a judge off because it *might* have been
+        skipped would hand the skill under test a lever — make the artifact
+        unreadable and any conditional judge quietly stops counting. The cost
+        is a judge that would have skipped the case failing its threshold.
+        """
+        import score
+        bad = self._case(tmp_path, "c0")
+        (bad / "out" / "bad.txt").write_text("FAILING EVIDENCE")
+        config = self._mixed_config(tmp_path)
+        config.judges = [JudgeConfig(name="only_x", check="return True, 'ok'",
+                                     condition="annotations.get('k') == 'x'")]
+        with self._unreadable(bad / "out" / "bad.txt"), \
+                _patched_runners(self._runner()):
+            res = score.score_cases(
+                load_judges(config, project_root=str(tmp_path)),
+                [bad] + self._rest(tmp_path), config)
+        assert res["aggregated"]["only_x"]["incomplete_cases"] == 1
+        assert "incomplete_staging" in self._gate(
+            res, {"only_x": {"min_pass_rate": 0.9}})

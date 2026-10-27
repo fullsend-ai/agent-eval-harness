@@ -39,7 +39,8 @@ $AGENT_EVAL_RUNS_DIR/<run-id>/
 ├── events.json         # parsed event stream (batch mode; if traces.events)
 ├── report.html         # scored HTML report
 ├── summary.yaml        # judge results: judges (mean, pass_rate, scored_cases,
-│                       #   errored_cases, stability) + per_case + run_metrics
+│                       #   errored_cases, incomplete_cases, stability)
+│                       #   + per_case + run_metrics
 │                       #   + judge_usage / total_cost_usd (judge spend, see below)
 ├── analysis.md         # optional: the agent's written analysis + recommendation
 ├── review.yaml         # optional: human feedback from /eval-review — see below
@@ -79,7 +80,8 @@ channel**: what the LLM judges themselves consumed, kept apart from the agent's 
 | --- | --- |
 | `per_case.<case>.<judge>.usage` | The judge call's usage record: `model`, `provider`, `id`, `prompt_tokens`, `completion_tokens`, `reasoning_tokens`, `cost_usd`, `cost_source` (`provider-inline` when the provider priced the request in its reply, e.g. OpenRouter; `runner-estimate` for a runner/agent judge's CLI estimate; `none` when only tokens are known). Sampled judges (`samples: N`) store the sum over all attempts, failed ones included, with `requests` / `requests_missing_cost`. |
 | `per_case.<case>.<judge>.permission_denials` | Present only when the runner refused at least one of the judge's tool calls: `{count, tools}` — the number of refused calls and a per-tool-name count (`{tool_name: n}`), summed over all samples. A summary, so its shape deliberately differs from the runner's `[{tool_name, tool_use_id, tool_input}]` list that the `run_result.json` `permission_denials` field carries. |
-| `per_case.<case>.<judge>.staging_skips` | Present only for an agent judge whose staged case outputs were missing entries: `{count, reasons}` — the number of entries left out (hardlinked or sparse files, trees over a staging limit, dangling links, links resolving outside the output dir) and a per-reason count (`{reason: n}`, keyed by reason prefix such as `hardlinked file`), summed over all samples. For hardlinked or sparse files and trees over a staging limit the judge is not run and the sample is an error (see `max_error_rate`); the judge is never told about omissions, so the field is for the operator. Staging `agent.context` is not covered: an overrun there fails the judge. A case whose omission was evidence-bearing (a hardlinked or sparse file, content past a staging limit, or an unreadable file or unlistable directory — not a dangling link) is also counted in `incomplete_cases`, and no score threshold (`min_mean`, `min_pass_rate`, `min_win_rate`) can be satisfied while that count is non-zero: errors leave the denominator, so a score over the remaining cases would pass on the survivors. `max_error_rate` prices it like any other unscored case rather than auto-failing. |
+| `per_case.<case>.<judge>.staging_skips` | Present only for an agent judge whose staged case outputs were missing entries: `{count, reasons}` — the number of entries left out (hardlinked or sparse files, trees over a staging limit, dangling links, links resolving outside the output dir) and a per-reason count (`{reason: n}`, keyed by reason prefix such as `hardlinked file`), summed over all samples. For hardlinked or sparse files and trees over a staging limit the judge is not run and the sample is an error (see `max_error_rate`); the judge is never told about omissions, so the field is for the operator. Staging `agent.context` is not covered: an overrun there fails the judge. Also written, for every judge in the run, when the case record could not be read at all — see [incomplete evidence](#incomplete-evidence). |
+| `judges.<judge>.incomplete_cases` | How many cases the judge was asked to grade without material it should have seen. See [incomplete evidence](#incomplete-evidence). |
 | `per_case.<case>.<judge>.verdict_transport` | How the verdict travelled: `json_schema` (the provider's structured output) or `tool` (the forced tool call) — the [verdict transport](config/judges.md#verdict-transport). Absent on deterministic and runner/agent judges. |
 | `per_case.<case>.<judge>.tool_choice_mode` | Present only when a judge on the `tool` transport had to fall back from a forced tool call (`required` or `auto`). |
 | `judge_usage` | Run-level aggregate: `judge_cost_usd` — the sum over the priced calls, `null` only when none was priced; with judges on several providers it is a partial figure, so read `requests_missing_cost` next to it (the report shows `N unpriced`) — plus `requests`, token totals, `cost_sources` (count per source), `by_judge`, `by_model`, `verdict_transports` (calls per transport) and, when any happened, `verdict_fallbacks` (calls that did not run on the policy's first transport) and `tool_choice_fallbacks`. `total_cost_source: complete` means both addends were numeric, not that every judge call was priced. Absent when no judge produced usage (deterministic-only runs). |
@@ -94,6 +96,42 @@ The judge-level `cost_source` literals are hyphenated, per-call labels
 `run_result.json` uses the colon form `<origin>:<method>` described under
 [cost provenance](#cost-provenance). They never mix: `judge_usage` is summed from the
 former, `cost_usd` carries the latter.
+
+#### Incomplete evidence
+
+`judges.<judge>.incomplete_cases` counts the cases where the judge did not see
+material it should have. The cause does not matter; three reach it:
+
+| Where it is lost | Example |
+| --- | --- |
+| Staging left an entry out | a hardlinked or sparse file, a tree past a staging limit |
+| Staging could not copy content at all | an unreadable file or unlistable directory under a declared output |
+| The case record could not be **built** | an output file that cannot be read, a directory that cannot be listed, or a declared output resolving outside the case dir |
+
+The first two are agent-judge staging and are recorded against that judge. The
+third happens before any judge runs, so it is recorded against **all** of them —
+including judges that never read files, because none of them got a case to grade.
+It is not a list of error types: anything that stops the record being built
+counts, because a case that could not be assembled is one no judge graded.
+
+Most of the record-building reads happen only when some judge needs file
+contents — an agent judge that does not render `{{ outputs }}` reads its
+artifacts from disk instead — so a run of nothing but agent judges reaches the
+third row mainly through the `steps/` listing of a multi-step case.
+
+Why it is counted separately from `errored_cases`: an unscorable case leaves the
+denominator, so `min_pass_rate` would be satisfied by the survivors alone. While
+`incomplete_cases` is non-zero, no score threshold (`min_mean`, `min_pass_rate`,
+`min_win_rate`) can pass, and the run reports an `incomplete_staging` regression. `max_error_rate` is
+deliberately exempt: that gate is the author pricing how much of the dataset may
+go unscored, and auto-failing it would make a tolerant error budget impossible.
+
+A failure that is not about missing evidence stays an ordinary error. Staging
+`agent.context` is author-controlled, not skill-produced, so an overrun there
+fails the judge without counting here; so does a bug in the judge itself. The
+gate exists because the skill under test chooses what goes in its own output
+tree, and must not be able to improve its grade by making an artifact
+unreadable.
 
 ### `run_result.json`
 
