@@ -469,8 +469,8 @@ def _no_post_script(extra_args) -> bool:
 
     Matches the bare ``--no-post-script`` and the ``--no-post-script=<value>``
     form; any value other than a false-y spelling (``false``, ``0``, ``no``,
-    ``off``) enables it, so a misspelt value fails the case rather than
-    letting a run without artifacts through."""
+    ``off``, ``n``, ``f``) enables it, so a misspelt value fails the case
+    rather than letting a run without artifacts through."""
     for arg in extra_args or ():
         if not isinstance(arg, str):
             continue
@@ -718,7 +718,26 @@ def _settings_identities(workspace: Path, allowed_roots: Optional[list]) -> froz
             real = _resolve_link(candidate)
             if real is not None and candidate.exists():
                 found.add(real)
+        found |= _nested_settings_identities(root)
     return frozenset(found)
+
+
+def _nested_settings_identities(root: Path) -> set:
+    """Resolved targets of every ``settings.json`` / ``settings.local.json``
+    inside a nested ``.claude`` directory under ``root``, so an alias reaching
+    such a file through the link's own target is recognised like a direct link.
+    ``.git`` is skipped and directory links are not followed."""
+    found = set()
+    for dirpath, dirnames, _files in os.walk(root, followlinks=False):
+        dirnames[:] = [d for d in dirnames if d != ".git"]
+        if Path(dirpath).name != ".claude":
+            continue
+        for name in _SETTINGS_FILE_NAMES:
+            candidate = Path(dirpath) / name
+            real = _resolve_link(candidate)
+            if real is not None and candidate.exists():
+                found.add(real)
+    return found
 
 
 def _within_roots(path: Path, allowed_roots: Optional[list]) -> bool:

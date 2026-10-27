@@ -1384,6 +1384,27 @@ class TestMaterializeSymlinks:
         assert not (ws / "skills" / "x" / "own.json").exists()
         assert json.loads((ws / "backup.json").read_text()) == {"model": "opus"}
 
+    def test_alias_to_nested_settings_target_excluded(self, tmp_path, capsys):
+        """A link to the file a nested ``.claude/settings.local.json`` link
+        points at is skipped like a direct link to that settings file."""
+        project = tmp_path / "project"
+        (project / "components" / "app" / ".claude").mkdir(parents=True)
+        (project / "components" / "app" / "private.json").write_text('{"env": {"K": "v"}}')
+        (project / "components" / "app" / ".claude" / "settings.local.json").symlink_to(
+            Path("..") / "private.json")
+        (project / "skills" / "x").mkdir(parents=True)
+        (project / "skills" / "x" / "SKILL.md").write_text("# x")
+        (project / "skills" / "x" / "host.json").symlink_to(
+            Path("..") / ".." / "components" / "app" / "private.json")
+        ws = _workspace(tmp_path)
+        (ws / "skills").symlink_to(project / "skills")
+
+        materialize_symlinks(ws, [project.resolve()])
+
+        assert (ws / "skills" / "x" / "SKILL.md").is_file()
+        assert not (ws / "skills" / "x" / "host.json").exists()
+        assert "host.json" in capsys.readouterr().out
+
 
 def _run_script(script_name, args, cwd, env):
     cmd = [sys.executable, str(SCRIPTS / script_name)] + args
