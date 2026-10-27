@@ -21,8 +21,8 @@ from agent_eval.config import (  # noqa: E402
     DatasetConfig, EvalConfig, HookEntry, HooksConfig,
 )
 from agent_eval.hooks import (  # noqa: E402
-    HOOK_OUTPUT_ENV, HookError, build_hook_env, effective_on_failure,
-    hook_failed, hook_results_record, run_hooks, run_hooks_safe,
+    HookError, build_hook_env, collect_hook_outputs, effective_on_failure,
+    hook_output_path, hook_results_record, run_hooks, run_hooks_safe,
 )
 from score import _make_inline_check, load_case_record  # noqa: E402
 
@@ -377,3 +377,95 @@ def test_multi_step_after_each_default_continue(tmp_path):
     assert on_disk["exit_code"] == 0
     assert "error" not in on_disk
     assert on_disk["hooks"]["after_each"][0]["exit_code"] == 1
+
+
+# ---------------------------------------------------------------------------
+# $AGENT_EVAL_HOOK_OUTPUT contract
+# ---------------------------------------------------------------------------
+
+def test_the_drop_path_is_absolute_under_a_relative_output_dir(tmp_path,
+                                                               monkeypatch):
+    """`--output` is routinely relative — `$AGENT_EVAL_RUNS_DIR` defaults to
+    `eval/runs` — and hooks run with the CASE WORKSPACE as their cwd. A
+    relative path here would send the hook's redirect into
+    `<case-ws>/eval/runs/...` while the harness read its own cwd."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "eval" / "runs").mkdir(parents=True)
+    out = hook_output_path(Path("eval/runs/r1/hooks"), "before_each", "c0")
+    assert out.is_absolute()
+    assert out.is_relative_to(tmp_path.resolve())
+
+
+def test_a_hook_run_from_a_foreign_cwd_reaches_the_harness(tmp_path,
+                                                           monkeypatch):
+    """End to end: relative log dir, hook cwd elsewhere, output still read."""
+    monkeypatch.chdir(tmp_path)
+    elsewhere = tmp_path / "case-ws"
+    elsewhere.mkdir()
+    results = run_hooks(
+        [HookEntry(command='printf "data:\n  ok: 1\n" > "$AGENT_EVAL_HOOK_OUTPUT"')],
+        dict(os.environ), elsewhere, Path("out/hooks"), "before_each",
+        case_id="c0")
+    assert results[0].exit_code == 0
+    assert collect_hook_outputs(
+        elsewhere,
+        trusted_path=hook_output_path(Path("out/hooks"), "before_each", "c0"),
+    ) == {"data": {"ok": 1}}
+
+
+def test_sanitized_case_ids_do_not_share_a_drop_file(tmp_path):
+    """`case:a` and `case?a` both sanitize to `case_a`; the drop file is read
+    and unlinked, so a collision would hand one case the other's data."""
+    a = hook_output_path(tmp_path, "before_each", "case:a")
+    b = hook_output_path(tmp_path, "before_each", "case?a")
+    assert a != b
+
+
+def test_the_cli_does_not_fail_on_a_failing_after_all(tmp_path, monkeypatch):
+    """`after_all` is documented as "on_failure has no effect" and exited 0
+    before the CLI learned to report after_each failures."""
+    cfg = tmp_path / "eval.yaml"
+    cfg.write_text(textwrap.dedent("""\
+        name: t
+        execution:
+          skill: s
+        hooks:
+          after_all:
+            - command: "exit 1"
+          after_each:
+            - command: "exit 1"
+              on_failure: fail
+    """))
+    import agent_eval.hooks as H
+
+    def _run(phase):
+        monkeypatch.setattr(sys, "argv", [
+            "hooks", "--config", str(cfg), "--phase", phase,
+            "--output", str(tmp_path / "out"), "--workspace", str(tmp_path),
+            "--run-id", "r", "--model", "sonnet"])
+        try:
+            H.main()
+        except SystemExit as e:
+            return e.code or 0
+        return 0
+
+    assert _run("after_all") == 0
+    assert _run("after_each") == 1
+
+
+def test_the_documented_if_condition_actually_evaluates():
+    """`if:` conditions run with `__builtins__` set to {} (score.py), so no
+    `any()`/`all()`. Read the condition out of the doc so the example cannot
+    drift back into something that raises NameError on every case."""
+    doc = (Path(__file__).parent.parent / "website" / "concepts"
+           / "lifecycle-hooks.md").read_text()
+    conds = [line.split("if:", 1)[1].strip().strip('"')
+             for line in doc.splitlines() if line.strip().startswith("if:")]
+    assert conds, "no `if:` example found in lifecycle-hooks.md"
+    record = {"hooks": {"after_each": [{"exit_code": 1, "timed_out": False,
+                                        "skipped": False}]}}
+    for cond in conds:
+        assert not eval(cond, {"__builtins__": {}},
+                        {"annotations": {}, "outputs": record})
+        assert eval(cond, {"__builtins__": {}},
+                    {"annotations": {}, "outputs": {"hooks": {}}})

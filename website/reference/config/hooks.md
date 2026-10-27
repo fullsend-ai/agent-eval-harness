@@ -105,6 +105,7 @@ variables:
 | `AGENT_EVAL_CONFIG` | all phases | Absolute path to `eval.yaml` |
 | `AGENT_EVAL_PROJECT_ROOT` | all phases | Project root (`cwd`) |
 | `AGENT_EVAL_MODEL` | all phases | Skill model for the run |
+| `AGENT_EVAL_HOOK_OUTPUT` | all phases | Absolute path this phase's hooks write `env`/`data` to; under the run directory, so the agent cannot reach it |
 | `CASE_ID` | `before_each` / `after_each` | The case identifier |
 | `CASE_WORKSPACE` | `before_each` / `after_each` | Absolute path to this case's workspace |
 | `CASE_SOURCE_DIR` | `before_each` / `after_each` | The case's source directory under `dataset.path` |
@@ -126,8 +127,10 @@ hooks:
 ## Hook outputs
 
 A `before_all`, `before_each` or `after_each` hook can hand data back to the harness by
-writing a `.hook-outputs.yaml` (or `.hook-outputs.json`) file with `env` and/or
-`data` keys. The file is read and then deleted.
+writing a YAML mapping with `env` and/or `data` keys to **`$AGENT_EVAL_HOOK_OUTPUT`**.
+The file is read and then deleted. Writing `.hook-outputs.yaml` (or `.hook-outputs.json`)
+in the working directory still works for the phases that run **before** the agent;
+`after_each` accepts only `$AGENT_EVAL_HOOK_OUTPUT`, and only its `data` key.
 
 - **`env`** — merged into the environment of the **agent invocation** for that
   case (or all cases, for `before_all`). Use it to pass a freshly minted token or

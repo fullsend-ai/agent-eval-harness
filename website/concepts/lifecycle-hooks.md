@@ -105,6 +105,7 @@ Every hook receives the caller's environment plus harness-injected variables:
 | `AGENT_EVAL_CONFIG` | all | Absolute path to `eval.yaml` |
 | `AGENT_EVAL_PROJECT_ROOT` | all | Project root (the harness `cwd`) |
 | `AGENT_EVAL_MODEL` | all | Skill/agent model for the run |
+| `AGENT_EVAL_HOOK_OUTPUT` | all | Absolute path this phase's hooks write `env`/`data` to (see [Hook outputs](#hook-outputs-runners-and-judges)) |
 | `CASE_ID` | per-case | Current case id |
 | `CASE_WORKSPACE` | per-case | Absolute path to the case workspace |
 | `CASE_SOURCE_DIR` | per-case | Case source dir under `dataset.path` |
@@ -192,7 +193,8 @@ judges:
              if h["timed_out"] or (not h["skipped"] and h["exit_code"])]
       return not bad, "; ".join(bad) or "hooks clean"
   - name: tests_pass
-    if: "not any(h['exit_code'] for h in outputs.get('hooks', {}).get('after_each', []))"
+    # `if:` conditions evaluate with no builtins, so no any()/all().
+    if: "not [h for h in outputs.get('hooks', {}).get('after_each', []) if h['exit_code']]"
     check: |
       return outputs["hook_outputs"].get("tests_passed") is True, "from after_each"
 ```

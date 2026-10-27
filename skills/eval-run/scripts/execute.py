@@ -204,7 +204,8 @@ from agent_eval.providers.reconcile import (  # noqa: E402
     write_run_result as _reconciled_write,
 )
 from agent_eval.hooks import (  # noqa: E402 — after the early pidfile write
-    HookError, build_hook_env, collect_hook_outputs, describe_hook_failure,
+    HookError, build_hook_env, collect_hook_outputs,
+    collect_hook_outputs_with_source, describe_hook_failure,
     effective_on_failure, hook_failed, hook_output_path, hook_results_record,
     run_hooks, run_hooks_safe, save_hook_data,
 )
@@ -1652,14 +1653,20 @@ def _run_multi_step_case(runner, case_id, case_ws, output_dir, model,
                               case_id=case_id)
                     # Runs between agent turns, so `case_ws` is no longer
                     # harness-only. The cwd fallback stays for hooks that
-                    # predate HOOK_OUTPUT_ENV, but its `env` reaches the
-                    # next step, so say so when it is what we used.
-                    hout = collect_hook_outputs(
+                    # predate HOOK_OUTPUT_ENV — but what it yields goes into
+                    # the NEXT step's environment, so `env` is honoured only
+                    # from the path the agent cannot write.
+                    hout, src = collect_hook_outputs_with_source(
                         case_ws, trusted_path=hook_output_path(
                             log_dir, f"before_step:{step_id}", case_id))
-                    if hout.get("env"):
+                    if hout.get("env") and src == "trusted":
                         step_env.update(
                             {k: str(v) for k, v in hout["env"].items()})
+                    elif hout.get("env"):
+                        print(f"  before_step:{step_id}: ignoring `env` from "
+                              f"{case_ws}/.hook-outputs.yaml — the agent can "
+                              f"write there; use $AGENT_EVAL_HOOK_OUTPUT",
+                              file=sys.stderr)
                 step_system_prompt = system_prompt
                 if getattr(step, "runner", None) and step.runner.system_prompt:
                     # Same precedence Harbor task generation applies: a
