@@ -409,12 +409,17 @@ Per case (or once per batch) the runner:
    replaced by a real copy (nested links followed relative to the link's own
    directory, dangling links dropped, `.git` excluded). A link whose real target
    lies outside the project root and the configured `runner.plugin_dirs` is
-   dropped with a warning, so host files never reach the sandbox; so is a link,
-   top-level or nested, whose target is a `.claude/settings.json` or `.claude/settings.local.json`
-   file under any root, which the rewrite of step 2 never saw (the
-   workspace's own, already rewritten, file is the one exception) (a regular file of
-   that name reached without a link is part of the tree you chose to stage and is
-   copied). The project root
+   dropped with a warning, so host files never reach the sandbox. Claude Code settings
+   files are never copied from a followed tree, because the rewrite of step 2 never saw
+   them: an entry whose destination would be `.claude/settings.json` or
+   `.claude/settings.local.json` is skipped (regular file or link, however the tree was
+   reached), and so is any entry, link or file, whose real path is one of the
+   `settings.json` / `settings.local.json` files or `.claude` directories of the project
+   root, the plugin directories or the workspace (for example a link to `.claude`, a
+   `.claude` that is itself a link to a differently named directory, or a
+   `settings.local.json` that links to a file elsewhere). The one exception covers only a
+   top-level link to the workspace's own, already rewritten, `settings.json`; a nested
+   link to it is dropped. The project root
    is never modified. Each copy is built under a temporary name and swapped in last,
    and a failure is reported as a failed case (exit `-1`).
 2. **Rewrites the workspace `.claude/settings.json`** for this runner. The harness
@@ -428,12 +433,13 @@ Per case (or once per batch) the runner:
    carries over from `<project>/.claude/settings.json`, such as a `SessionStart`
    recovery hook or a `Stop` guard — are kept: a production fullsend run loads
    exactly those from the checkout, so the eval keeps the same recovery machinery.
-   The two are told apart by their command: a harness hook runs a script by its
-   host-absolute path under the workspace's `hooks/` directory, a project hook
-   runs a relative command (`python3 scripts/...`) that resolves inside the
-   uploaded repository, so a hook entry is removed when any of its commands
-   names an absolute path and kept otherwise; an event whose entries were all
-   removed is dropped. The rewrite happens before the copies of step 1 are
+   The two are told apart by their command: a harness hook runs a script from the
+   workspace's own `hooks/` directory (`python3 '<workspace>/hooks/subagent_stop.py'`,
+   `python3 '<workspace>/hooks/tools.py'`), a project hook never does, so a hook
+   entry is removed when an absolute path in one of its commands resolves to a
+   path under `<workspace>/hooks` and kept otherwise (absolute paths elsewhere,
+   such as `/usr/bin/python3 scripts/guard.py`, do not matter); an event whose
+   entries were all removed is dropped. The rewrite happens before the copies of step 1 are
    made, so a workspace link that resolves to the file is copied already stripped;
    a `.claude` directory or `settings.json` that is itself a symlink cannot be
    stripped in place and fails the case. Because the interception hooks never

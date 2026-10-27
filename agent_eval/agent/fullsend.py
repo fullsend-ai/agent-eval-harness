@@ -527,8 +527,8 @@ def _sanitize_settings(
 
     The harness writes ``env`` (execution.env, already passed to fullsend through
     its own environment), its own hook entries (``SubagentStop`` capture and
-    ``PreToolUse`` interception, whose commands name host-absolute paths under
-    the workspace's ``hooks/`` directory, which do not exist in the sandbox) and
+    ``PreToolUse`` interception, whose commands run a script from the workspace's
+    own ``hooks/`` directory, which does not exist in the sandbox) and
     ``permissions.additionalDirectories`` (host directories) for the other
     runners. fullsend uploads the settings file with the repository, and the
     agent definition owns the sandbox's environment, so those are removed here.
@@ -571,7 +571,7 @@ def _sanitize_settings(
         del settings["env"]
         changed = True
     if "hooks" in settings:
-        kept = _project_hooks(settings["hooks"])
+        kept = _project_hooks(settings["hooks"], workspace)
         if kept != settings["hooks"]:
             changed = True
             if kept:
@@ -596,7 +596,7 @@ def _sanitize_settings(
     return original, mode
 
 
-def _project_hooks(hooks):
+def _project_hooks(hooks, workspace: Path):
     """The ``hooks`` block without the harness-injected entries.
 
     Each event's list keeps only the groups ``_is_harness_hook`` rejects; an
@@ -604,50 +604,66 @@ def _project_hooks(hooks):
     as-is (the CLI rejects it either way)."""
     if not isinstance(hooks, dict):
         return hooks
+    roots = _harness_hook_dirs(workspace)
     kept = {}
     for event, groups in hooks.items():
         if not isinstance(groups, list):
             kept[event] = groups
             continue
-        remaining = [g for g in groups if not _is_harness_hook(g)]
+        remaining = [g for g in groups if not _is_harness_hook(g, workspace, roots)]
         if remaining:
             kept[event] = remaining
     return kept
 
 
-def _is_harness_hook(group) -> bool:
+def _harness_hook_dirs(workspace: Path) -> list:
+    """The workspace's ``hooks/`` directory, resolved and as given: workspace.py
+    may have written the path before symlink resolution (``/tmp`` versus
+    ``/private/tmp`` on macOS)."""
+    return [workspace.resolve() / "hooks", workspace / "hooks"]
+
+
+def _is_harness_hook(group, workspace: Path, hook_dirs: Optional[list] = None) -> bool:
     """Whether a hook group was injected by the harness for the other runners.
 
     ``workspace.py`` sets no marker on its entries, but every one it writes
-    (``setup_subagent_hook``, ``generate_interception``) runs a script by its
-    host-absolute path under the staged workspace's ``hooks/`` directory,
-    while the project's hooks are copied verbatim from the checkout and run
-    relative commands that resolve inside the uploaded repository. So a group
-    is the harness's when any of its command handlers names an absolute path
-    (a ``shlex`` token starting with ``/``; a command that does not tokenise
-    is checked for a ``/``-led token textually). Such a path cannot exist in
-    the sandbox anyway, so a project hook that names one would not work there
-    either."""
+    (``setup_subagent_hook``, ``generate_interception``) runs a script from the
+    staged workspace's own ``hooks/`` directory
+    (``python3 '<workspace>/hooks/subagent_stop.py'``,
+    ``python3 '<workspace>/hooks/tools.py'``). The project's hooks are copied
+    verbatim from the checkout and never run a script from there. So a group is
+    the harness's only when an absolute token of one of its command handlers
+    resolves to a path under ``<workspace>/hooks``; every other hook, absolute
+    paths included (``/usr/bin/python3 scripts/guard.py``), is kept. A command
+    that does not tokenise is checked for ``/``-led tokens textually."""
     if not isinstance(group, dict) or not isinstance(group.get("hooks"), list):
         return False
+    roots = _harness_hook_dirs(workspace) if hook_dirs is None else hook_dirs
     for handler in group["hooks"]:
         if not isinstance(handler, dict):
             continue
         command = handler.get("command")
-        if isinstance(command, str) and _names_absolute_path(command):
+        if isinstance(command, str) and _runs_workspace_hook(command, roots):
             return True
     return False
 
 
-_ABS_TOKEN = re.compile(r"""(?:^|[\s"'=])/""")
+_ABS_TOKEN = re.compile(r"""(?:^|[\s"'=])(/[^\s"']*)""")
 
 
-def _names_absolute_path(command: str) -> bool:
+def _runs_workspace_hook(command: str, hook_dirs: list) -> bool:
     try:
         tokens = shlex.split(command)
     except ValueError:
-        return bool(_ABS_TOKEN.search(command))
-    return any(tok.startswith("/") for tok in tokens)
+        tokens = _ABS_TOKEN.findall(command)
+    for tok in tokens:
+        if not tok.startswith("/"):
+            continue
+        real = _resolve_link(Path(tok))
+        if real is not None and any(
+                real == root or root in real.parents for root in hook_dirs):
+            return True
+    return False
 
 
 def materialize_symlinks(workspace: Path, allowed_roots: Optional[list] = None) -> None:
@@ -665,14 +681,16 @@ def materialize_symlinks(workspace: Path, allowed_roots: Optional[list] = None) 
     a failed copy leaves the link in place.
     """
     # The workspace's own settings file is sanitised before this runs, so a
-    # link to it may be copied; a link to any other settings file may not.
+    # top-level link to it may be copied; a link to any other settings file, or
+    # one to it from inside a copied tree, may not.
     canonical = _resolve_link(workspace / ".claude" / "settings.json")
+    settings_ids = _settings_identities(workspace, allowed_roots)
     for entry in sorted(workspace.iterdir()):
-        _materialize_link(entry, allowed_roots, canonical)
+        _materialize_link(entry, allowed_roots, canonical, settings_ids)
     claude_dir = workspace / ".claude"
     if claude_dir.is_dir():
         for entry in sorted(claude_dir.iterdir()):
-            _materialize_link(entry, allowed_roots, canonical)
+            _materialize_link(entry, allowed_roots, canonical, settings_ids)
 
 
 def _resolve_link(path: Path) -> Optional[Path]:
@@ -682,6 +700,27 @@ def _resolve_link(path: Path) -> Optional[Path]:
         return None
 
 
+def _settings_identities(workspace: Path, allowed_roots: Optional[list]) -> frozenset:
+    """Resolved paths of the Claude Code settings files and ``.claude``
+    directories of every allowed root and of the workspace, so a link is
+    recognised by what it points at whatever its own name or its target's
+    name (``.claude`` may itself be a link to a differently named directory,
+    and ``settings.local.json`` a link to a file elsewhere)."""
+    roots = [workspace, *(allowed_roots or [])]
+    found = set()
+    for root in roots:
+        claude = root / ".claude"
+        real_claude = _resolve_link(claude)
+        if real_claude is not None and real_claude.is_dir():
+            found.add(real_claude)
+        for name in _SETTINGS_FILE_NAMES:
+            candidate = claude / name
+            real = _resolve_link(candidate)
+            if real is not None and candidate.exists():
+                found.add(real)
+    return frozenset(found)
+
+
 def _within_roots(path: Path, allowed_roots: Optional[list]) -> bool:
     if allowed_roots is None:
         return True
@@ -689,8 +728,13 @@ def _within_roots(path: Path, allowed_roots: Optional[list]) -> bool:
 
 
 def _materialize_link(path: Path, allowed_roots: Optional[list] = None,
-                      canonical_settings: Optional[Path] = None) -> None:
+                      canonical_settings: Optional[Path] = None,
+                      settings_ids: frozenset = frozenset()) -> None:
     if not path.is_symlink():
+        return
+    if _is_settings_destination(path):
+        _warn_settings_link(path)
+        path.unlink()
         return
     target = _resolve_link(path)
     if path.name == ".git" or target is None or not target.exists():
@@ -708,10 +752,11 @@ def _materialize_link(path: Path, allowed_roots: Optional[list] = None,
         _warn_self_referential(path)
         path.unlink()
         return
-    # A link to a Claude Code settings file other than this workspace's own
-    # (already sanitised) one would upload host settings the sanitiser never
-    # saw, e.g. <project>/.claude/settings.local.json.
-    if (_is_settings_file(target)
+    # A link to a Claude Code settings file (or ``.claude`` directory) other
+    # than this workspace's own (already sanitised) settings.json would upload
+    # host settings the sanitiser never saw, e.g.
+    # <project>/.claude/settings.local.json.
+    if ((_is_settings_file(target) or target in settings_ids)
             and (canonical_settings is None or target != canonical_settings)):
         _warn_settings_link(path)
         path.unlink()
@@ -723,7 +768,8 @@ def _materialize_link(path: Path, allowed_roots: Optional[list] = None,
     try:
         staged = scratch / path.name
         if target.is_dir():
-            _copy_tree(target, staged, allowed_roots, (target,), scratch.resolve())
+            _copy_tree(target, staged, allowed_roots, (target,), scratch.resolve(),
+                       settings_ids)
         else:
             shutil.copy2(target, staged)
         path.unlink()
@@ -733,20 +779,25 @@ def _materialize_link(path: Path, allowed_roots: Optional[list] = None,
 
 
 def _copy_tree(src: Path, dest: Path, allowed_roots, active: tuple,
-               staging: Optional[Path] = None) -> None:
+               staging: Optional[Path] = None,
+               settings_ids: frozenset = frozenset()) -> None:
     """Copy ``src`` into ``dest`` as real files, following symlinks.
 
     Each nested link resolves relative to its own parent. Dangling links,
-    links leaving ``allowed_roots``, links to a ``.claude/settings.json`` or
-    ``.claude/settings.local.json`` file under any root (host settings the
-    sanitiser never saw), links back into a directory already being copied
-    (cycles) and the ``staging`` directory this copy is being built in are
-    skipped; ``.git`` is excluded. A regular file with one of those names,
-    reached without a link, is part of the tree the user chose to stage and
-    is copied."""
+    links leaving ``allowed_roots``, links back into a directory already being
+    copied (cycles) and the ``staging`` directory this copy is being built in
+    are skipped; ``.git`` is excluded. So is every Claude Code settings file
+    (host settings the sanitiser never saw): an entry whose destination would
+    be ``.claude/settings.json`` or ``.claude/settings.local.json``, a file
+    that is one of ``settings_ids`` and a link resolving to one of them (a
+    ``.claude`` directory included), regular or linked and however the tree
+    was reached."""
     dest.mkdir(parents=True, exist_ok=True)
     for entry in sorted(src.iterdir()):
         if entry.name == ".git":
+            continue
+        if _is_settings_destination(dest / entry.name):
+            _warn_settings_entry(entry)
             continue
         real = entry
         if entry.is_symlink():
@@ -759,12 +810,15 @@ def _copy_tree(src: Path, dest: Path, allowed_roots, active: tuple,
             if _is_settings_file(real):
                 _warn_settings_link(entry)
                 continue
+        if real in settings_ids and (entry.is_symlink() or real.is_file()):
+            _warn_settings_entry(entry)
+            continue
         if real.is_dir():
             if staging is not None and _resolve_link(real) == staging:
                 continue
             if real not in active:
                 _copy_tree(real, dest / entry.name, allowed_roots, active + (real,),
-                           staging)
+                           staging, settings_ids)
         elif real.is_file():
             shutil.copy2(real, dest / entry.name)
 
@@ -785,6 +839,19 @@ def _is_settings_file(real: Path) -> bool:
     directory is ``.claude``."""
     return (real.name in _SETTINGS_FILE_NAMES and real.parent.name == ".claude"
             and real.is_file())
+
+
+def _is_settings_destination(path: Path) -> bool:
+    """``path`` (where an entry will land) is ``<...>/.claude/settings.json`` or
+    ``.../settings.local.json``."""
+    return path.name in _SETTINGS_FILE_NAMES and path.parent.name == ".claude"
+
+
+def _warn_settings_entry(path: Path) -> None:
+    with _print_lock:
+        print(f"  WARNING: not copying {path.name!r} into the fullsend "
+              f"workspace: it is a .claude settings file, which would be "
+              f"uploaded unsanitised", flush=True)
 
 
 def _warn_settings_link(path: Path) -> None:
