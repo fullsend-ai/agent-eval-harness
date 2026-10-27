@@ -16,7 +16,8 @@ fails the build. The mechanism is deliberately small: you declare per-judge
 
 Scoring aggregates each judge by value type — **boolean** judges become a `pass_rate`,
 **numeric** judges become a `mean`, and a `--baseline` [pairwise](../concepts/pairwise-and-sampling.md)
-comparison produces a `win_rate`. Regression detection compares those aggregates against
+comparison records win/loss/tie counts, from which `score.py regression` computes a
+`win_rate` (`wins_a / (wins_a + wins_b + ties)` — A is the run under test). Regression detection compares those aggregates against
 the `thresholds` block and, on any breach, returns exit code `1`.
 
 ```mermaid
@@ -38,7 +39,7 @@ four keys; a run regresses if the matching aggregate misses its bound.
 | --- | --- | --- | --- |
 | `min_pass_rate` | boolean judges | `pass_rate` (fraction of cases that returned `True`) | `pass_rate >= min_pass_rate` |
 | `min_mean` | numeric judges (e.g. 1–5 LLM scores) | `mean` (average value across cases) | `mean >= min_mean` |
-| `min_win_rate` | a pairwise judge (needs `--baseline`) | `win_rate` | `win_rate >= min_win_rate` |
+| `min_win_rate` | a pairwise judge (needs `--baseline`; checked by `score.py regression`) | `win_rate` | `win_rate >= min_win_rate` |
 | `max_error_rate` | any judge (opt-in) | fraction of cases where the judge errored | `error_rate <= max_error_rate` |
 
 ```yaml title="eval.yaml (excerpt)"

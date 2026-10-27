@@ -62,7 +62,7 @@ def _runner_provenance_params(config_runner_type, run_result):
             if eval_params.get(key) is not None}
 
 
-def _detect_regressions(judges, thresholds):
+def _detect_regressions(judges, thresholds, pairwise=None):
     """score.py's regression detector, loaded by path.
 
     The judge engine lives with the eval-run skill rather than in the
@@ -79,7 +79,7 @@ def _detect_regressions(judges, thresholds):
                                                   score_path)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
-    return mod.detect_regressions(judges, thresholds)
+    return mod.detect_regressions(judges, thresholds, pairwise=pairwise)
 
 
 def _resolve_skill(config: EvalConfig) -> str | None:
@@ -430,7 +430,8 @@ def main():
         else:
             try:
                 regressions_tag = (
-                    "yes" if _detect_regressions(judges, config.thresholds)
+                    "yes" if _detect_regressions(judges, config.thresholds,
+                                                 summary.get("pairwise"))
                     else "no")
             except Exception as exc:
                 print(f"Warning: could not evaluate thresholds: {exc}",

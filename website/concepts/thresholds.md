@@ -35,8 +35,13 @@ use must match the **value type the judge produces**.
     - **Boolean judges** get a `pass_rate` (fraction of `True`), and `mean` is set to the
       same value. So `min_mean` *also* works on a boolean judge — `0.9` means "90% passed".
     - **Numeric judges** get a `mean`; their `pass_rate` is always `None`.
-    - `win_rate` is populated only for a pairwise judge, and only when a baseline
-      comparison actually ran.
+    - `win_rate` is not stored anywhere. `score.py regression` computes it from the
+      run's `pairwise` section (written by `score.py pairwise --baseline <id>`) as
+      `wins_a / (wins_a + wins_b + ties)`. A is the run under test, so a tie counts
+      against it, and errored comparisons are left out. With no `pairwise` section, or
+      with every comparison errored, `win_rate` is unavailable and `min_win_rate`
+      regresses. `score.py judges` runs before the comparison, so it does not check
+      `min_win_rate`.
 
 ## Match the key to the judge's value type
 
