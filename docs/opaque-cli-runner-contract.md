@@ -94,7 +94,7 @@ Before the command runs, the workspace contains:
 | `.claude/settings.json` | Permissions, hooks, env vars | No — Claude Code specific |
 | `.claude/hooks/tools.py` | Tool interception script | No — Claude Code specific |
 | `subagents/` | Subagent transcript capture dir | No — Claude Code specific |
-| Symlinks to `scripts/`, `skills/`, `CLAUDE.md`, `.context/` | Project resources | Maybe — depends on the external command |
+| Symlinks to `scripts/`, `skills/`, `CLAUDE.md`, `.context/`, plus any `execution.symlinks` entries | Project resources | Maybe — depends on the external command |
 
 ## What the harness reads after execution
 
