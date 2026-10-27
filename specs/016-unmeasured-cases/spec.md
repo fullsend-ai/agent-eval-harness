@@ -174,11 +174,19 @@ RL training data and should land on its own.
 
 ## Open questions
 
-1. **The name.** `unmeasured` is the author's pick. `void`, `invalid`, `unjudgeable`
-   were considered; `infra_failures` was rejected because the agent-suppressed-evidence
-   case is not infrastructure failing, and the unifying property is that the measurement
-   is void rather than whose fault it was. Weakly held — this is the part most worth
-   arguing about, and it is cheap to change before anything writes it.
+1. **The name, and a collision.** `unmeasured` is the author's pick. `void`, `invalid`,
+   `unjudgeable` were considered; `infra_failures` was rejected because the
+   agent-suppressed-evidence case is not infrastructure failing, and the unifying
+   property is that the measurement is void rather than whose fault it was.
+
+   But the word is **already spent on a different referent** in PR #200
+   (measurement-validity, open since 2026-08-21): `_VALIDITY_LAYER_NAMES` /
+   `unmeasured_layers` / `"status": "unmeasured"` describe validity **layers**, not
+   cases — and both write into `summary.yaml`. If both land as drafted,
+   `validity.v_total.unmeasured_layers` and a case-level `unmeasured` list sit one key
+   apart meaning different things. One of the two should move. Since #200 is 204
+   commits behind and will be re-landed in slices, whichever lands second should
+   rename; this spec is the cheaper one to change while nothing writes it.
 2. **Is `attribution` binary?** A judge-provider 500 is `harness`; an agent hiding an
    artifact is `agent`. A hook that fails *because* the agent left the repo dirty is
    neither cleanly. Proposal: keep it binary, let `kind` carry the nuance, and make
