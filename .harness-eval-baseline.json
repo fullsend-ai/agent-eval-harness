@@ -1,0 +1,475 @@
+{
+  "version": "1.0",
+  "findings": [
+    {
+      "rule_id": "content/token-budget",
+      "file": "skills/eval-analyze/SKILL.md",
+      "message_hash": "2c08f768cffeef1d"
+    },
+    {
+      "rule_id": "content/broken-references",
+      "file": "skills/eval-analyze/SKILL.md",
+      "message_hash": "9663bd96618972ba"
+    },
+    {
+      "rule_id": "content/broken-references",
+      "file": "skills/eval-analyze/SKILL.md",
+      "message_hash": "1bbac23b303b5cc2"
+    },
+    {
+      "rule_id": "content/circular-references",
+      "file": "skills/eval-mlflow/SKILL.md",
+      "message_hash": "2cbde5ef54fd6885"
+    },
+    {
+      "rule_id": "content/circular-references",
+      "file": "skills/eval-mlflow/SKILL.md",
+      "message_hash": "738bf2e30c184637"
+    },
+    {
+      "rule_id": "content/circular-references",
+      "file": "skills/eval-analyze/SKILL.md",
+      "message_hash": "0f833c2ee6073178"
+    },
+    {
+      "rule_id": "content/circular-references",
+      "file": "skills/eval-review/SKILL.md",
+      "message_hash": "a605d7ee47da1e93"
+    },
+    {
+      "rule_id": "content/circular-references",
+      "file": "skills/eval-run/SKILL.md",
+      "message_hash": "e994e5ef6017c8e7"
+    },
+    {
+      "rule_id": "content/circular-references",
+      "file": "skills/eval-analyze/SKILL.md",
+      "message_hash": "7cd34bbc8112af29"
+    },
+    {
+      "rule_id": "content/circular-references",
+      "file": "skills/eval-run/SKILL.md",
+      "message_hash": "be434a9fcb628aae"
+    },
+    {
+      "rule_id": "content/circular-references",
+      "file": "skills/eval-analyze/SKILL.md",
+      "message_hash": "bf0bee311a2c0ecd"
+    },
+    {
+      "rule_id": "security/ast-behavioral",
+      "file": "skills/eval-analyze/SKILL.md",
+      "message_hash": "6ff95995467f1b14"
+    },
+    {
+      "rule_id": "security/mcp-least-privilege",
+      "file": "skills/eval-analyze/SKILL.md",
+      "message_hash": "dc185dca9495b3d9"
+    },
+    {
+      "rule_id": "security/mcp-least-privilege",
+      "file": "skills/eval-analyze/SKILL.md",
+      "message_hash": "72ac0988e3f28963"
+    },
+    {
+      "rule_id": "quality/unfinished-content",
+      "file": "skills/eval-analyze/SKILL.md",
+      "message_hash": "de3c02ef35d7bf8b"
+    },
+    {
+      "rule_id": "quality/unfinished-content",
+      "file": "skills/eval-analyze/SKILL.md",
+      "message_hash": "116c08ad83133e59"
+    },
+    {
+      "rule_id": "security/cross-component-flow",
+      "file": "skills/eval-analyze/SKILL.md",
+      "message_hash": "e915824f07ef5369"
+    },
+    {
+      "rule_id": "security/cross-component-flow",
+      "file": "skills/eval-anova/SKILL.md",
+      "message_hash": "1b7ab55b1eca1bdd"
+    },
+    {
+      "rule_id": "security/cross-component-flow",
+      "file": "skills/eval-anova/SKILL.md",
+      "message_hash": "f0ed67f054c2c002"
+    },
+    {
+      "rule_id": "security/cross-component-flow",
+      "file": "skills/eval-dataset/SKILL.md",
+      "message_hash": "b913174a583b92a3"
+    },
+    {
+      "rule_id": "security/cross-component-flow",
+      "file": "skills/eval-mlflow/SKILL.md",
+      "message_hash": "e70543dc4dfb8417"
+    },
+    {
+      "rule_id": "security/cross-component-flow",
+      "file": "skills/eval-setup/SKILL.md",
+      "message_hash": "05db34a310736c37"
+    },
+    {
+      "rule_id": "security/unbounded-delegation",
+      "file": "skills/eval-analyze/SKILL.md",
+      "message_hash": "0da02998e590e340"
+    },
+    {
+      "rule_id": "security/unbounded-delegation",
+      "file": "skills/eval-analyze/SKILL.md",
+      "message_hash": "6af4b37bb17f5cdc"
+    },
+    {
+      "rule_id": "security/unbounded-delegation",
+      "file": "skills/eval-analyze/SKILL.md",
+      "message_hash": "f0d916f5810404de"
+    },
+    {
+      "rule_id": "content/description-length",
+      "file": "skills/eval-analyze/SKILL.md",
+      "message_hash": "f9db35697ddd118e"
+    },
+    {
+      "rule_id": "security/ast-behavioral",
+      "file": "skills/eval-anova/SKILL.md",
+      "message_hash": "2832a2cc1c683c63"
+    },
+    {
+      "rule_id": "security/ast-behavioral",
+      "file": "skills/eval-anova/SKILL.md",
+      "message_hash": "a73e32d44db38ab3"
+    },
+    {
+      "rule_id": "content/description-length",
+      "file": "skills/eval-anova/SKILL.md",
+      "message_hash": "60d8e9dfc15a8bf3"
+    },
+    {
+      "rule_id": "content/broken-references",
+      "file": "skills/eval-check/SKILL.md",
+      "message_hash": "1e748e3388e3af85"
+    },
+    {
+      "rule_id": "content/broken-references",
+      "file": "skills/eval-check/SKILL.md",
+      "message_hash": "57e210f6257f70cf"
+    },
+    {
+      "rule_id": "security/mcp-least-privilege",
+      "file": "skills/eval-check/SKILL.md",
+      "message_hash": "ce1c30456788d7b4"
+    },
+    {
+      "rule_id": "content/description-length",
+      "file": "skills/eval-check/SKILL.md",
+      "message_hash": "a5ccdc7abd10cd33"
+    },
+    {
+      "rule_id": "security/mcp-least-privilege",
+      "file": "skills/eval-compare/SKILL.md",
+      "message_hash": "dbb087db3339815d"
+    },
+    {
+      "rule_id": "security/mcp-least-privilege",
+      "file": "skills/eval-compare/SKILL.md",
+      "message_hash": "58fd33277a617857"
+    },
+    {
+      "rule_id": "security/mcp-least-privilege",
+      "file": "skills/eval-compare/SKILL.md",
+      "message_hash": "e7909091f3d9a900"
+    },
+    {
+      "rule_id": "content/token-budget",
+      "file": "skills/eval-dataset/SKILL.md",
+      "message_hash": "52461a5ae97d1fa2"
+    },
+    {
+      "rule_id": "content/broken-references",
+      "file": "skills/eval-dataset/SKILL.md",
+      "message_hash": "877aa7ff5c32289b"
+    },
+    {
+      "rule_id": "security/no-prompt-injection",
+      "file": "skills/eval-dataset/SKILL.md",
+      "message_hash": "195f29b41e72eb92"
+    },
+    {
+      "rule_id": "security/mcp-least-privilege",
+      "file": "skills/eval-dataset/SKILL.md",
+      "message_hash": "26afb7749ae7676d"
+    },
+    {
+      "rule_id": "security/mcp-least-privilege",
+      "file": "skills/eval-dataset/SKILL.md",
+      "message_hash": "aa194b054694b1aa"
+    },
+    {
+      "rule_id": "security/mcp-least-privilege",
+      "file": "skills/eval-dataset/SKILL.md",
+      "message_hash": "bb9315e9db3c7815"
+    },
+    {
+      "rule_id": "quality/imprecise-instruction",
+      "file": "skills/eval-dataset/SKILL.md",
+      "message_hash": "cf2fdd16f91cb63c"
+    },
+    {
+      "rule_id": "content/description-length",
+      "file": "skills/eval-dataset/SKILL.md",
+      "message_hash": "6cf1d3639621af33"
+    },
+    {
+      "rule_id": "content/broken-references",
+      "file": "skills/eval-mlflow/SKILL.md",
+      "message_hash": "f43e18b083cbb3b3"
+    },
+    {
+      "rule_id": "security/mcp-least-privilege",
+      "file": "skills/eval-mlflow/SKILL.md",
+      "message_hash": "54d5b432d802da87"
+    },
+    {
+      "rule_id": "security/mcp-least-privilege",
+      "file": "skills/eval-mlflow/SKILL.md",
+      "message_hash": "58f88d87d8f13ba9"
+    },
+    {
+      "rule_id": "security/mcp-least-privilege",
+      "file": "skills/eval-mlflow/SKILL.md",
+      "message_hash": "0fa4b7ebda734600"
+    },
+    {
+      "rule_id": "security/unbounded-delegation",
+      "file": "skills/eval-optimize/SKILL.md",
+      "message_hash": "e5002bebc9d600b8"
+    },
+    {
+      "rule_id": "security/unbounded-delegation",
+      "file": "skills/eval-optimize/SKILL.md",
+      "message_hash": "009d5506e4d2d4fb"
+    },
+    {
+      "rule_id": "security/unbounded-delegation",
+      "file": "skills/eval-optimize/SKILL.md",
+      "message_hash": "f10701bf74946e79"
+    },
+    {
+      "rule_id": "content/description-length",
+      "file": "skills/eval-optimize/SKILL.md",
+      "message_hash": "ea034311bf4f912e"
+    },
+    {
+      "rule_id": "content/broken-references",
+      "file": "skills/eval-review/SKILL.md",
+      "message_hash": "22bbbd501ba69775"
+    },
+    {
+      "rule_id": "content/broken-references",
+      "file": "skills/eval-review/SKILL.md",
+      "message_hash": "877aa7ff5c32289b"
+    },
+    {
+      "rule_id": "content/duplicate-detection",
+      "file": "skills/eval-review/SKILL.md",
+      "message_hash": "2cdc81f6758ce6bc"
+    },
+    {
+      "rule_id": "security/unbounded-delegation",
+      "file": "skills/eval-review/SKILL.md",
+      "message_hash": "b345264faea66d10"
+    },
+    {
+      "rule_id": "security/unbounded-delegation",
+      "file": "skills/eval-review/SKILL.md",
+      "message_hash": "f1b91e1a9ed4c0aa"
+    },
+    {
+      "rule_id": "content/description-length",
+      "file": "skills/eval-review/SKILL.md",
+      "message_hash": "ea034311bf4f912e"
+    },
+    {
+      "rule_id": "content/token-budget",
+      "file": "skills/eval-run/SKILL.md",
+      "message_hash": "724f2211c947443c"
+    },
+    {
+      "rule_id": "content/broken-references",
+      "file": "skills/eval-run/SKILL.md",
+      "message_hash": "4c37f82251b7e463"
+    },
+    {
+      "rule_id": "content/broken-references",
+      "file": "skills/eval-run/SKILL.md",
+      "message_hash": "f4e1b337a77326b6"
+    },
+    {
+      "rule_id": "content/broken-references",
+      "file": "skills/eval-run/SKILL.md",
+      "message_hash": "8cd84672a636fb58"
+    },
+    {
+      "rule_id": "security/ast-behavioral",
+      "file": "skills/eval-run/SKILL.md",
+      "message_hash": "d02ebfe7b0c3c03c"
+    },
+    {
+      "rule_id": "security/ast-behavioral",
+      "file": "skills/eval-run/SKILL.md",
+      "message_hash": "88008e5873b2a002"
+    },
+    {
+      "rule_id": "security/ast-behavioral",
+      "file": "skills/eval-run/SKILL.md",
+      "message_hash": "546099d060799b09"
+    },
+    {
+      "rule_id": "security/ast-behavioral",
+      "file": "skills/eval-run/SKILL.md",
+      "message_hash": "d51f2732f4e15c0f"
+    },
+    {
+      "rule_id": "security/ast-behavioral",
+      "file": "skills/eval-run/SKILL.md",
+      "message_hash": "563eea1a9bc84023"
+    },
+    {
+      "rule_id": "security/ast-behavioral",
+      "file": "skills/eval-run/SKILL.md",
+      "message_hash": "31a3c99b31fdfa7e"
+    },
+    {
+      "rule_id": "security/ast-behavioral",
+      "file": "skills/eval-run/SKILL.md",
+      "message_hash": "fa701f6cd4d4c8cb"
+    },
+    {
+      "rule_id": "security/ast-behavioral",
+      "file": "skills/eval-run/SKILL.md",
+      "message_hash": "b119070df362d5f8"
+    },
+    {
+      "rule_id": "security/ast-behavioral",
+      "file": "skills/eval-run/SKILL.md",
+      "message_hash": "216d417e42c75548"
+    },
+    {
+      "rule_id": "security/ast-behavioral",
+      "file": "skills/eval-run/SKILL.md",
+      "message_hash": "66fa31faaeaf8fac"
+    },
+    {
+      "rule_id": "security/ast-behavioral",
+      "file": "skills/eval-run/SKILL.md",
+      "message_hash": "ce9e9d494b9dcdd1"
+    },
+    {
+      "rule_id": "security/ast-behavioral",
+      "file": "skills/eval-run/SKILL.md",
+      "message_hash": "d76697408a2316c3"
+    },
+    {
+      "rule_id": "security/ast-behavioral",
+      "file": "skills/eval-run/SKILL.md",
+      "message_hash": "41df07d49f5d9eea"
+    },
+    {
+      "rule_id": "security/ast-behavioral",
+      "file": "skills/eval-run/SKILL.md",
+      "message_hash": "4df07258a749d065"
+    },
+    {
+      "rule_id": "security/ast-behavioral",
+      "file": "skills/eval-run/SKILL.md",
+      "message_hash": "0931cd379a36ca7e"
+    },
+    {
+      "rule_id": "security/ast-behavioral",
+      "file": "skills/eval-run/SKILL.md",
+      "message_hash": "51bc1fbd0ea583a3"
+    },
+    {
+      "rule_id": "security/ast-behavioral",
+      "file": "skills/eval-run/SKILL.md",
+      "message_hash": "2cf14bb529bcb778"
+    },
+    {
+      "rule_id": "security/ast-behavioral",
+      "file": "skills/eval-run/SKILL.md",
+      "message_hash": "f28c754ed0b14702"
+    },
+    {
+      "rule_id": "security/ast-behavioral",
+      "file": "skills/eval-run/SKILL.md",
+      "message_hash": "71a6edb3cb9afef3"
+    },
+    {
+      "rule_id": "security/ast-behavioral",
+      "file": "skills/eval-run/SKILL.md",
+      "message_hash": "357d8aea3621eba2"
+    },
+    {
+      "rule_id": "security/ast-behavioral",
+      "file": "skills/eval-run/SKILL.md",
+      "message_hash": "337b8785d9f2d895"
+    },
+    {
+      "rule_id": "security/mcp-least-privilege",
+      "file": "skills/eval-run/SKILL.md",
+      "message_hash": "8afc3fdd7f570930"
+    },
+    {
+      "rule_id": "security/mcp-least-privilege",
+      "file": "skills/eval-run/SKILL.md",
+      "message_hash": "3a44c18fcd3ce2d4"
+    },
+    {
+      "rule_id": "security/mcp-least-privilege",
+      "file": "skills/eval-run/SKILL.md",
+      "message_hash": "976a6a4ba7838bd1"
+    },
+    {
+      "rule_id": "security/mcp-least-privilege",
+      "file": "skills/eval-run/SKILL.md",
+      "message_hash": "f5c8aac963698744"
+    },
+    {
+      "rule_id": "security/mcp-least-privilege",
+      "file": "skills/eval-run/SKILL.md",
+      "message_hash": "31a256700d62b1e5"
+    },
+    {
+      "rule_id": "content/description-length",
+      "file": "skills/eval-run/SKILL.md",
+      "message_hash": "daeef27ca2ce2b72"
+    },
+    {
+      "rule_id": "security/ast-behavioral",
+      "file": "skills/eval-setup/SKILL.md",
+      "message_hash": "e64a5d3d4be97155"
+    },
+    {
+      "rule_id": "security/mcp-least-privilege",
+      "file": "skills/eval-setup/SKILL.md",
+      "message_hash": "3b30841d08070d6c"
+    },
+    {
+      "rule_id": "security/mcp-least-privilege",
+      "file": "skills/eval-setup/SKILL.md",
+      "message_hash": "3c0fd6b4ef34dc2d"
+    },
+    {
+      "rule_id": "quality/imprecise-instruction",
+      "file": "skills/eval-setup/SKILL.md",
+      "message_hash": "500292fe0d6fb8fe"
+    },
+    {
+      "rule_id": "content/description-length",
+      "file": "skills/eval-setup/SKILL.md",
+      "message_hash": "9eec58b6ba652bd9"
+    }
+  ]
+}
