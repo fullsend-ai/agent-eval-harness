@@ -2066,7 +2066,8 @@ def _execute_per_case(args, config, runner, runner_cls,
         "agent_version": getattr(runner, "version", ""),
         "execution_mode": config.execution.mode,
         "eval_params": _with_runner_provenance(
-            eval_params, runner, _case_console_logs(output_dir, case_results)),
+            eval_params, runner,
+            lambda: _case_console_logs(output_dir, case_results)),
         "per_case": case_results,
         "message_ids": sorted({i for r in case_results.values()
                                for i in (r.get("message_ids") or [])}),
@@ -2095,13 +2096,16 @@ def _execute_per_case(args, config, runner, runner_cls,
 def _with_runner_provenance(eval_params, runner, console_texts):
     """``eval_params`` plus the runner's run-level provenance, for runners that
     record one (fullsend: versions, sandbox image, harness commit). Other
-    runners' params are returned unchanged, so those fields stay absent."""
+    runners' params are returned unchanged, so those fields stay absent.
+    ``console_texts`` is a list or a callable returning one; a callable runs
+    inside the guard and only for runners that record provenance."""
     params = dict(eval_params or {})
     provenance = getattr(runner, "provenance", None)
     if not callable(provenance):
         return params
     try:
-        fields = provenance(console_texts)
+        texts = console_texts() if callable(console_texts) else console_texts
+        fields = provenance(texts)
     except Exception as exc:  # provenance must never fail a run
         print(f"WARNING: could not record {runner.name} provenance: {exc}",
               file=sys.stderr)

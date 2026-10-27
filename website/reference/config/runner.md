@@ -410,16 +410,23 @@ MLflow run parameters. The fields are captured once per run:
 | `fullsend_agent` | `runner.agent` |
 | `fullsend_version` | `<binary> version`, falling back to `<binary> --version` |
 | `openshell_version` | `openshell version` / `openshell --version` when `openshell` is on `PATH` |
-| `sandbox_image` | The `Image:` line in fullsend's console output (the run's captured `stderr.log`). Falls back to `image:` in `<fullsend_dir>/harness/<agent>.yaml` only when no invocation printed that line |
+| `sandbox_image` | The `Image:` line in fullsend's console output (the run's captured `stderr.log`). Falls back to `image:` in the agent's harness file only when no invocation printed that line. The harness file is the one `<fullsend_dir>/config.yaml` registers: the last enabled `agents[]` entry whose `name` or source file name (without extension or `#` fragment) matches `runner.agent`, case-insensitively, resolved as `<fullsend_dir>/<source>`. A URL source, an override-only entry (no `source`) or a path outside `fullsend_dir` gives `null`. `<fullsend_dir>/harness/<agent>.yaml` is read only when no entry matches |
 | `sandbox_image_source` | `"fullsend-output"` or `"harness-file"`, depending on where `sandbox_image` came from |
-| `sandbox_arch` | The architecture fullsend printed next to the image or on an `Arch:` line, if it printed one |
+| `sandbox_arch` | The architecture fullsend printed next to the image or on an `Arch:` line. fullsend prints none today, so this stays `null`; the field is kept for when it does |
 | `agent_harness_commit` | `git rev-parse HEAD` of `fullsend_dir` when it is inside a git checkout |
 
-The console output is authoritative for the image: `FULLSEND_SANDBOX_IMAGE` and
-`FULLSEND_SANDBOX_ARCH` in fullsend's environment (the runner passes the caller's
-environment through) replace the harness's pinned image and architecture. Every
-field is optional. A missing tool or a failed parse records `null` and prints a
-warning, and never fails the run. Other runners do not write these keys at all.
+The console output is authoritative for the image: `FULLSEND_SANDBOX_IMAGE` in
+fullsend's environment (the runner passes the caller's environment through)
+replaces the harness's pinned image. `FULLSEND_SANDBOX_ARCH` selects the
+architecture of the fullsend binary copied into the sandbox, not the image's.
+
+Provenance reflects the top-level `runner:` block only; step-level runner
+overrides are not recorded. The version probes run with `execution.env` and
+`runner.env` applied, not a step's or a hook's environment.
+
+Every field is optional. A missing tool or a failed parse records `null` and
+prints a warning, and never fails the run. Other runners do not write these keys
+at all.
 
 ### `workspace_mode`
 

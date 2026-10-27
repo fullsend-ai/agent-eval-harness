@@ -166,7 +166,8 @@ class FullsendRunner(EvalRunner):
         of the run's invocations. ``sandbox_image`` is the ``Image:`` line
         fullsend printed there — authoritative, since ``FULLSEND_SANDBOX_IMAGE``
         in the fullsend environment replaces the harness's pinned image — and
-        falls back to ``image:`` in ``<fullsend_dir>/harness/<agent>.yaml`` only
+        falls back to ``image:`` in the agent's harness file (registered in
+        ``<fullsend_dir>/config.yaml``; see :func:`harness_file_image`) only
         when no console output has that line (``sandbox_image_source`` says
         which). ``sandbox_arch`` is set only when fullsend printed it. Every
         field is ``None`` when it cannot be determined, with a warning; this
@@ -999,22 +1000,84 @@ def parse_sandbox_image(console: str) -> tuple:
     return image, arch
 
 
-def harness_file_image(fullsend_dir, agent: str) -> Optional[str]:
-    """``image:`` from ``<fullsend_dir>/harness/<agent>.yaml`` (``.yml`` when
-    no ``.yaml`` exists), or ``None`` when absent or unreadable."""
-    if not agent or Path(agent).name != agent:
+def _read_yaml_mapping(path: Path) -> Optional[dict]:
+    """The mapping in a YAML file, or ``None`` (with a warning when the file
+    exists but cannot be parsed) when it is absent, unreadable or not a mapping."""
+    if not path.is_file():
         return None
-    for suffix in (".yaml", ".yml"):
-        path = Path(fullsend_dir) / "harness" / f"{agent}{suffix}"
-        if not path.is_file():
+    try:
+        data = yaml.safe_load(path.read_text())
+    except (OSError, ValueError, yaml.YAMLError) as exc:
+        _warn_provenance(f"could not read {path}: {exc}")
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _image_of(path: Path) -> Optional[str]:
+    data = _read_yaml_mapping(path)
+    image = data.get("image") if data else None
+    return image.strip() if isinstance(image, str) and image.strip() else None
+
+
+_URL_SOURCE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
+
+
+def _registered_agent_entry(config: dict, agent: str) -> Optional[dict]:
+    """The last enabled ``agents[]`` entry of ``<fullsend_dir>/config.yaml``
+    whose ``name`` or source stem (``#`` fragment stripped) equals ``agent``,
+    case-insensitively — fullsend's ``findConfigAgentEntry`` lookup."""
+    entries = config.get("agents")
+    if not isinstance(entries, list):
+        return None
+    wanted = agent.casefold()
+    match = None
+    for entry in entries:
+        if not isinstance(entry, dict) or entry.get("enabled") is False:
             continue
-        try:
-            data = yaml.safe_load(path.read_text())
-        except (OSError, ValueError, yaml.YAMLError) as exc:
-            _warn_provenance(f"could not read {path}: {exc}")
+        names = []
+        if isinstance(entry.get("name"), str):
+            names.append(entry["name"])
+        source = entry.get("source")
+        if isinstance(source, str) and source:
+            names.append(Path(source.split("#", 1)[0]).stem)
+        if any(n.casefold() == wanted for n in names):
+            match = entry
+    return match
+
+
+def harness_file_image(fullsend_dir, agent: str) -> Optional[str]:
+    """``image:`` of the harness file fullsend would load for ``agent``.
+
+    A per-repo install registers the agent in ``<fullsend_dir>/config.yaml``
+    under ``agents[].source``, and fullsend resolves the harness as
+    ``<fullsend_dir>/<source>``. A matching entry decides the answer: a
+    relative ``source`` that stays inside ``fullsend_dir`` gives that file's
+    ``image:``; a URL source, an override-only entry (no ``source``) or an
+    unreadable file gives ``None``. Only when no entry matches is
+    ``<fullsend_dir>/harness/<agent>.yaml`` (``.yml`` when no ``.yaml`` exists)
+    tried. ``None`` when nothing yields an image."""
+    if not agent or not isinstance(agent, str) or Path(agent).name != agent:
+        return None
+    root = Path(fullsend_dir)
+    config = _read_yaml_mapping(root / "config.yaml")
+    entry = _registered_agent_entry(config, agent) if config else None
+    if entry is not None:
+        source = entry.get("source")
+        if not isinstance(source, str):
             return None
-        image = data.get("image") if isinstance(data, dict) else None
-        return image.strip() if isinstance(image, str) and image.strip() else None
+        source = source.split("#", 1)[0].strip()
+        if not source or _URL_SOURCE_RE.match(source) or Path(source).is_absolute():
+            return None
+        path = (root / source).resolve()
+        try:
+            path.relative_to(root.resolve())
+        except ValueError:
+            return None
+        return _image_of(path)
+    for suffix in (".yaml", ".yml"):
+        path = root / "harness" / f"{agent}{suffix}"
+        if path.is_file():
+            return _image_of(path)
     return None
 
 

@@ -26,7 +26,8 @@ from agent_eval.config import discover_configs  # noqa: E402
 ALLOWED_YAML_READERS = {
     "agent_eval/config.py": {"_read_config_mapping": "the single raw loader"},
     "agent_eval/agent/cli_runner.py": {"execute": "case input.yaml"},
-    "agent_eval/agent/fullsend.py": {"harness_file_image": "fullsend harness/<agent>.yaml image:"},
+    "agent_eval/agent/fullsend.py": {
+        "_read_yaml_mapping": "fullsend <fullsend_dir>/config.yaml (agent registry) and the harness file's image:"},
     "agent_eval/evalhub/adapter.py": {"_run_cases": "case input.yaml"},
     "agent_eval/examples.py": {"harvest_review_examples": "review.yaml"},
     "agent_eval/harbor/tasks.py": {"generate_tasks": "case input.yaml"},
