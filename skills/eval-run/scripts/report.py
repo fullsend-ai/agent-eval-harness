@@ -1576,13 +1576,14 @@ def _render_scoring_summary(summary, config, baseline_summary=None):
         # The column shows one representative bound; which one is cosmetic.
         if isinstance(thresh, dict):
             if "min_pass_rate" in thresh and pass_rate is not None:
-                thresh_str = f"&ge; {_pct(thresh['min_pass_rate'])}"
+                thresh_str = f"&ge; {_esc(_pct(thresh['min_pass_rate']))}"
             elif "min_mean" in thresh and mean is not None:
-                thresh_str = f"&ge; {thresh['min_mean']}"
+                thresh_str = f"&ge; {_esc(str(thresh['min_mean']))}"
             elif "min_win_rate" in thresh:
-                thresh_str = f"&ge; {_pct(thresh['min_win_rate'])}"
+                thresh_str = f"&ge; {_esc(_pct(thresh['min_win_rate']))}"
             elif "max_error_rate" in thresh:
-                thresh_str = f"&le; {_pct(thresh['max_error_rate'])} errored"
+                thresh_str = (f"&le; {_esc(_pct(thresh['max_error_rate']))} "
+                              "errored")
 
         # A breach is authoritative and is checked FIRST, because the metric it
         # gates on need not be one this table can display: a judge gated only
@@ -1666,7 +1667,7 @@ def _render_scoring_summary(summary, config, baseline_summary=None):
         pw_thresh = thresholds.get("pairwise")
         pw_thresh_str = "—"
         if isinstance(pw_thresh, dict) and "min_win_rate" in pw_thresh:
-            pw_thresh_str = f"&ge; {_pct(pw_thresh['min_win_rate'])}"
+            pw_thresh_str = f"&ge; {_esc(_pct(pw_thresh['min_win_rate']))}"
             if "pairwise" in _breached:
                 pw_status_cls, pw_status = "fail", "FAIL"
             elif _breach_known:

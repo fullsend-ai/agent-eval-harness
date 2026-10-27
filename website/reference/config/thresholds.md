@@ -12,7 +12,7 @@ thresholds:
     min_pass_rate: 1.0       # boolean judge — fraction of cases passing (0.0–1.0)
     max_error_rate: 0.2      # optional — fail if >20% of cases errored
   # pairwise:
-  #   min_win_rate: 0.6      # pairwise judge — fraction of cases won vs baseline
+  #   min_win_rate: 0.6      # pairwise judge — share of decided comparisons won vs baseline
 ```
 
 The block is a plain mapping (`dict`, default empty). When it is empty or
@@ -24,7 +24,7 @@ omitted, no gate runs and scoring always succeeds.
 | --- | --- | --- | --- |
 | `min_mean` | numeric (score) judges | mean score across cases | `mean >= min_mean` |
 | `min_pass_rate` | boolean judges | fraction of cases returning `True` | `pass_rate >= min_pass_rate` |
-| `min_win_rate` | the `pairwise` judge | fraction of cases won vs the `--baseline` run | `win_rate >= min_win_rate` |
+| `min_win_rate` | the `pairwise` judge (checked by `score.py regression`) | `wins_a / (wins_a + wins_b + ties)` vs the `--baseline` run — A is the run under test, so a tie counts against it and errored comparisons are left out | `win_rate >= min_win_rate` |
 | `max_error_rate` | any judge | fraction of cases where the judge errored | `error_rate <= max_error_rate` |
 
 `max_error_rate` is the coverage gate. The other three are computed over the
@@ -97,7 +97,9 @@ flowchart TD
 === "During a run"
 
     `/eval-run` scores, then evaluates `thresholds`. Detected regressions are
-    printed and the process **exits with status 1**:
+    printed and the process **exits with status 1**. `min_win_rate` is not
+    checked at this step — the pairwise comparison runs afterwards, so it is
+    evaluated by the standalone `score.py regression` re-check below:
 
     ```text
     REGRESSIONS: 2 detected

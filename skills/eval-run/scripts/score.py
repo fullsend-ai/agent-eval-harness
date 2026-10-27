@@ -5496,7 +5496,8 @@ def detect_regressions(current_results, thresholds, baseline_results=None,
         if current is None:
             # The pairwise judge never has a `judges` aggregate — its result
             # is the run's `pairwise` section — so its gate is checked here.
-            if check_win_rate and "min_win_rate" in threshold:
+            if (check_win_rate and judge_name == "pairwise"
+                    and "min_win_rate" in threshold):
                 regressions.extend(
                     _win_rate_regressions(judge_name, threshold, pairwise))
             continue
@@ -5575,9 +5576,17 @@ def detect_regressions(current_results, thresholds, baseline_results=None,
             elif mean < threshold["min_mean"]:
                 regressions.append(Regression(judge_name, "mean",
                                               f">= {threshold['min_mean']}", str(mean)))
-        if check_win_rate and "min_win_rate" in threshold:
-            regressions.extend(
-                _win_rate_regressions(judge_name, threshold, pairwise))
+        if "min_win_rate" in threshold:
+            if judge_name != "pairwise":
+                # The run-wide pairwise comparison is the pairwise judge's
+                # result only; on any other judge `min_win_rate` is a wrong-type
+                # threshold and must fail loudly, not borrow that verdict.
+                regressions.append(Regression(
+                    judge_name, "win_rate", f">= {threshold['min_win_rate']}",
+                    "n/a", "win_rate unavailable — not a pairwise judge"))
+            elif check_win_rate:
+                regressions.extend(
+                    _win_rate_regressions(judge_name, threshold, pairwise))
         if baseline_results:
             if baseline and current:
                 for key in ("mean", "pass_rate"):

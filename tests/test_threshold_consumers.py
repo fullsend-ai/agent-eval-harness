@@ -209,6 +209,17 @@ def test_unavailable_win_rate_says_why():
         {}, {"pairwise": {"min_win_rate": 0.6}}, pairwise=None)[0].detail
 
 
+def test_min_win_rate_on_a_non_pairwise_judge_fails_loudly():
+    """A winning pairwise section must not satisfy a wrong-type threshold."""
+    regs = detect_regressions(
+        {"quality": {"mean": 4.0, "scored_cases": 10}},
+        {"quality": {"min_win_rate": 0.8}},
+        pairwise=_pairwise_section("AAAAAAAAAA"))
+    assert [(r.judge_name, r.metric, r.current_value) for r in regs] == [
+        ("quality", "win_rate", "n/a")]
+    assert "not a pairwise judge" in regs[0].detail
+
+
 def test_a_caller_without_a_comparison_leaves_min_win_rate_alone():
     """`score.py judges` runs before `score.py pairwise` (and Harbor/EvalHub
     never run one), so the default must not fail the gate on a comparison that
