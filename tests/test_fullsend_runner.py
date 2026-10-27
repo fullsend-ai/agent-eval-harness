@@ -1300,6 +1300,66 @@ class TestProvenance:
         (fs_dir / "harness" / "rfe-creator-eval.yaml").symlink_to(fs_dir / "shared.yaml")
         assert fullsend_mod.harness_file_image(fs_dir, "rfe-creator-eval") == "shared:1"
 
+    @pytest.mark.parametrize("raises", [False, True], ids=["real-loop", "resolve-raises"])
+    def test_looping_symlink_in_fullsend_dir_nulls_only_the_image(
+            self, tmp_path, fake_fullsend, monkeypatch, capsys, raises):
+        """A self-referential symlink under fullsend_dir must not escape
+        provenance(): only sandbox_image is null; version fields survive.
+        Path.resolve() raises RuntimeError/OSError on a loop before Python 3.13,
+        so ``resolve-raises`` forces that for every Python."""
+        _no_openshell(monkeypatch)
+        monkeypatch.setenv("FAKE_FULLSEND_NO_IMAGE", "1")
+        runner = _runner(tmp_path)
+        fs_dir = Path(runner._fullsend_dir)
+        loop = fs_dir / "loop.yaml"
+        loop.symlink_to(loop)
+        (fs_dir / "config.yaml").write_text(yaml.dump({"agents": [
+            {"name": "rfe-creator-eval", "source": "loop.yaml"}]}))
+        if raises:
+            real_resolve = Path.resolve
+
+            def resolve(self, *args, **kwargs):
+                if self.name == "loop.yaml":
+                    raise RuntimeError("Symlink loop from " + str(self))
+                return real_resolve(self, *args, **kwargs)
+
+            monkeypatch.setattr(Path, "resolve", resolve)
+            assert fullsend_mod._contained(fs_dir, loop) is None
+        result = runner.execute("rfe.speedrun", "", _workspace(tmp_path), "opus")
+        assert "Image:" not in result.stderr
+        prov = runner.provenance([result.stderr])
+        assert prov["fullsend_agent"] == "rfe-creator-eval"
+        assert prov["fullsend_version"] == "0.49.0"
+        assert prov["sandbox_image"] is None
+        assert prov["sandbox_image_source"] is None
+        assert "sandbox_image is null" in capsys.readouterr().out
+
+    def test_looping_symlink_keeps_other_fields_in_run_params(
+            self, tmp_path, fake_fullsend, monkeypatch):
+        import execute
+        _no_openshell(monkeypatch)
+        monkeypatch.setenv("FAKE_FULLSEND_NO_IMAGE", "1")
+        runner = _runner(tmp_path)
+        fs_dir = Path(runner._fullsend_dir)
+        loop = fs_dir / "loop.yaml"
+        loop.symlink_to(loop)
+        (fs_dir / "config.yaml").write_text(yaml.dump({"agents": [
+            {"name": "rfe-creator-eval", "source": "loop.yaml"}]}))
+        real_resolve = Path.resolve
+
+        def resolve(self, *args, **kwargs):
+            if self.name == "loop.yaml":
+                raise RuntimeError("Symlink loop from " + str(self))
+            return real_resolve(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "resolve", resolve)
+        params = execute._with_runner_provenance(
+            {"execution_mode": "case"}, runner, [])
+        assert params["execution_mode"] == "case"
+        assert params["fullsend_agent"] == "rfe-creator-eval"
+        assert params["fullsend_version"] == "0.49.0"
+        assert params["sandbox_image"] is None
+
     def test_unparseable_yaml_warning_names_path_not_parser_text(
             self, tmp_path, capsys):
         fs_dir = Path(_runner(tmp_path)._fullsend_dir)

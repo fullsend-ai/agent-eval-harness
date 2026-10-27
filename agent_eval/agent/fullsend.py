@@ -1053,10 +1053,13 @@ def _registered_agent_entry(config: dict, agent: str) -> Optional[dict]:
 
 def _contained(root: Path, path: Path) -> Optional[Path]:
     """``path`` resolved (symlinks followed), or ``None`` when it resolves
-    outside ``root``."""
-    resolved = path.resolve()
+    outside ``root`` or cannot be resolved (a looping or unreadable link)."""
+    resolved = _resolve_link(path)
+    resolved_root = _resolve_link(root)
+    if resolved is None or resolved_root is None:
+        return None
     try:
-        resolved.relative_to(root.resolve())
+        resolved.relative_to(resolved_root)
     except ValueError:
         return None
     return resolved
