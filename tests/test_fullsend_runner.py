@@ -1270,6 +1270,47 @@ class TestProvenance:
         (fs_dir / "config.yaml").write_text(yaml.dump({"agents": [{"name": "code"}]}))
         assert fullsend_mod.harness_file_image(fs_dir, "rfe-creator-eval") == "pinned:1"
 
+    def test_config_yaml_symlinked_outside_is_not_read(self, tmp_path):
+        """config.yaml that resolves outside fullsend_dir is ignored like an
+        escaping source: the harness/ fallback answers instead."""
+        fs_dir = Path(_runner(tmp_path)._fullsend_dir)
+        (fs_dir / "harness").mkdir()
+        (fs_dir / "harness" / "rfe-creator-eval.yaml").write_text("image: pinned:1\n")
+        (fs_dir / "sub").mkdir()
+        (fs_dir / "sub" / "agent.yaml").write_text("image: registered:1\n")
+        outside = tmp_path / "outside-config.yaml"
+        outside.write_text(yaml.dump({"agents": [
+            {"name": "rfe-creator-eval", "source": "sub/agent.yaml"}]}))
+        (fs_dir / "config.yaml").symlink_to(outside)
+        assert fullsend_mod.harness_file_image(fs_dir, "rfe-creator-eval") == "pinned:1"
+
+    @pytest.mark.parametrize("suffix", [".yaml", ".yml"])
+    def test_legacy_harness_file_symlinked_outside_is_not_read(self, tmp_path, suffix):
+        fs_dir = Path(_runner(tmp_path)._fullsend_dir)
+        (fs_dir / "harness").mkdir()
+        outside = tmp_path / "outside-harness.yaml"
+        outside.write_text("image: out:1\n")
+        (fs_dir / "harness" / f"rfe-creator-eval{suffix}").symlink_to(outside)
+        assert fullsend_mod.harness_file_image(fs_dir, "rfe-creator-eval") is None
+
+    def test_legacy_harness_file_symlinked_inside_is_read(self, tmp_path):
+        fs_dir = Path(_runner(tmp_path)._fullsend_dir)
+        (fs_dir / "harness").mkdir()
+        (fs_dir / "shared.yaml").write_text("image: shared:1\n")
+        (fs_dir / "harness" / "rfe-creator-eval.yaml").symlink_to(fs_dir / "shared.yaml")
+        assert fullsend_mod.harness_file_image(fs_dir, "rfe-creator-eval") == "shared:1"
+
+    def test_unparseable_yaml_warning_names_path_not_parser_text(
+            self, tmp_path, capsys):
+        fs_dir = Path(_runner(tmp_path)._fullsend_dir)
+        (fs_dir / "config.yaml").write_text(
+            "agents: [SECRET-VALUE\n  - {unclosed: \"SECRET-VALUE\n")
+        assert fullsend_mod.harness_file_image(fs_dir, "rfe-creator-eval") is None
+        out = capsys.readouterr().out
+        assert f"{fs_dir / 'config.yaml'} could not be parsed" in out
+        assert "SECRET-VALUE" not in out
+        assert "line" not in out.replace("could not be parsed", "")
+
     def test_everything_missing_is_null_with_warnings(self, tmp_path, monkeypatch,
                                                       capsys):
         _no_openshell(monkeypatch)
@@ -1483,6 +1524,15 @@ class TestProvenanceNeverFailsTheRun:
         import execute
         params = execute._with_runner_provenance({}, self._Runner(), lambda: ["x", "y"])
         assert params["texts"] == 2
+
+
+class TestProvenanceKeysOnRunnerAbstraction:
+    def test_only_fullsend_declares_keys(self):
+        assert EvalRunner.PROVENANCE_KEYS == ()
+        assert RUNNERS["fullsend"].PROVENANCE_KEYS == fullsend_mod.PROVENANCE_KEYS
+        for name, cls in RUNNERS.items():
+            if name != "fullsend":
+                assert cls.PROVENANCE_KEYS == (), name
 
 
 class TestOtherRunnersUnchanged:

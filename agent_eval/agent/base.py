@@ -49,6 +49,11 @@ class RunResult:
 class EvalRunner(ABC):
     """Abstract runner -- one implementation per agent platform."""
 
+    # ``eval_params`` keys in run_result.json that this runner's
+    # ``provenance()`` records and that are logged as MLflow params; empty for
+    # runners that record no run-level provenance.
+    PROVENANCE_KEYS: tuple = ()
+
     @classmethod
     @abstractmethod
     def from_config(cls, config, *, log_prefix=None, **overrides):

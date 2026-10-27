@@ -89,6 +89,8 @@ _GIT_SHA_RE = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")
 class FullsendRunner(EvalRunner):
     """Runs a skill by invoking ``fullsend run <agent>`` on the workspace."""
 
+    PROVENANCE_KEYS = PROVENANCE_KEYS
+
     @classmethod
     def from_config(cls, config, *, log_prefix=None, **overrides):
         runner = config.runner
@@ -1007,8 +1009,12 @@ def _read_yaml_mapping(path: Path) -> Optional[dict]:
         return None
     try:
         data = yaml.safe_load(path.read_text())
-    except (OSError, ValueError, yaml.YAMLError) as exc:
-        _warn_provenance(f"could not read {path}: {exc}")
+    except OSError:
+        _warn_provenance(f"{path} could not be read")
+        return None
+    except (ValueError, yaml.YAMLError):
+        # No parser text: it can quote the file's contents.
+        _warn_provenance(f"{path} could not be parsed")
         return None
     return data if isinstance(data, dict) else None
 
@@ -1045,6 +1051,17 @@ def _registered_agent_entry(config: dict, agent: str) -> Optional[dict]:
     return match
 
 
+def _contained(root: Path, path: Path) -> Optional[Path]:
+    """``path`` resolved (symlinks followed), or ``None`` when it resolves
+    outside ``root``."""
+    resolved = path.resolve()
+    try:
+        resolved.relative_to(root.resolve())
+    except ValueError:
+        return None
+    return resolved
+
+
 def harness_file_image(fullsend_dir, agent: str) -> Optional[str]:
     """``image:`` of the harness file fullsend would load for ``agent``.
 
@@ -1059,7 +1076,8 @@ def harness_file_image(fullsend_dir, agent: str) -> Optional[str]:
     if not agent or not isinstance(agent, str) or Path(agent).name != agent:
         return None
     root = Path(fullsend_dir)
-    config = _read_yaml_mapping(root / "config.yaml")
+    config_path = _contained(root, root / "config.yaml")
+    config = _read_yaml_mapping(config_path) if config_path else None
     entry = _registered_agent_entry(config, agent) if config else None
     if entry is not None:
         source = entry.get("source")
@@ -1068,16 +1086,13 @@ def harness_file_image(fullsend_dir, agent: str) -> Optional[str]:
         source = source.split("#", 1)[0].strip()
         if not source or _URL_SOURCE_RE.match(source) or Path(source).is_absolute():
             return None
-        path = (root / source).resolve()
-        try:
-            path.relative_to(root.resolve())
-        except ValueError:
-            return None
-        return _image_of(path)
+        path = _contained(root, root / source)
+        return _image_of(path) if path else None
     for suffix in (".yaml", ".yml"):
-        path = root / "harness" / f"{agent}{suffix}"
-        if path.is_file():
-            return _image_of(path)
+        candidate = root / "harness" / f"{agent}{suffix}"
+        if candidate.is_file():
+            path = _contained(root, candidate)
+            return _image_of(path) if path else None
     return None
 
 

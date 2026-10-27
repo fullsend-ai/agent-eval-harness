@@ -1,5 +1,7 @@
 """Tests for log_results.py path-safety helpers (harbor job-dir traversal)."""
 
+from pathlib import Path
+
 import pytest
 
 try:
@@ -158,3 +160,33 @@ class TestProvenanceTagsAndMetrics:
         assert _provenance_metrics({"cost_usd": 1.0}) == {}
         dirty = _provenance_tags({"routing": {"violations": [{"gen_id": "x"}], "audit_complete": False}})
         assert dirty["audit_clean"] == "no" and dirty["audit_violations"] == "1"
+
+
+@pytest.mark.skipif(not _has_mlflow, reason="mlflow not installed")
+class TestRunnerProvenanceParams:
+    def test_logs_non_null_fields_the_runner_declares(self):
+        from log_results import _runner_provenance_params
+
+        from agent_eval.agent import RUNNERS
+
+        keys = RUNNERS["fullsend"].PROVENANCE_KEYS
+        eval_params = {key: f"v-{key}" for key in keys}
+        eval_params["sandbox_arch"] = None
+        eval_params["max_budget_usd"] = 5  # not provenance
+        got = _runner_provenance_params("fullsend", {"eval_params": eval_params})
+        assert got == {k: f"v-{k}" for k in keys if k != "sandbox_arch"}
+
+    def test_other_runners_and_missing_params_log_nothing(self):
+        from log_results import _runner_provenance_params
+
+        rr = {"eval_params": {"fullsend_version": "1", "sandbox_image": "x"}}
+        assert _runner_provenance_params("claude-code", rr) == {}
+        assert _runner_provenance_params("no-such-runner", rr) == {}
+        assert _runner_provenance_params("fullsend", {}) == {}
+        assert _runner_provenance_params("fullsend", {"eval_params": None}) == {}
+
+    def test_log_results_does_not_import_the_concrete_runner_module(self):
+        import log_results
+
+        assert not hasattr(log_results, "FULLSEND_PROVENANCE_KEYS")
+        assert "agent_eval.agent.fullsend" not in Path(log_results.__file__).read_text()

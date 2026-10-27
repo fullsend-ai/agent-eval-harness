@@ -30,7 +30,7 @@ except ImportError:
           file=sys.stderr)
     sys.exit(0)
 
-from agent_eval.agent.fullsend import PROVENANCE_KEYS as FULLSEND_PROVENANCE_KEYS
+from agent_eval.agent import RUNNERS
 from agent_eval.ci_context import (
     collect_ci_context,
     find_harness_snapshot,
@@ -45,6 +45,17 @@ from agent_eval.mlflow.trace_builder import build_trace, log_trace
 # Same transcript metric extractor the run-level aggregation uses, so per-step
 # trace cost/tokens match the run `cost_usd` metric and the HTML report.
 from agent_eval.harbor.results import _extract_transcript_metrics
+
+
+def _runner_provenance_params(runner_type, run_result):
+    """The non-null run-level provenance fields in ``run_result["eval_params"]``
+    that the configured runner declares (``EvalRunner.PROVENANCE_KEYS``), as
+    strings. Empty for runners that record none."""
+    runner_cls = RUNNERS.get(runner_type)
+    eval_params = run_result.get("eval_params") or {}
+    return {key: str(eval_params[key])
+            for key in getattr(runner_cls, "PROVENANCE_KEYS", ())
+            if eval_params.get(key) is not None}
 
 
 def _detect_regressions(judges, thresholds):
@@ -343,11 +354,7 @@ def main():
             params["subagent_model"] = run_result["subagent_model"]
         if run_result.get("agent"):
             params["agent"] = run_result["agent"]
-        # fullsend runner provenance; absent (and not logged) for other runners.
-        eval_params = run_result.get("eval_params") or {}
-        for key in FULLSEND_PROVENANCE_KEYS:
-            if eval_params.get(key) is not None:
-                params[key] = str(eval_params[key])
+        params.update(_runner_provenance_params(config.runner.type, run_result))
         for key, value in params.items():
             if value:
                 mlflow.log_param(key, value)
