@@ -687,7 +687,10 @@ class HookEntry:
     command: str = ""
     timeout: int = 120
     description: str = ""
-    on_failure: str = "fail"  # "fail" | "continue"
+    # None = the phase default (`continue` for after_each, `fail` elsewhere),
+    # resolved by `hooks.effective_on_failure` so a HookEntry built in Python
+    # behaves like the same entry written in eval.yaml.
+    on_failure: Optional[str] = None  # None | "fail" | "continue"
     condition: str = ""
 
 
@@ -2922,13 +2925,13 @@ class EvalConfig:
                   "after_step", "before_scoring", "after_all", "before_report"]
         for phase in phases:
             entries = []
-            # after_each always ran with continue semantics; an explicit
-            # `on_failure: fail` now fails the case (not the run), so the
-            # default stays `continue` there to keep existing evals as-is.
-            default_on_failure = "continue" if phase == "after_each" else "fail"
+
             for h in (hooks_raw.get(phase) or []):
-                on_failure_val = h.get("on_failure", default_on_failure)
-                if on_failure_val not in ("fail", "continue"):
+                # Left as None when unset: the phase default is applied at
+                # run time by `hooks.effective_on_failure`, in one place.
+                on_failure_val = h.get("on_failure")
+                if on_failure_val is not None and on_failure_val not in (
+                        "fail", "continue"):
                     raise ValueError(
                         f"hooks.{phase}: on_failure must be 'fail' or "
                         f"'continue', got '{on_failure_val}'")

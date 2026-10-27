@@ -79,6 +79,69 @@ def _safe_log_component(value: str) -> str:
     return "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in value)
 
 
+# A hook's drop file is read back into the agent's environment and into the
+# judges' record, so the harness has to be able to tell a hook wrote it. The
+# agent's working directory cannot carry that: by the time an `after_each` or
+# a second `before_step` runs, the agent has had write access to it. Hooks get
+# a path under the run directory instead, which no agent can reach.
+HOOK_OUTPUT_ENV = "AGENT_EVAL_HOOK_OUTPUT"
+
+# A drop file holds `env` and `data` mappings. Anything of this size is a
+# mistake or an attempt to wedge the reader, and reading it would block the
+# case either way.
+_MAX_HOOK_OUTPUT_BYTES = 4 * 1024 * 1024
+
+
+def hook_output_path(log_dir: Path, phase_name: str,
+                     case_id: Optional[str] = None) -> Path:
+    """Where hooks in this phase write their outputs (`HOOK_OUTPUT_ENV`).
+
+    One file per phase and case, alongside that phase's logs: the last writer
+    wins, which is the semantics the shared `.hook-outputs.yaml` already had.
+    """
+    suffix = f".{_safe_log_component(case_id)}" if case_id else ""
+    return Path(log_dir) / f"{phase_name}{suffix}.outputs.yaml"
+
+
+def _read_hook_output_file(path: Path) -> Optional[dict]:
+    """Consume one drop file. ``None`` if there was nothing usable to read.
+
+    Rejects anything that is not a regular file — a symlink would let a
+    planted link copy an arbitrary host file into the judges' record, and a
+    FIFO would hang the case inside the `finally` that calls this.
+    """
+    try:
+        if path.is_symlink() or not path.is_file():
+            return None
+        size = path.stat().st_size
+    except OSError:
+        return None
+    if size > _MAX_HOOK_OUTPUT_BYTES:
+        print(f"  hook outputs: {path} is {size} bytes "
+              f"(limit {_MAX_HOOK_OUTPUT_BYTES}); ignored", file=sys.stderr)
+        _unlink_quietly(path)
+        return {}
+    try:
+        content = yaml.safe_load(path.read_text()) or {}
+    except (yaml.YAMLError, OSError, UnicodeDecodeError, ValueError):
+        content = {}
+    _unlink_quietly(path)
+    if not isinstance(content, dict):
+        # `yaml.safe_load("- a")` is a list, and every caller does
+        # `.get("data")` on what comes back.
+        print(f"  hook outputs: {path} is not a mapping; ignored",
+              file=sys.stderr)
+        return {}
+    return content
+
+
+def _unlink_quietly(path: Path) -> None:
+    try:
+        path.unlink()
+    except OSError:
+        pass
+
+
 def run_hooks(
     entries: list[HookEntry],
     env: dict[str, str],
@@ -113,6 +176,11 @@ def run_hooks(
     log_dir.mkdir(parents=True, exist_ok=True)
     if results is None:
         results = []
+
+    # Every entry in the phase shares one drop file, so a hook can hand the
+    # harness `env`/`data` without writing into the agent's directory.
+    env = {**env, HOOK_OUTPUT_ENV: str(hook_output_path(
+        log_dir, phase_name, case_id))}
 
     for i, hook in enumerate(entries):
         label = hook.description or hook.command.split("\n")[0][:60]
@@ -170,7 +238,7 @@ def run_hooks(
         ))
 
         failed = timed_out or exit_code != 0
-        if failed and hook.on_failure == "fail":
+        if failed and effective_on_failure(hook, phase_name) == "fail":
             raise HookError(hook, phase_name, exit_code,
                             case_id=case_id, timed_out=timed_out)
 
@@ -202,6 +270,21 @@ def run_hooks_safe(
     return results
 
 
+def effective_on_failure(hook: HookEntry, phase_name: str) -> str:
+    """The `on_failure` in force for `hook` in `phase_name`.
+
+    `after_each` has always run with continue semantics, so leaving it unset
+    there has to keep meaning `continue`; everywhere else the default is
+    `fail`. Resolving it here rather than in the YAML parser is what keeps a
+    `HookEntry` built in Python behaving like the same entry written in
+    `eval.yaml` — the parser cannot stamp a phase default onto a dataclass
+    whose default has to be phase-independent.
+    """
+    if hook.on_failure is not None:
+        return hook.on_failure
+    return "continue" if phase_name == "after_each" else "fail"
+
+
 def hook_failed(result: HookResult) -> bool:
     """True when a hook ran and exited non-zero or timed out."""
     return not result.skipped and (result.timed_out or result.exit_code != 0)
@@ -222,12 +305,17 @@ def describe_hook_failure(result: HookResult, index: int) -> str:
 def hook_results_record(results_by_phase: dict, base_dir: Path) -> dict:
     """Serialize per-phase HookResult lists for ``run_result.json``.
 
-    Returns ``{"hooks": {phase: [...]}, "hook_failures": [...]}``, or ``{}``
-    when no phase produced a result. Log paths are relative to *base_dir*
-    (the run directory).
+    Returns ``{"hooks": {phase: [...]}}``, or ``{}`` when no phase produced a
+    result. Log paths are relative to *base_dir* (the run directory).
+
+    Deliberately no flattened `hook_failures` list beside it. Which entries
+    failed is derivable from these (`hook_failed`), and a judge-facing field
+    that names the hook phase would be the third spelling of "this case did
+    not produce a usable result", after `incomplete_cases` and the marker
+    files evals hand-roll today. That belongs in one shared field, not one
+    per subsystem — see issue #277.
     """
     hooks = {}
-    failures = []
     for phase, results in results_by_phase.items():
         if not results:
             continue
@@ -245,15 +333,13 @@ def hook_results_record(results_by_phase: dict, base_dir: Path) -> dict:
                 "timed_out": r.timed_out,
                 "skipped": r.skipped,
                 "duration_s": r.duration_s,
-                "on_failure": r.hook.on_failure,
+                "on_failure": effective_on_failure(r.hook, phase),
                 "log": log,
             })
-            if hook_failed(r):
-                failures.append(describe_hook_failure(r, i))
         hooks[phase] = entries
     if not hooks:
         return {}
-    return {"hooks": hooks, "hook_failures": failures}
+    return {"hooks": hooks}
 
 
 def build_hook_env(
@@ -303,22 +389,31 @@ def build_hook_env(
     return env
 
 
-def collect_hook_outputs(cwd: Path) -> dict:
-    """Read and remove .hook-outputs.yaml/.json from cwd.
+def collect_hook_outputs(cwd: Path, *, trusted_path: Optional[Path] = None,
+                         allow_cwd: bool = True) -> dict:
+    """Read and remove a hook's drop file.
 
-    Returns the parsed dict (with 'env' and/or 'data' keys) or {}.
+    ``trusted_path`` (`hook_output_path`) is read first and is the only
+    source an agent cannot write to. ``cwd`` is then searched for the
+    historical ``.hook-outputs.yaml``/``.json`` so hooks written before
+    `HOOK_OUTPUT_ENV` existed keep working.
+
+    Pass ``allow_cwd=False`` for any phase that runs AFTER an agent turn. The
+    working directory is the agent's by then, so a drop file found there may
+    be the agent's rather than the hook's — and what comes back from here
+    reaches both the next step's environment and the judges.
+
+    Returns the parsed mapping (with 'env' and/or 'data' keys) or {}.
     """
+    if trusted_path is not None:
+        content = _read_hook_output_file(Path(trusted_path))
+        if content is not None:
+            return content
+    if not allow_cwd:
+        return {}
     for name in (".hook-outputs.yaml", ".hook-outputs.json"):
-        path = cwd / name
-        if path.exists():
-            try:
-                content = yaml.safe_load(path.read_text()) or {}
-            except (yaml.YAMLError, OSError):
-                content = {}
-            try:
-                path.unlink()
-            except OSError:
-                pass
+        content = _read_hook_output_file(Path(cwd) / name)
+        if content is not None:
             return content
     return {}
 
@@ -383,10 +478,21 @@ def main():
     log_dir = Path(args.output) / "hooks"
 
     phase = args.phase
-    # before_report (like after_all) is documented as continue-on-failure.
-    if phase in ("after_all", "before_report"):
-        run_hooks_safe(entries, env, cwd, log_dir, phase,
-                       case_id=args.case_id)
+    # Guaranteed phases run every entry even when one fails. `after_each`
+    # joins them: a teardown that stops half way leaves the next case with
+    # the previous one's state, and the in-process runner has always run it
+    # this way (`run_hooks_safe`). Exit non-zero afterwards if an entry that
+    # asked to fail did, so a caller driving the CLI still learns about it.
+    if phase in ("after_all", "before_report", "after_each"):
+        results = run_hooks_safe(entries, env, cwd, log_dir, phase,
+                                 case_id=args.case_id)
+        failed = [describe_hook_failure(r, i)
+                  for i, r in enumerate(results)
+                  if hook_failed(r)
+                  and effective_on_failure(r.hook, phase) == "fail"]
+        if failed:
+            print("ERROR: " + "; ".join(failed), file=sys.stderr)
+            sys.exit(1)
     else:
         try:
             run_hooks(entries, env, cwd, log_dir, phase,

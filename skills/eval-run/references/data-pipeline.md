@@ -187,6 +187,16 @@ Skills that modify input files using the Edit tool (rather than writing to an ou
     # --- Logs (if traces.stderr enabled) ---
     "stderr": "<full stderr.log content>",
 
+    # --- Hook data (from hooks that wrote $AGENT_EVAL_HOOK_OUTPUT) ---
+    "hook_outputs": {"expected_count": 3},
+
+    # --- Per-case hook results (only when before_each/after_each ran) ---
+    "hooks": {"after_each": [{"description": "Save the PR diff",
+                              "exit_code": -1, "timed_out": True,
+                              "skipped": False, "duration_s": 120.0,
+                              "on_failure": "continue",
+                              "log": "hooks/after_each.case-001.0.log"}]},
+
     # --- Annotations (from dataset case directory) ---
     "annotations": {"expected_voice": "technical", "difficulty": "easy"},
 

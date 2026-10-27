@@ -53,7 +53,7 @@ Each entry in a phase list is a mapping:
 | `command` | string | `""` | Shell command, run via `bash -c` |
 | `timeout` | int (seconds) | `120` | Must be a positive integer; on timeout the whole process group is killed |
 | `description` | string | `""` | Label shown in logs (falls back to the command's first line) |
-| `on_failure` | `fail` \| `continue` | `fail` (`continue` for `after_each`) | `fail` aborts the run (for `after_each`: fails the case); `continue` logs and proceeds |
+| `on_failure` | `fail` \| `continue` | `fail` (`continue` for `after_each`) | `fail` stops the scope the phase belongs to — the **run** for `before_all`, the **case** for `before_each`/`after_each`; `continue` logs and proceeds |
 | `condition` | string | `""` | Guard command; the hook runs only if it exits `0` |
 
 ```yaml title="eval.yaml"
@@ -161,12 +161,18 @@ writing a `.hook-outputs.yaml` (or `.hook-outputs.json`) file with `env` and/or
 
 !!! tip "Where to write the file"
     Outputs are collected from the **workspace** (`before_all`) or the **case
-    workspace** (`before_each`, `after_each`). Write to `$AGENT_EVAL_WORKSPACE` /
-    `$CASE_WORKSPACE` respectively. From `after_each` only `data` is used (the
-    agent has already run); it is merged into the same `hook_outputs.yaml`, and on
-    a key conflict `after_each` wins over `before_each`. Outputs from
-    `before_scoring` and `after_all` are **not** collected — those phases are for
-    side effects and cleanup only.
+    workspace** (`before_each`). Prefer **`$AGENT_EVAL_HOOK_OUTPUT`**, a path
+    under the run directory that the agent under test cannot write to; the
+    harness reads it after every phase. `after_each` accepts *only* that path:
+    it runs after the agent has had the workspace, so a drop file sitting
+    there is no longer evidence a hook wrote it. From `after_each` only `data`
+    is used (the agent has already run); it is merged into the same
+    `hook_outputs.yaml`, and on a key conflict `after_each` wins over
+    `before_each`. Outputs from `before_scoring` and `after_all` are **not**
+    collected — those phases are for side effects and cleanup only.
+
+    A drop file is ignored unless it is a regular file (not a symlink), under
+    4 MiB, and parses to a mapping.
 
 ## Failure, timeout, and logs
 
@@ -177,13 +183,13 @@ writing a `.hook-outputs.yaml` (or `.hook-outputs.json`) file with `env` and/or
   `SIGTERM` (then `SIGKILL`) to the whole process group, so background children
   are cleaned up too.
 - Per-case hook results (`before_each`, `after_each`) are recorded in
-  `cases/<id>/run_result.json` as `hooks` (per phase: `description`,
-  `exit_code`, `timed_out`, `skipped`, `duration_s`, `on_failure`, `log`) and
-  `hook_failures` (one line per failed hook, e.g.
-  `after_each[1]: Save the PR diff (timed out)`). The run-level
-  `run_result.json` carries `num_hook_failures`, and judges read the same fields
-  as `outputs["hooks"]` / `outputs["hook_failures"]` (present only when per-case
-  hooks ran).
+  `run_result.json` under `per_case.<id>.hooks` (per phase: `description`,
+  `exit_code`, `timed_out`, `skipped`, `duration_s`, `on_failure`, `log`), and
+  judges read them as `outputs["hooks"]` (present only when per-case hooks
+  ran). An entry failed when `timed_out` is true, or `skipped` is false and
+  `exit_code` is non-zero. There is deliberately no pre-flattened failure
+  list: "this case did not produce a usable result" is getting one shared
+  field rather than one per subsystem — see issue #277.
 - Every hook's combined stdout/stderr is written to a log file under the run's
   `hooks/` directory:
 

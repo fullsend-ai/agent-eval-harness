@@ -109,6 +109,7 @@ breakdown; judges read it when `traces.metrics` is on.
 | `token_usage` | Aggregated `{input, output, ...}` token counts |
 | `num_turns` | Total turns (root + subagent transcripts) |
 | `num_cases` | Number of cases executed |
+| `per_case.<case>.hooks` | Per-phase `before_each` / `after_each` results: `description`, `exit_code`, `timed_out`, `skipped`, `duration_s`, `on_failure`, `log` (relative to the run dir). Present only when per-case hooks ran; judges read the same structure as `outputs["hooks"]`. An entry failed when `timed_out` is true, or `skipped` is false and `exit_code` is non-zero. Read from here rather than the per-case copy: an output declared with an empty path makes artifact collection copy the agent's own files into the case directory. |
 | `model` / `agent` / `agent_version` | Model, runner name, runner version |
 | `message_ids` | Every assistant message id of the run (root stream + subagent transcripts). On a direct OpenRouter connection these are `gen-…` generation ids: the cost-truth key set the backfill prices. |
 | `cost_source`, `cost_usd_estimate`, `cost_confidence`, `cost_coverage`, `cost_warnings`, `hook_cost_usd`, `providers`, `routing`, `provider`, `budget` | Cost provenance — see below. Absent on runs that never touched a provider. |

@@ -21,7 +21,8 @@ from agent_eval.config import (  # noqa: E402
     DatasetConfig, EvalConfig, HookEntry, HooksConfig,
 )
 from agent_eval.hooks import (  # noqa: E402
-    HookError, build_hook_env, hook_results_record, run_hooks, run_hooks_safe,
+    HOOK_OUTPUT_ENV, HookError, build_hook_env, effective_on_failure,
+    hook_failed, hook_results_record, run_hooks, run_hooks_safe,
 )
 from score import _make_inline_check, load_case_record  # noqa: E402
 
@@ -64,15 +65,19 @@ def test_hook_results_record_shape(tmp_path):
                              tmp_path / "hooks", "after_each", case_id="c1")
     rec = hook_results_record({"before_each": [], "after_each": results},
                               tmp_path)
-    assert set(rec) == {"hooks", "hook_failures"}
+    assert set(rec) == {"hooks"}
     assert list(rec["hooks"]) == ["after_each"]  # empty phases omitted
     first, skipped, failed = rec["hooks"]["after_each"]
     assert first["exit_code"] == 0 and first["log"] == "hooks/after_each.c1.0.log"
     assert skipped["skipped"] is True and skipped["log"] is None
     assert failed["exit_code"] == 2 and failed["timed_out"] is False
     assert failed["on_failure"] == "continue"
-    assert rec["hook_failures"] == [
-        "after_each[2]: Save the PR diff (exit code 2)"]
+    # No flattened failure list: it is derivable from these entries, and a
+    # second judge-facing name for "this case went wrong" is what the shared
+    # field proposed in issue #277 replaces.
+    assert "hook_failures" not in rec
+    assert [i for i, h in enumerate(rec["hooks"]["after_each"])
+            if h["timed_out"] or (not h["skipped"] and h["exit_code"])] == [2]
     assert hook_results_record({}, tmp_path) == {}
 
 
@@ -95,9 +100,21 @@ def test_after_each_on_failure_defaults_to_continue(tmp_path):
               on_failure: fail
     """))
     cfg = EvalConfig.from_yaml(p)
-    assert cfg.hooks.before_each[0].on_failure == "fail"
-    assert cfg.hooks.after_each[0].on_failure == "continue"
+    # Unset means the phase default, applied by `effective_on_failure`,
+    # so the dataclass and the YAML parser cannot disagree.
+    assert cfg.hooks.before_each[0].on_failure is None
+    assert effective_on_failure(
+        cfg.hooks.before_each[0], "before_each") == "fail"
+    assert cfg.hooks.after_each[0].on_failure is None
+    assert effective_on_failure(
+        cfg.hooks.after_each[0], "after_each") == "continue"
     assert cfg.hooks.after_each[1].on_failure == "fail"
+    # The same entry built in Python resolves identically — the discrepancy
+    # that a phase-dependent parser default would have left behind.
+    assert effective_on_failure(HookEntry(command="true"),
+                                "after_each") == "continue"
+    assert effective_on_failure(HookEntry(command="true"),
+                                "before_each") == "fail"
 
 
 # ---------------------------------------------------------------------------
@@ -147,8 +164,8 @@ def test_after_each_failure_continue_is_recorded(tmp_path):
     assert on_disk["exit_code"] == 0  # case unchanged
     assert "error" not in on_disk
     assert on_disk["hooks"]["after_each"][0]["exit_code"] == 1
-    assert on_disk["hook_failures"] == ["after_each[0]: capture (exit code 1)"]
-    assert result["hook_failures"] == on_disk["hook_failures"]
+    assert "hook_failures" not in on_disk  # derivable from `hooks`
+    assert result["hooks"] == on_disk["hooks"]
 
 
 def test_after_each_failure_fail_fails_case_and_runs_rest(tmp_path):
@@ -168,8 +185,7 @@ def test_after_each_timeout_is_recorded(tmp_path):
                   description="slow capture")])
     entry = on_disk["hooks"]["after_each"][0]
     assert entry["timed_out"] is True
-    assert on_disk["hook_failures"] == [
-        "after_each[0]: slow capture (timed out)"]
+    assert "hook_failures" not in on_disk
     assert on_disk["exit_code"] == 0
 
 
@@ -194,7 +210,7 @@ def test_before_each_failure_is_recorded(tmp_path):
         after_each=[HookEntry(command="true", on_failure="continue")])
     assert on_disk["exit_code"] == 1
     assert [h["exit_code"] for h in on_disk["hooks"]["before_each"]] == [0, 2]
-    assert on_disk["hook_failures"] == ["before_each[1]: seed (exit code 2)"]
+    assert "hook_failures" not in on_disk
     assert on_disk["hooks"]["after_each"][0]["exit_code"] == 0
 
 
@@ -204,10 +220,13 @@ def test_no_hooks_no_new_fields(tmp_path):
 
 
 def test_after_each_outputs_merged_and_visible_to_judges(tmp_path):
+    # `before_each` may still use the historical drop file — it runs before
+    # the agent, so the working directory is still the harness's. `after_each`
+    # must use the harness-owned path.
     before = ('printf "data:\\n  seeded: 1\\n  shared: before\\n"'
               ' > .hook-outputs.yaml')
     after = ('printf "data:\\n  pr_url: https://example.test/pr/1\\n'
-             '  shared: after\\n" > .hook-outputs.yaml')
+             '  shared: after\\n" > "$AGENT_EVAL_HOOK_OUTPUT"')
     _, _, case_output = _single(
         tmp_path,
         before_each=[HookEntry(command=before)],
@@ -218,22 +237,70 @@ def test_after_each_outputs_merged_and_visible_to_judges(tmp_path):
     assert data == {"seeded": 1, "pr_url": "https://example.test/pr/1",
                     "shared": "after"}  # later phase wins
 
-    record = load_case_record(case_output, EvalConfig())
+    # `hooks` is read from the RUN-level run_result.json, which a real run
+    # writes at the end of `_execute_per_case`; the per-case copy is inside a
+    # directory artifact collection can write into.
+    run_dir = case_output.parent.parent
+    (run_dir / "run_result.json").write_text(json.dumps(
+        {"per_case": {"case-001": json.loads(
+            (case_output / "run_result.json").read_text())}}))
+    record = load_case_record(case_output, EvalConfig(),
+                              run_id=run_dir.name, runs_dir=run_dir.parent)
     assert record["hook_outputs"]["pr_url"] == "https://example.test/pr/1"
-    assert record["hook_failures"] == ["after_each[1]: run tests (exit code 1)"]
     assert record["hooks"]["after_each"][1]["exit_code"] == 1
 
+    # A judge gates on `hooks` directly. This is the shape that replaces a
+    # pre-flattened `hook_failures`: one field, derived where it is used.
     jc = types.SimpleNamespace(
         name="gate", arguments=None,
         check=textwrap.dedent("""\
-            if outputs.get("hook_failures"):
-                return False, "; ".join(outputs["hook_failures"])
+            bad = [h["description"]
+                   for entries in outputs.get("hooks", {}).values()
+                   for h in entries
+                   if h["timed_out"] or (not h["skipped"] and h["exit_code"])]
+            if bad:
+                return False, "; ".join(bad)
             return True, "clean"
         """))
     value, rationale = _make_inline_check(jc)(outputs=record)
     assert value is False and "run tests" in rationale
-    assert eval("not outputs.get('hook_failures')", {"__builtins__": {}},
-                {"outputs": record}) is False
+
+
+def test_after_each_cannot_be_forged_through_the_workspace(tmp_path):
+    """The agent writes the historical drop file; `after_each` writes nothing.
+
+    `after_each` runs after the agent has had the workspace, so a file found
+    there is not evidence a hook produced it — and what comes back sets the
+    judges' `hook_outputs`.
+    """
+    _, _, case_output = _single(
+        tmp_path,
+        before_each=[HookEntry(
+            command='printf "data:\\n  verdict: real\\n" > "$AGENT_EVAL_HOOK_OUTPUT"')],
+        after_each=[HookEntry(
+            command='printf "data:\\n  verdict: forged\\n" > .hook-outputs.yaml',
+            on_failure="continue")])
+    data = yaml.safe_load((case_output / "hook_outputs.yaml").read_text())
+    assert data == {"verdict": "real"}
+
+
+def test_a_symlinked_drop_file_is_not_read(tmp_path):
+    """A link would copy an arbitrary host file into the judges' record."""
+    secret = tmp_path / "secret.yaml"
+    secret.write_text("data:\n  leaked: yes\n")
+    _, _, case_output = _single(
+        tmp_path,
+        before_each=[HookEntry(
+            command=f'ln -sf {secret} "$AGENT_EVAL_HOOK_OUTPUT"')])
+    assert not (case_output / "hook_outputs.yaml").exists()
+
+
+def test_a_non_mapping_drop_file_is_ignored(tmp_path):
+    """`yaml.safe_load("- a")` is a list, and every caller does `.get`."""
+    _, _, case_output = _single(
+        tmp_path,
+        before_each=[HookEntry(command='printf -- "- a\\n" > "$AGENT_EVAL_HOOK_OUTPUT"')])
+    assert not (case_output / "hook_outputs.yaml").exists()
 
 
 def test_record_without_hooks_has_no_hook_keys(tmp_path):
@@ -288,14 +355,15 @@ def test_multi_step_after_each_fail_fails_case(tmp_path):
     _, on_disk, case_output = _multi_step(tmp_path, textwrap.dedent("""\
         hooks:
           after_each:
-            - command: 'printf "data:\\n  captured: pr-1\\n" > .hook-outputs.yaml'
+            - command: 'printf "data:\\n  captured: pr-1\\n" > "$AGENT_EVAL_HOOK_OUTPUT"'
             - command: "exit 1"
               on_failure: fail
               description: capture
     """))
     assert on_disk["exit_code"] == 1
     assert "capture" in on_disk["error"]
-    assert on_disk["hook_failures"] == ["after_each[1]: capture (exit code 1)"]
+    assert "hook_failures" not in on_disk
+    assert on_disk["hooks"]["after_each"][1]["exit_code"] == 1
     data = yaml.safe_load((case_output / "hook_outputs.yaml").read_text())
     assert data == {"captured": "pr-1"}
 
@@ -308,4 +376,4 @@ def test_multi_step_after_each_default_continue(tmp_path):
     """))
     assert on_disk["exit_code"] == 0
     assert "error" not in on_disk
-    assert len(on_disk["hook_failures"]) == 1
+    assert on_disk["hooks"]["after_each"][0]["exit_code"] == 1

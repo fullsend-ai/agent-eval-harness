@@ -119,9 +119,12 @@ not talk to the provider.
 
 ## Hook outputs → runners and judges
 
-A hook can hand data back to the harness by writing a `.hook-outputs.yaml` (or
-`.hook-outputs.json`) file **in its working directory**. The harness reads it, then
-deletes it. Two keys are recognized:
+A hook can hand data back to the harness by writing a YAML mapping to
+**`$AGENT_EVAL_HOOK_OUTPUT`**. The harness reads it after the phase, then deletes
+it. That path is under the run directory, where the agent under test cannot write
+— which is what makes the file evidence a *hook* produced it. Writing
+`.hook-outputs.yaml` (or `.hook-outputs.json`) in the working directory still
+works for the phases that run before the agent. Two keys are recognized:
 
 === "env → the agent under test"
 
@@ -131,7 +134,7 @@ deletes it. Two keys are recognized:
 
     ```bash title="scripts/mint-token.sh"
     TOKEN=$(curl -s "$JIRA_HOST/token")
-    cat > "$CASE_WORKSPACE/.hook-outputs.yaml" <<EOF
+    cat > "$AGENT_EVAL_HOOK_OUTPUT" <<EOF
     env:
       JIRA_TOKEN: "$TOKEN"
     EOF
@@ -155,11 +158,15 @@ deletes it. Two keys are recognized:
     `data:` is used from `after_each` — the agent has already run, so `env:` is
     ignored.
 
+    For the same reason `after_each` reads **only** `$AGENT_EVAL_HOOK_OUTPUT`: by
+    then the working directory is one the agent has had write access to, so a drop
+    file found there is not evidence a hook wrote it.
+
 ## Hook results → run_result.json and judges
 
-Every per-case hook result (`before_each`, `after_each`) is written into the case's
-`cases/<id>/run_result.json`, so a capture hook that crashed or timed out no longer
-reads as a clean case:
+Every per-case hook result (`before_each`, `after_each`) is written into the
+run-level `run_result.json` under `per_case.<id>`, so a capture hook that crashed
+or timed out no longer reads as a clean case:
 
 ```json
 "hooks": {
@@ -168,25 +175,35 @@ reads as a clean case:
      "skipped": false, "duration_s": 120.0, "on_failure": "continue",
      "log": "hooks/after_each.case-001.0.log"}
   ]
-},
-"hook_failures": ["after_each[0]: Save the PR diff (timed out)"]
+}
 ```
 
-The run-level `run_result.json` carries `num_hook_failures`. Judges see the same
-fields as `outputs["hooks"]` and `outputs["hook_failures"]` (present only when
-per-case hooks ran), so a gate can be written once:
+Judges see the same structure as `outputs["hooks"]` (present only when per-case
+hooks ran), so a gate can be written once. An entry failed when `timed_out` is
+true, or `skipped` is false and `exit_code` is non-zero:
 
 ```yaml title="eval.yaml"
 judges:
   - name: capture_ok
     check: |
-      failures = outputs.get("hook_failures") or []
-      return not failures, "; ".join(failures) or "hooks clean"
+      bad = [h["description"]
+             for entries in outputs.get("hooks", {}).values()
+             for h in entries
+             if h["timed_out"] or (not h["skipped"] and h["exit_code"])]
+      return not bad, "; ".join(bad) or "hooks clean"
   - name: tests_pass
-    if: "not outputs.get('hook_failures')"
+    if: "not any(h['exit_code'] for h in outputs.get('hooks', {}).get('after_each', []))"
     check: |
       return outputs["hook_outputs"].get("tests_passed") is True, "from after_each"
 ```
+
+!!! note "No pre-flattened failure list"
+    There is deliberately no `hook_failures` field. "This case did not produce a
+    usable result" already has more than one spelling in the harness
+    (`incomplete_cases`, and the marker files evals hand-roll), and it is getting
+    **one** shared field rather than one per subsystem — see
+    issue #277. `hooks` stays either way: it is the per-hook
+    diagnostic detail, not the verdict.
 
 ## Gotchas
 

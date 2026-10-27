@@ -493,19 +493,30 @@ def load_case_record(case_dir, config, run_id=None, runs_dir=None,
         except (yaml.YAMLError, OSError):
             record["hook_outputs"] = {}
 
-    # --- Per-case hook results (written by execute.py into run_result.json) ---
-    # Exposed as outputs["hooks"] / outputs["hook_failures"] so a judge or an
-    # `if:` condition can gate on a before_each/after_each hook that failed.
-    case_rr_path = case_dir / "run_result.json"
-    if case_rr_path.is_file() and not case_rr_path.is_symlink():
-        try:
-            with open(case_rr_path) as f:
-                case_rr = json.load(f)
-            if isinstance(case_rr, dict) and "hooks" in case_rr:
-                record["hooks"] = case_rr.get("hooks") or {}
-                record["hook_failures"] = case_rr.get("hook_failures") or []
-        except (json.JSONDecodeError, OSError):
-            pass
+    # --- Per-case hook results (written by execute.py) ---
+    # Exposed as outputs["hooks"] so a judge or an `if:` condition can gate on
+    # a before_each/after_each hook that failed.
+    #
+    # Read from the RUN-level run_result.json, not the copy in the case dir.
+    # An output declared with an empty path means the workspace root, and
+    # artifact collection then copies the agent's own files into the case
+    # directory — including anything it chose to call `run_result.json`. The
+    # run-level file is outside every case directory, so collection cannot
+    # reach it. Not gated on `traces.metrics`: whether a hook failed is not
+    # a metric, and a judge gating on it must not go blind when metrics are
+    # switched off.
+    if run_id:
+        run_result_path = runs_dir / run_id / "run_result.json"
+        if run_result_path.is_file() and not run_result_path.is_symlink():
+            try:
+                with open(run_result_path) as f:
+                    rr_meta = json.load(f)
+                hooks = ((rr_meta.get("per_case") or {}).get(case_id)
+                         or {}).get("hooks")
+                if isinstance(hooks, dict):
+                    record["hooks"] = hooks
+            except (json.JSONDecodeError, OSError, AttributeError):
+                pass
 
     # --- Per-step sub-records (multi-step execution) ---
     # For a step-scoped judge (JudgeConfig.step), expose each step's own
