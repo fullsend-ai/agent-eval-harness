@@ -1390,16 +1390,23 @@ class TestAgentJudgeHardening:
 
     def test_staging_rejects_path_traversal(self, tmp_path):
         """A '..'-bearing output path must not stage material from outside
-        the case dir (CWE-22); the in-case output dir still stages."""
-        from score import _stage_agent_workspace
+        the case dir (CWE-22); the in-case output dir still stages.
+
+        Raised as `StagingIncomplete` rather than the bare `ValueError`: the
+        escaping tree is content the judge should have graded and did not, so
+        it has to reach `incomplete_cases`. As a plain error the case merely
+        left the denominator and a score threshold passed on the survivors.
+        """
+        from score import StagingIncomplete, _stage_agent_workspace
         (tmp_path / "secret").mkdir()
         (tmp_path / "secret" / "evil.txt").write_text("PWNED")
         record = _make_case(tmp_path / "case", {"sub/ok.txt": "fine"})
         ws = tmp_path / "ws"
         ws.mkdir()
-        with pytest.raises(ValueError, match="escapes"):
+        with pytest.raises(StagingIncomplete, match="escapes") as exc:
             _stage_agent_workspace(ws, record, None, [], tmp_path,
                                    ["sub", "../secret"])
+        assert exc.value.lost, "the escaping tree must be recorded as lost"
         assert not (ws / "secret").exists()
         assert not any(p.name == "evil.txt" for p in ws.rglob("*"))
         assert (ws / "sub" / "ok.txt").read_text() == "fine"
@@ -2166,6 +2173,56 @@ class TestEvidenceLostBeforeStaging:
         assert self._gate(res, {"arch_score": {"max_error_rate": 0.5}},
                           {"other_judge": {"pass_rate": 1.0}}) == []
 
+    def test_an_output_escaping_the_case_counts_for_an_agent_only_run(
+            self, tmp_path):
+        """The agent-only path reaches containment through STAGING, not the
+        record load — `load_files` is false, so `load_case_record` never looks
+        at the trees. Staging raised a bare `ValueError`, which made the case
+        an ordinary error: it left the denominator and the run passed on the
+        survivors, which is the escape this gate exists to close."""
+        import score
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "secret.md").write_text("elsewhere")
+        bad = self._case(tmp_path, "c0")
+        os.symlink(outside, bad / "_modified")
+        for c in self._rest(tmp_path):
+            (c / "_modified").mkdir(exist_ok=True)
+
+        judge = _agent_judge(feedback_type="bool", inputs=["."])
+        config = _config(judge, outputs=["out"])
+        with _patched_runners(self._runner()):
+            judges = load_judges(config, project_root=str(tmp_path))
+            assert not score._judges_read_files(judges), "must be agent-only"
+            res = score.score_cases(judges, [bad] + self._rest(tmp_path),
+                                    config)
+        agg = res["aggregated"]["arch_score"]
+        assert agg["incomplete_cases"] == 1
+        assert "incomplete_staging" in [r.metric for r in score.detect_regressions(
+            res["aggregated"], {"arch_score": {"min_pass_rate": 0.9}})]
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file modes")
+    def test_a_run_that_measured_nothing_cannot_clear_a_baseline(self, tmp_path):
+        """The guard must not fail open when EVERY case is incomplete. There
+        is no `mean`/`pass_rate` left to compare then, so requiring both sides
+        of the comparison to exist silently disarmed it on the most broken
+        run there is."""
+        cases = []
+        for i in range(3):
+            c = self._case(tmp_path, f"c{i}")
+            (c / "out" / "bad.txt").write_text("FAILING EVIDENCE")
+            cases.append(c)
+        with self._unreadable(cases[0] / "out" / "bad.txt"), \
+                self._unreadable(cases[1] / "out" / "bad.txt"), \
+                self._unreadable(cases[2] / "out" / "bad.txt"):
+            res = self._run(tmp_path, cases)
+        agg = res["aggregated"]["arch_score"]
+        assert agg["incomplete_cases"] == 3 and agg["scored_cases"] == 0
+        assert agg["mean"] is None and agg["pass_rate"] is None
+        assert "incomplete_staging" in self._gate(
+            res, {"arch_score": {"max_error_rate": 1.0}},
+            {"arch_score": {"pass_rate": 1.0}})
+
     @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file modes")
     def test_a_numeric_judge_arms_the_gate_through_mean(self, tmp_path):
         """`mean` is the half a boolean judge cannot exercise.
@@ -2306,3 +2363,41 @@ class TestModifiedTreeContainment:
                 score.load_case_record(case_dir, config, load_files=True)
         assert str(outside.resolve()) not in scanned, (
             f"listed outside the case before validating: {scanned}")
+
+
+class TestEntryClassificationIsVersionIndependent:
+    """`Path.is_dir()`/`is_file()` answer False for anything they cannot stat,
+    and whether a DENIED stat counts as "cannot" is a pathlib policy that has
+    changed across versions (EACCES propagates on 3.11-3.13, reported
+    swallowed on 3.14). A readable-but-not-searchable directory lists its
+    names but denies stat on the children, so under the swallowing policy
+    those children would be dropped with nothing recorded."""
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file modes")
+    def test_a_denied_stat_is_never_silently_a_non_file(self, tmp_path):
+        from score import _entry_kind
+        d = tmp_path / "sub"
+        d.mkdir()
+        child = d / "f.txt"
+        child.write_text("FAILING EVIDENCE")
+        mode = d.stat().st_mode & 0o777
+        d.chmod(0o400)                 # readable, NOT searchable
+        try:
+            # The premise: scandir succeeds, so the listability probe passes.
+            with os.scandir(d):
+                pass
+            with pytest.raises(PermissionError):
+                _entry_kind(child)
+        finally:
+            d.chmod(mode)
+
+    def test_it_classifies_the_ordinary_cases(self, tmp_path):
+        from score import _entry_kind
+        (tmp_path / "d").mkdir()
+        (tmp_path / "f").write_text("x")
+        os.symlink(tmp_path / "f", tmp_path / "link")
+        assert _entry_kind(tmp_path / "d") == "dir"
+        assert _entry_kind(tmp_path / "f") == "file"
+        # lstat, not stat: a link is classified as itself, and the callers
+        # skip links before asking.
+        assert _entry_kind(tmp_path / "link") == "other"

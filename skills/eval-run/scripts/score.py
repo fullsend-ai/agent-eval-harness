@@ -24,6 +24,7 @@ import os
 import random
 import re
 import shutil
+import stat
 import sys
 import tempfile
 import textwrap
@@ -76,6 +77,26 @@ def _resolve_under(root: Path, candidate: Path) -> Path:
     if not resolved.is_relative_to(root.resolve()):
         raise ValueError(f"Path escapes root directory: {candidate}")
     return resolved
+
+
+def _entry_kind(path: Path) -> str:
+    """``"dir"`` | ``"file"`` | ``"other"``, raising on a denied stat.
+
+    `Path.is_dir()` / `is_file()` answer False for anything they cannot
+    stat, and whether a denied stat counts as "cannot" is a pathlib policy
+    that has changed across versions: on 3.11-3.13 `EACCES` propagates, and
+    it is reported to be swallowed on 3.14. A readable-but-not-searchable
+    directory (mode 0400) lists its names but denies stat on the children,
+    so under the swallowing policy those children would be classified
+    `other` and dropped without anything being recorded. Stat explicitly and
+    let the error out, so the behaviour does not depend on the interpreter.
+    """
+    st = os.stat(path, follow_symlinks=False)
+    if stat.S_ISDIR(st.st_mode):
+        return "dir"
+    if stat.S_ISREG(st.st_mode):
+        return "file"
+    return "other"
 
 
 def _require_listable(directory: Path) -> None:
@@ -297,10 +318,13 @@ def load_case_record(case_dir, config, run_id=None, runs_dir=None,
             continue
         _require_listable(artifact_dir)
         for f in sorted(artifact_dir.rglob("*")):
-            if f.is_dir() and not f.is_symlink():
+            if f.is_symlink():
+                continue
+            kind = _entry_kind(f)
+            if kind == "dir":
                 _require_listable(f)
                 continue
-            if not f.is_file() or f.is_symlink():
+            if kind != "file":
                 continue
             _resolve_under(case_dir, f)
             rel = str(f.relative_to(case_dir))
@@ -338,11 +362,14 @@ def load_case_record(case_dir, config, run_id=None, runs_dir=None,
         _resolve_under(case_dir, modified_dir)
         _require_listable(modified_dir)
         for f in sorted(modified_dir.rglob("*")):
-            if f.is_dir() and not f.is_symlink():
+            if f.is_symlink():
+                continue
+            kind = _entry_kind(f)
+            if kind == "dir":
                 _resolve_under(case_dir, f)
                 _require_listable(f)
                 continue
-            if not f.is_file() or f.is_symlink():
+            if kind != "file":
                 continue
             _resolve_under(case_dir, f)
             rel = str(f.relative_to(modified_dir))
@@ -4328,7 +4355,20 @@ def _stage_case_outputs(workspace, case_dir, output_dirs, selected):
             continue
         # Containment: an output path that resolves outside the case dir is
         # never staged (CWE-22); load_case_record rejects it the same way.
-        src = _resolve_under(case_dir, src)
+        try:
+            src = _resolve_under(case_dir, src)
+        except ValueError as e:
+            # Report it as LOST rather than raising straight out. Raising made
+            # it an ordinary judge error, so the case left the denominator and
+            # a score threshold passed on the survivors — the escape this gate
+            # exists to close, reached by symlinking `_modified` out of the
+            # case. The reason deliberately carries no skip prefix, so
+            # `_report_staging_problems` classifies it as lost content and the
+            # caller counts the case. Note the whole declared tree is gone,
+            # which is why this is not one of the benign "resolves outside"
+            # skips that apply to a single entry inside a tree.
+            problems.append((str(src), str(e)))
+            continue
         if rel == ".":
             dest, skip = workspace, _skip_top
         else:
@@ -5372,9 +5412,13 @@ def detect_regressions(current_results, thresholds, baseline_results=None):
         # survivors match the baseline passed. The test mirrors the comparison
         # below, so the guard fires only where a number is really compared.
         baseline = (baseline_results or {}).get(judge_name) or {}
+        # The baseline arm does not require the CURRENT value to exist. When
+        # every case is incomplete there is no `mean`/`pass_rate` left to
+        # compare, so requiring both sides made the guard fail open exactly
+        # when the run was most broken: a tolerant `max_error_rate` plus a
+        # baseline reported nothing at all on a run that measured nothing.
         gates_on_a_score = any(k in threshold for k in _SCORE_KEYS) or any(
-            current.get(k) is not None and baseline.get(k) is not None
-            for k in ("mean", "pass_rate"))
+            baseline.get(k) is not None for k in ("mean", "pass_rate"))
         if incomplete and gates_on_a_score:
             scored = current.get("scored_cases") or 0
             errored = current.get("errored_cases") or 0
