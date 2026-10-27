@@ -311,8 +311,8 @@ class TestModelNameNormalization:
         assert all(c is not None and c["total_cost"] > 0
                    for c in sonnet_costs)
 
-    def test_no_per_model_usage_no_span_cost(self, tmp_path):
-        """Without per_model_usage, LLM spans get no mlflow.llm.cost."""
+    def test_no_per_model_usage_cost_distributed_evenly(self, tmp_path):
+        """Without per_model_usage, cost_usd is distributed evenly across LLM spans."""
         events = [
             make_system_init(),
             make_assistant("msg_001", text="Hello."),
@@ -328,8 +328,14 @@ class TestModelNameNormalization:
         trace = build_trace(stdout, run_result,
                             run_id="test", experiment_id="exp-1")
         spans = trace["data"]["spans"]
-        for s in _get_llm_spans(spans):
-            assert "mlflow.llm.cost" not in s["attributes"]
+        llm_spans = _get_llm_spans(spans)
+        assert len(llm_spans) > 0, "expected at least one LLM span"
+        total_cost = sum(
+            json.loads(s["attributes"]["mlflow.llm.cost"])["total_cost"]
+            for s in llm_spans
+            if "mlflow.llm.cost" in s["attributes"]
+        )
+        assert total_cost == pytest.approx(1.00)
 
 
 class TestTraceCostMetadata:
