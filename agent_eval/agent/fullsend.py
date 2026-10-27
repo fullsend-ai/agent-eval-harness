@@ -726,10 +726,23 @@ def _nested_settings_identities(root: Path) -> set:
     """Resolved targets of every ``settings.json`` / ``settings.local.json``
     inside a nested ``.claude`` directory under ``root``, so an alias reaching
     such a file through the link's own target is recognised like a direct link.
-    ``.git`` is skipped and directory links are not followed."""
+    ``.git`` is skipped and directory links are not followed by the walk. The
+    one exception is a ``.claude`` entry that is itself a link: it is resolved
+    and the directory plus the settings files directly inside it are
+    registered (nothing beneath them is followed)."""
     found = set()
     for dirpath, dirnames, _files in os.walk(root, followlinks=False):
         dirnames[:] = [d for d in dirnames if d != ".git"]
+        if ".claude" in dirnames:
+            linked = Path(dirpath) / ".claude"
+            real_dir = _resolve_link(linked) if linked.is_symlink() else None
+            if real_dir is not None and real_dir.is_dir():
+                found.add(real_dir)
+                for name in _SETTINGS_FILE_NAMES:
+                    candidate = real_dir / name
+                    real = _resolve_link(candidate)
+                    if real is not None and candidate.exists():
+                        found.add(real)
         if Path(dirpath).name != ".claude":
             continue
         for name in _SETTINGS_FILE_NAMES:

@@ -1405,6 +1405,46 @@ class TestMaterializeSymlinks:
         assert not (ws / "skills" / "x" / "host.json").exists()
         assert "host.json" in capsys.readouterr().out
 
+    def _linked_claude_project(self, tmp_path):
+        project = tmp_path / "project"
+        app = project / "components" / "app"
+        (app / "cfg").mkdir(parents=True)
+        (app / "cfg" / "settings.local.json").write_text('{"env": {"K": "literal"}}')
+        (app / ".claude").symlink_to("cfg")
+        (project / "skills" / "x").mkdir(parents=True)
+        (project / "skills" / "x" / "SKILL.md").write_text("# x")
+        return project
+
+    def test_link_to_settings_file_behind_linked_claude_dir_skipped(
+            self, tmp_path, capsys):
+        project = self._linked_claude_project(tmp_path)
+        (project / "skills" / "x" / "host.json").symlink_to(
+            Path("..") / ".." / "components" / "app" / "cfg" / "settings.local.json")
+        ws = _workspace(tmp_path)
+        (ws / "skills").symlink_to(project / "skills")
+
+        materialize_symlinks(ws, [project.resolve()])
+
+        assert (ws / "skills" / "x" / "SKILL.md").is_file()
+        assert not (ws / "skills" / "x" / "host.json").exists()
+        out = capsys.readouterr().out
+        assert "host.json" in out
+        assert "settings file" in out
+
+    def test_link_to_dir_behind_linked_claude_dir_skipped_as_container(
+            self, tmp_path, capsys):
+        project = self._linked_claude_project(tmp_path)
+        (project / "skills" / "x" / "cfgdir").symlink_to(
+            Path("..") / ".." / "components" / "app" / "cfg")
+        ws = _workspace(tmp_path)
+        (ws / "skills").symlink_to(project / "skills")
+
+        materialize_symlinks(ws, [project.resolve()])
+
+        assert (ws / "skills" / "x" / "SKILL.md").is_file()
+        assert not (ws / "skills" / "x" / "cfgdir").exists()
+        assert "cfgdir" in capsys.readouterr().out
+
 
 def _run_script(script_name, args, cwd, env):
     cmd = [sys.executable, str(SCRIPTS / script_name)] + args
