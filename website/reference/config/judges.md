@@ -452,8 +452,11 @@ Per case, the harness:
     staging. The judge is then **not run** and that sample is an **error**: a
     verdict over a workspace with evidence missing is not a valid score, and the
     skill under test must not be able to hide an unfavourable artifact by
-    hardlinking it. An error sample is dropped from the mean, so set
-    `max_error_rate` in `thresholds` to make such cases fail the run. Each such case
+    hardlinking it. Such an error increments `incomplete_cases` and prevents any
+    score threshold (`min_mean`, `min_pass_rate`, `min_win_rate`) from passing on
+    the remaining cases: it is reported as an `incomplete_staging` regression.
+    `max_error_rate` separately prices the case as unscored, and is not required
+    for the gate. Each such case
     carries `staging_skips` in the run's results (see
     [runs directory](../runs-directory.md)). Entries with nothing to grade (a
     dangling link, a link resolving outside the output dir) are still just

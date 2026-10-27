@@ -1959,7 +1959,8 @@ def _pop_staging_skips():
 def _staging_skip_key(reason):
     """The known skip-reason prefix `reason` starts with, else its first clause
     (the text varies per entry: sizes, limits, OS error text)."""
-    for prefix in _STAGING_SKIP_REASONS + _CASE_OUTPUT_SKIP_REASONS:
+    for prefix in (_STAGING_SKIP_REASONS + _CASE_OUTPUT_SKIP_REASONS
+                   + (_CONTENT_LOST,)):
         if reason.startswith(prefix):
             return prefix
     return reason.split(";", 1)[0].split(" (", 1)[0]
@@ -1974,7 +1975,8 @@ def _evidence_was_omitted(summary):
     the skill under test chooses what goes in its own output tree.
     """
     reasons = (summary or {}).get("reasons") or {}
-    return any(str(r).startswith(_CASE_OUTPUT_SKIP_REASONS) for r in reasons)
+    return any(str(r).startswith(_CASE_OUTPUT_SKIP_REASONS + (_CONTENT_LOST,))
+               for r in reasons)
 
 
 def _summarize_staging_skips(skips):
@@ -3865,6 +3867,12 @@ _MAX_CONTEXT_DEPTH = 64
 _CASE_OUTPUT_SKIP_REASONS = ("deeper than", "staging limit exceeded",
                              "hardlinked file", "sparse file")
 
+# Prefix `_record_staging_skips` gives a case-output entry staging could not
+# copy at all (unreadable file, unlistable directory, failed copy): whatever
+# the OS said, content the judge was meant to see never reached it. It lets
+# the recorded entry count as evidence-bearing without naming each cause.
+_CONTENT_LOST = "content not staged"
+
 # Cumulative bounds on one staging operation. Depth and ancestor-loop checks do
 # not stop an acyclic fan-out (two links per level to an already-visited
 # directory expands exponentially) and staging runs before the judge timeout
@@ -4118,6 +4126,21 @@ def _format_staging_problems(problems, limit=10):
     return f"{len(problems)} {noun}: {detail}{more}"
 
 
+class StagingIncomplete(RuntimeError):
+    """Staging could not copy gradeable content (see `_report_staging_problems`).
+
+    ``lost`` holds the ``(path, reason)`` entries that were not copied at all
+    and ``skipped`` the benign or evidence-bearing skips reported alongside
+    them, so a caller can record everything the judge did not get to see even
+    though staging raised before returning.
+    """
+
+    def __init__(self, message, skipped=(), lost=()):
+        super().__init__(message)
+        self.skipped = list(skipped)
+        self.lost = list(lost)
+
+
 def _report_staging_problems(problems, label="agent.context", extra_skip=()):
     """Split staging problems into "lost content" and "nothing to lose".
 
@@ -4125,9 +4148,9 @@ def _report_staging_problems(problems, label="agent.context", extra_skip=()):
     outputs) in the warning and the error. ``extra_skip`` lists reason
     prefixes that count as skip reasons alongside `_STAGING_SKIP_REASONS`.
 
-    Raises for the first — an unreadable file or an unlistable directory means
-    the judge would grade a tree with holes in it and say nothing, which is
-    #239 arriving through the fix for it. The second kind (a dangling link, a
+    Raises `StagingIncomplete` (a `RuntimeError`) for the first — an unreadable
+    file or an unlistable directory means the judge would grade a tree with
+    holes in it and say nothing, which is #239 arriving through the fix for it. The second kind (a dangling link, a
     socket, a self-referential ``latest -> .``, a link out of the declared
     entry) carries no gradeable content, so it is reported on stderr and the
     staging stands: a stale link in a snapshotted repo must not take every
@@ -4146,8 +4169,9 @@ def _report_staging_problems(problems, label="agent.context", extra_skip=()):
         print(f"  WARNING: {label} skipped "
               f"{_format_staging_problems(skipped)}", file=sys.stderr)
     if lost:
-        raise RuntimeError(
-            f"staging {label} failed for {_format_staging_problems(lost)}")
+        raise StagingIncomplete(
+            f"staging {label} failed for {_format_staging_problems(lost)}",
+            skipped=skipped, lost=lost)
     return skipped
 
 
@@ -4281,7 +4305,13 @@ def _stage_agent_workspace(workspace, record, stage_inputs, context_dirs, root,
                 problems.extend(_copy_path(src, dest))
             except OSError as exc:
                 problems.append((str(src), str(exc)))
-        _report_staging_problems(problems)
+        try:
+            _report_staging_problems(problems)
+        except StagingIncomplete as exc:
+            # `agent.context` is the judge author's material, not the graded
+            # party's: a failure there is an ordinary judge error, never
+            # evidence the skill withheld, so it must not look like one.
+            raise RuntimeError(str(exc)) from None
     # 3. Verdict output dir.
     (workspace / "output").mkdir(parents=True, exist_ok=True)
     return skips
@@ -4393,9 +4423,20 @@ def _load_agent_judge(jc, config, project_root=None):
         workspace = Path(tempfile.mkdtemp(prefix="agent-judge-"))
         try:
             try:
-                skips = _stage_agent_workspace(
-                    workspace, record, stage_inputs, context_dirs, root,
-                    output_dirs)
+                try:
+                    skips = _stage_agent_workspace(
+                        workspace, record, stage_inputs, context_dirs, root,
+                        output_dirs)
+                except StagingIncomplete as exc:
+                    # Invariant: any case where the judge did not see material
+                    # it should have is counted in `incomplete_cases`, whichever
+                    # problem class ended the staging. Staging raised before it
+                    # could return its skips, so record them here — lost
+                    # content included — and let the sample fail as before.
+                    _record_staging_skips(
+                        exc.skipped + [(p, f"{_CONTENT_LOST}: {why}")
+                                       for p, why in exc.lost])
+                    raise
                 _record_staging_skips(skips)
                 # An omitted hardlinked/sparse/over-limit artifact is evidence
                 # the judge never saw: its verdict is not a valid sample.

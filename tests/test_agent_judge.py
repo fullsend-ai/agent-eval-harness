@@ -1823,12 +1823,13 @@ class TestIncompleteStagingCannotPass:
             os.symlink("nowhere.txt", case_dir / "out" / "broken.txt")
         return case_dir
 
-    def _run(self, tmp_path, cases):
+    def _run(self, tmp_path, cases, judge=None):
         import score
-        judge = _agent_judge(feedback_type="bool", inputs=["out"])
+        judge = judge or _agent_judge(feedback_type="bool", inputs=["out"])
         config = _config(judge, outputs=["out"])
         with _patched_runners(self._runner()):
-            return score.score_cases(load_judges(config), cases, config)
+            return score.score_cases(
+                load_judges(config, project_root=str(tmp_path)), cases, config)
 
     def test_a_score_threshold_cannot_pass_on_the_survivors(self, tmp_path):
         from score import detect_regressions
@@ -1872,3 +1873,83 @@ class TestIncompleteStagingCannotPass:
         assert res["aggregated"]["arch_score"]["incomplete_cases"] == 0
         assert detect_regressions(
             res["aggregated"], {"arch_score": {"min_pass_rate": 1.0}}) == []
+
+    # Staging raises, rather than returning its skips, when content under a
+    # case output could not be copied at all (an unreadable file, an unlistable
+    # directory). That path must count as incomplete too, or `chmod 000`
+    # reaches the escape the hardlink case closes: the case becomes an ordinary
+    # error, leaves the `min_pass_rate` denominator, and the run passes on the
+    # survivors. The invariant is "the judge did not see material it should
+    # have", not any one cause.
+
+    @contextmanager
+    def _unreadable(self, path):
+        mode = path.stat().st_mode & 0o777
+        path.chmod(0)
+        try:
+            yield
+        finally:
+            path.chmod(mode)
+
+    def _gate(self, res):
+        from score import detect_regressions
+        return [r.metric for r in detect_regressions(
+            res["aggregated"], {"arch_score": {"min_pass_rate": 0.9}})]
+
+    def _rest(self, tmp_path):
+        return [self._case(tmp_path, f"c{i}") for i in range(1, 10)]
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file modes")
+    def test_an_unreadable_file_makes_the_case_incomplete(self, tmp_path):
+        bad = self._case(tmp_path, "c0")
+        target = bad / "out" / "bad.txt"
+        target.write_text("FAILING EVIDENCE")
+        with self._unreadable(target):
+            res = self._run(tmp_path, [bad] + self._rest(tmp_path))
+        agg = res["aggregated"]["arch_score"]
+        assert agg["incomplete_cases"] == 1
+        assert agg["errored_cases"] == 1
+        assert "incomplete_staging" in self._gate(res)
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file modes")
+    def test_an_unlistable_directory_makes_the_case_incomplete(self, tmp_path):
+        bad = self._case(tmp_path, "c0")
+        sub = bad / "out" / "sub"
+        sub.mkdir()
+        (sub / "evidence.txt").write_text("FAILING EVIDENCE")
+        with self._unreadable(sub):
+            res = self._run(tmp_path, [bad] + self._rest(tmp_path))
+        assert res["aggregated"]["arch_score"]["incomplete_cases"] == 1
+        assert "incomplete_staging" in self._gate(res)
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file modes")
+    def test_unreadable_plus_hardlink_is_recorded_once_with_both(
+            self, tmp_path):
+        bad = self._case(tmp_path, "c0", suppress=True)
+        target = bad / "out" / "bad.txt"
+        target.write_text("FAILING EVIDENCE")
+        with self._unreadable(target):
+            res = self._run(tmp_path, [bad] + self._rest(tmp_path))
+        assert res["aggregated"]["arch_score"]["incomplete_cases"] == 1
+        skips = res["per_case"]["c0"]["arch_score"]["staging_skips"]
+        assert skips["count"] == 2
+        assert skips["reasons"]["hardlinked file"] == 1
+        assert skips["reasons"]["content not staged"] == 1
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file modes")
+    def test_an_agent_context_failure_is_an_ordinary_judge_error(
+            self, tmp_path):
+        ctx = tmp_path / "ctxdir"
+        ctx.mkdir()
+        doc = ctx / "doc.md"
+        doc.write_text("reference")
+        judge = JudgeConfig(name="arch_score", prompt="Grade it.",
+                            feedback_type="bool",
+                            agent={"inputs": ["out"], "context": ["ctxdir"]})
+        cases = [self._case(tmp_path, f"c{i}") for i in range(10)]
+        with self._unreadable(doc):
+            res = self._run(tmp_path, cases, judge=judge)
+        agg = res["aggregated"]["arch_score"]
+        assert agg["errored_cases"] == 10    # the judge could not be set up
+        assert agg["incomplete_cases"] == 0  # but that is not withheld evidence
+        assert "staging_skips" not in res["per_case"]["c0"]["arch_score"]
