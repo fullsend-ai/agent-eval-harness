@@ -208,13 +208,7 @@ python3 ${CLAUDE_SKILL_DIR}/scripts/score.py pairwise \
   --config <config>
 ```
 
-`min_win_rate` is evaluated only by `score.py regression`, because it reads the `pairwise` section this step writes. If `thresholds` sets it, run the gate after the comparison:
-
-```bash
-python3 ${CLAUDE_SKILL_DIR}/scripts/score.py regression \
-  --run-id <id> \
-  --config <config>
-```
+`min_win_rate`: see [`data-pipeline.md`](references/data-pipeline.md).
 
 Read the full results:
 

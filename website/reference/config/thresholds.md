@@ -38,6 +38,8 @@ One class of error does not merely shrink the sample: a case where the judge
 was denied material it should have graded blocks every score threshold and
 every baseline comparison on its own, whether or not `max_error_rate` is set.
 See [incomplete evidence](../runs-directory.md#incomplete-evidence).
+`min_win_rate` is subject to the same gate: a non-zero `pairwise.incomplete_cases`
+reports an `incomplete_staging` regression, and is not folded into the win rate.
 
 You may set more than one key per judge; each is checked independently. The
 three `min_*` keys are compared with `<` and `max_error_rate` with `>`, so a

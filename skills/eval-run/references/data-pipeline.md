@@ -266,6 +266,16 @@ For each judge across all cases:
 - **Numeric values**: aggregated as `mean`
 - Results written to `summary.yaml` with `per_case` and `aggregated` sections
 
+### Gating `min_win_rate`
+
+`min_win_rate` reads the `pairwise` section that `score.py pairwise --baseline` writes, so only `score.py regression` evaluates it — `score.py judges` runs first and skips it. When `thresholds` sets it, run the gate after the comparison:
+
+```bash
+python3 ${CLAUDE_SKILL_DIR}/scripts/score.py regression \
+  --run-id <id> \
+  --config <config>
+```
+
 ## Traces Configuration
 
 | `traces` field | What it controls | Where data comes from | What judges access |

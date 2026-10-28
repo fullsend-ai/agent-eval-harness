@@ -42,13 +42,16 @@ def _load(path, name):
 # `compare_runs` (and `cmd_pairwise`) with a scripted judge instead.
 #
 # One character per case: "A" the run under test wins, "B" the baseline wins,
-# "T" tie, "E" the comparison errored.
+# "T" tie, "E" the comparison errored, "L" a side's case record could not be
+# read (an error that is also counted in `incomplete_cases`).
 
 def _scripted_judge(verdicts, candidate="run-a"):
     case_ids = [f"case-{i:03d}" for i in range(len(verdicts))]
     by_case = dict(zip(case_ids, verdicts))
 
     def load_case_record(case_dir, config):
+        if by_case[case_dir.name] == "L":
+            raise OSError("unreadable output")
         return {"run": case_dir.parent.parent.name, "case": case_dir.name}
 
     def fmt(record):
@@ -84,6 +87,12 @@ def _pairwise_section(verdicts):
         return score.compare_runs(Path("run-a"), Path("baseline"),
                                   EvalConfig(name="t", skill="s"), case_ids,
                                   model="claude-opus-5-5")
+
+
+def test_the_producer_emits_the_incomplete_count_the_gate_reads():
+    pw = _pairwise_section("AAAAAAAAAL")
+    assert (pw["wins_a"], pw["errors"], pw["incomplete_cases"]) == (9, 1, 1)
+    assert _pairwise_section("AAAAAAAAAE")["incomplete_cases"] == 0
 
 
 def test_the_scripted_judge_produces_the_counts_it_is_told():
@@ -199,6 +208,50 @@ def test_min_win_rate_gates_the_recorded_comparison(tmp_path, monkeypatch, capsy
                                               verdicts)
     assert got_code == code, f"{label}: {out}"
     assert needle in out, label
+
+
+def test_min_win_rate_is_not_satisfied_while_evidence_is_incomplete():
+    """Nine wins and one case whose evidence could not be read: the win rate
+    over the survivors is 1.0, which must not pass a 0.9 gate."""
+    pw = _pairwise_section("AAAAAAAAAL")
+    assert score.pairwise_win_rate(pw)[0] == 1.0
+    regs = detect_regressions({}, {"pairwise": {"min_win_rate": 0.9}}, pairwise=pw)
+    assert [(r.metric, r.current_value) for r in regs] == [("incomplete_staging", "1")]
+
+
+def test_the_incomplete_count_is_not_folded_into_the_win_rate():
+    """A real breach is still reported, alongside the incomplete gate."""
+    pw = _pairwise_section("AABBBBBBBL")
+    regs = detect_regressions({}, {"pairwise": {"min_win_rate": 0.9}}, pairwise=pw)
+    assert [r.metric for r in regs] == ["incomplete_staging", "win_rate"]
+    assert regs[1].current_value == f"{2 / 9:.3f}"
+
+
+def test_min_win_rate_is_gated_normally_without_incomplete_evidence():
+    thresholds = {"pairwise": {"min_win_rate": 0.9}}
+    # An ordinary error leaves the denominator without tripping the gate.
+    pw = _pairwise_section("AAAAAAAAAE")
+    assert pw["incomplete_cases"] == 0
+    assert detect_regressions({}, thresholds, pairwise=pw) == []
+    pw = _pairwise_section("AAAAAAAAAA")
+    assert detect_regressions({}, thresholds, pairwise=pw) == []
+
+
+def test_incomplete_pairwise_evidence_is_not_reported_twice():
+    """A `pairwise` judge that also has a judges aggregate with its own
+    incomplete count gets one `incomplete_staging`, not two."""
+    pw = _pairwise_section("AAAAAAAAAL")
+    regs = detect_regressions(
+        {"pairwise": {"incomplete_cases": 2, "scored_cases": 8}},
+        {"pairwise": {"min_win_rate": 0.9}}, pairwise=pw)
+    assert [r.metric for r in regs].count("incomplete_staging") == 1
+
+
+def test_incomplete_pairwise_evidence_ignores_a_coverage_only_threshold():
+    """Without `min_win_rate` the pairwise count gates nothing."""
+    pw = _pairwise_section("AAAAAAAAAL")
+    assert detect_regressions({}, {"pairwise": {"max_error_rate": 0.5}},
+                              pairwise=pw) == []
 
 
 def test_unavailable_win_rate_says_why():
