@@ -159,7 +159,7 @@ python3 ${CLAUDE_SKILL_DIR}/scripts/execute.py \
 
 **Launch with `run_in_background: true` and do NOT redirect its output** (no `>`, `|`, `tee`, `2>&1`) — a redirect diverts the stream Claude Code's background viewer reads and leaves it blank. You don't need one: `execute.py` mirrors its live console to `<output_dir>/console.log`.
 
-When it finishes, read `run_result.json` — if `exit_code` is non-zero, report the failure and stop. If `stderr.log` ends with a bg-wait-ceiling `ERROR:`, fix the skill's turn discipline if it should have awaited its agents; raise `CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS` via `runner.env:` only for intentionally long-running background work. For session-lifecycle details, polling patterns, problem detection, and CLI fallbacks, see [`references/execution-monitoring.md`](references/execution-monitoring.md).
+When it finishes, read `run_result.json` — if `exit_code` is non-zero, report the failure and stop. If `stderr.log` ends with a bg-wait-ceiling `ERROR:`, see the reference below. For session lifecycle, polling, problem detection, and CLI fallbacks, see [`references/execution-monitoring.md`](references/execution-monitoring.md).
 
 ## Step 5: Collect Artifacts
 
@@ -197,7 +197,7 @@ python3 ${CLAUDE_SKILL_DIR}/scripts/score.py judges \
 
 If `hooks.before_scoring` is configured in eval.yaml, score.py runs those hooks before judge execution. Pass `--workspace` and `--model` so hook environment variables are populated.
 
-Judges receive the case `outputs` record — file contents (`outputs["files"]`, `<dir>_content`), execution metadata, `tool_calls`, logs, and `annotations` (parsed `annotations.yaml`, for outcome-aware scoring). Full field reference: [`references/data-pipeline.md`](references/data-pipeline.md).
+Judges receive the case `outputs` record (files, metadata, `tool_calls`, logs, `annotations`). Field reference: [`references/data-pipeline.md`](references/data-pipeline.md).
 
 If `--baseline` was specified, also run pairwise comparison:
 
@@ -216,7 +216,7 @@ Read the full results:
 python3 ${CLAUDE_SKILL_DIR}/scripts/agent_eval/state.py read $AGENT_EVAL_RUNS_DIR/<eval-name>/<id>/summary.yaml
 ```
 
-`summary.yaml` carries `judges`, `per_case`, `judge_usage` (judge cost, tokens, verdict transport counters) and `total_cost_usd`, plus `pairwise` when --baseline was used.
+`summary.yaml` carries `judges`, `per_case`, `judge_usage`, `total_cost_usd`, plus `pairwise` when --baseline was used (keys: [`data-pipeline.md`](references/data-pipeline.md)).
 
 ## Step 7: Interpret and Report
 

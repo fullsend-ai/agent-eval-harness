@@ -254,6 +254,53 @@ def test_incomplete_pairwise_evidence_ignores_a_coverage_only_threshold():
                               pairwise=pw) == []
 
 
+def test_pairwise_max_error_rate_is_breached_alongside_min_win_rate():
+    """The pairwise judge has no `judges` aggregate, so `max_error_rate` has to
+    be read from the section's own `errors` / `cases_compared`: nine wins and
+    five ordinary errors passes `min_win_rate` over the survivors but not the
+    coverage gate."""
+    pw = _pairwise_section("AAAAAAAAAEEEEE")
+    assert (pw["errors"], pw["cases_compared"], pw["incomplete_cases"]) == (5, 14, 0)
+    regs = detect_regressions(
+        {}, {"pairwise": {"min_win_rate": 0.5, "max_error_rate": 0.0}},
+        pairwise=pw)
+    assert [(r.metric, r.baseline_value, r.current_value) for r in regs] == [
+        ("error_rate", "<= 0.0", f"{5 / 14:.3f}")]
+    assert regs[0].detail == "5 of 14 cases errored"
+
+
+def test_pairwise_max_error_rate_is_satisfied_within_budget():
+    pw = _pairwise_section("AAAAAAAAAE")
+    thresholds = {"pairwise": {"min_win_rate": 0.5, "max_error_rate": 0.1}}
+    assert detect_regressions({}, thresholds, pairwise=pw) == []
+    # The rate is `>`-compared, so a stricter budget trips on the same section.
+    assert [r.metric for r in detect_regressions(
+        {}, {"pairwise": {"max_error_rate": 0.05}}, pairwise=pw)] == ["error_rate"]
+
+
+def test_pairwise_max_error_rate_without_min_win_rate_and_with_a_failing_win_rate():
+    """Each key reports on its own; neither short-circuits the other."""
+    pw = _pairwise_section("ABBBBBBBEE")
+    regs = detect_regressions(
+        {}, {"pairwise": {"min_win_rate": 0.9, "max_error_rate": 0.1}}, pairwise=pw)
+    assert [r.metric for r in regs] == ["error_rate", "win_rate"]
+    assert [r.metric for r in detect_regressions(
+        {}, {"pairwise": {"max_error_rate": 0.1}}, pairwise=pw)] == ["error_rate"]
+
+
+def test_pairwise_max_error_rate_is_left_alone_for_a_caller_without_a_comparison():
+    assert detect_regressions(
+        {}, {"pairwise": {"max_error_rate": 0.0}}) == []
+
+
+def test_pairwise_error_rate_is_not_reported_twice_given_an_aggregate():
+    pw = _pairwise_section("AAAAAAAAEE")
+    regs = detect_regressions(
+        {"pairwise": {"errored_cases": 2, "scored_cases": 8}},
+        {"pairwise": {"max_error_rate": 0.0}}, pairwise=pw)
+    assert [r.metric for r in regs] == ["error_rate"]
+
+
 def test_unavailable_win_rate_says_why():
     assert "every pairwise comparison errored (3 cases)" in detect_regressions(
         {}, {"pairwise": {"min_win_rate": 0.6}},

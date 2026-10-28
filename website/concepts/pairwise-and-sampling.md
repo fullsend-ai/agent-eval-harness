@@ -132,6 +132,15 @@ pairwise:
 !!! tip "Gate on a pairwise win rate"
     A [threshold](thresholds.md) with `min_win_rate` regresses when the run doesn't beat
     its baseline often enough. See [thresholds](thresholds.md) for the valid keys.
+    On the `pairwise` judge, `max_error_rate` gates `errors / cases_compared`.
+
+!!! note "How the win rate is computed"
+    The win rate is `wins_a / (wins_a + wins_b + ties)`: ties count against the run
+    (it has to beat the baseline, not match it) and errored comparisons leave the
+    denominator. The example above is 7 / 12 = 0.583 with ties counted, and would be
+    7 / 9 = 0.778 if they were left out. A `tie` is also what any inconsistent verdict
+    pair becomes, so position bias (judge instability) is charged against the run
+    the same as a genuine tie.
 
 ## Judge sampling
 

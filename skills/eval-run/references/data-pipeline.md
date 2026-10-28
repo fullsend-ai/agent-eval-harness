@@ -265,10 +265,11 @@ For each judge across all cases:
 - **Boolean values**: aggregated as `pass_rate` (fraction True)
 - **Numeric values**: aggregated as `mean`
 - Results written to `summary.yaml` with `per_case` and `aggregated` sections
+- `summary.yaml` also carries `judge_usage` (judge cost, tokens, verdict transport counters) and `total_cost_usd`
 
-### Gating `min_win_rate`
+### Gating `min_win_rate` and the pairwise `max_error_rate`
 
-`min_win_rate` reads the `pairwise` section that `score.py pairwise --baseline` writes, so only `score.py regression` evaluates it — `score.py judges` runs first and skips it. When `thresholds` sets it, run the gate after the comparison:
+`min_win_rate` reads the `pairwise` section that `score.py pairwise --baseline` writes, so only `score.py regression` evaluates it — `score.py judges` runs first and skips it. The `pairwise` judge's `max_error_rate` is read from the same section (`errors / cases_compared`), so it is gated at the same point. When `thresholds` sets either, run the gate after the comparison:
 
 ```bash
 python3 ${CLAUDE_SKILL_DIR}/scripts/score.py regression \
