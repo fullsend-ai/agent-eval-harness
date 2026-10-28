@@ -68,9 +68,13 @@ artifact, and read as the union of the two:
 | `provision`, `before_each`, `agent`, `after_each`, `collect` | `run_result.json`, under `per_case.<id>` | `execute.py` / `collect.py` |
 | `score` | `summary.yaml`, under `per_case.<case>` | `score.py` |
 
-Splitting them is forced, not chosen: `score.py` never writes `run_result.json`,
-and the execution stages are finished before scoring starts. Consumers read both
-and concatenate; `unmeasured_cases` counts a case once however many entries it has.
+Splitting the WRITERS is forced, not chosen: `score.py` never writes
+`run_result.json`, and the execution stages are finished before scoring starts.
+Splitting the READERS is not. `score.py` already reads `run_result.json` and
+produces `summary.yaml`, so it folds the execution-phase entries in as it goes and
+`summary.yaml` is the single canonical per-case list. Downstream consumers —
+report, thresholds, reward, eval-anova — read one place; `unmeasured_cases` counts
+a case once however many entries it has.
 
 ```json
 // run_result.json per_case.<id> — and the same shape in summary.yaml per_case
@@ -90,18 +94,37 @@ than one thing can go wrong in a case and #276 already had to record two at once
 | --- | --- |
 | `phase` | `provision` \| `before_each` \| `agent` \| `after_each` \| `collect` \| `score` |
 | `kind` | stable slug for the cause; the set grows, consumers must tolerate unknown values |
-| `attribution` | `harness` \| `agent` — decides reward treatment, see below |
+| `attribution` | `harness` \| `agent` — decides BOTH the reward treatment and whether the case blocks a score threshold, below |
+| `detail` | one line for a human |
+| `log` | optional pointer, relative to the run directory |
+
+### `attribution` drives both consumers, in opposite directions
+
+| | reward | score thresholds |
+| --- | --- | --- |
+| `agent` — the graded skill withheld or corrupted its own evidence | `0.0` | **blocks** |
+| `harness` — a positively identified infrastructure fault | **drop the sample** | priced by `max_error_rate`, as today |
+
+The two consumers are asking different questions, and the same entry answers
+them differently. Reward asks *should this episode train the policy* — a
+provider 500 should not. Thresholds ask *did the suite meet the author's bar* —
+and the author already has `max_error_rate` to price judge flakiness, so
+auto-blocking on it would make one flaky provider fail every run.
+
+This is what keeps the rule compatible with what #260 and #276 already shipped.
+A case artifact that cannot be read is `agent`-attributed — the case directory
+is the graded skill's own output, which is the whole argument of those PRs — so
+it still blocks. A judge that errored is `harness`-attributed, so it does not,
+which is today's behaviour.
 
 **Mixed attribution resolves to `agent`.** A case can carry entries of both
 kinds — the example above does. The rule is order-independent and deliberately
 asymmetric: if ANY entry is attributed to the agent, the case scores `0.0`
-rather than being dropped. Dropping is the outcome that removes a case from
-training, so it is the one an agent could profit from; a harness fault that
-happens to coincide with the agent suppressing evidence must not launder the
-suppression into a dropped sample. The spec's own example therefore scores
-`0.0`, not dropped.
-| `detail` | one line for a human |
-| `log` | optional pointer, relative to the run directory |
+rather than being dropped, and blocks. Dropping is the outcome that removes a
+case from training, so it is the one an agent could profit from; a harness
+fault that happens to coincide with the agent suppressing evidence must not
+launder the suppression into a dropped sample. The spec's own example therefore
+scores `0.0` and blocks.
 
 ### Case-level, not judge-level
 
@@ -115,7 +138,7 @@ the stamping loop disappears and per-judge counts derive by counting.
 | Consumer | Today | With `unmeasured` |
 | --- | --- | --- |
 | judges | `outputs["hook_failures"]`, a marker file, `staging_skips` | `outputs["unmeasured"]` |
-| thresholds | the `incomplete_staging` special case in `detect_regressions` | one rule: any unmeasured case blocks score thresholds and baselines |
+| thresholds | the `incomplete_staging` special case in `detect_regressions` | one rule: an **`agent`-attributed** unmeasured case blocks score thresholds and baselines; `harness`-attributed stays priced by `max_error_rate` |
 | `summary.yaml` | `incomplete_cases` stamped by each layer | `unmeasured_cases`, derived by counting |
 | reward | errored ⇒ `0.0` | `attribution: harness` ⇒ drop the sample; `agent` ⇒ `0.0` |
 | Harbor / EvalHub | counters dropped | one field to carry |
@@ -163,14 +186,43 @@ What goes is the *derived verdict* each layer publishes next to its detail:
    metrics dict `compose_reward` already returns as its second element
    (`{"reward_disposition": "scored" | "dropped"}`), with the float left at `0.0`
    when dropped. Reports keep showing the case; the training consumer filters on
-   the disposition. The spec's job here is to name the contract — which writer
-   emits it, and which consumer is required to honour it — not to assume a
-   `None` nobody can accept.
+   the disposition.
+
+   **It has to reach every channel, not just the one that carries metrics.**
+   `harbor/reward.py::write_reward` writes three, and only one of them would
+   see it as drafted:
+
+   | channel | contents today | needs |
+   | --- | --- | --- |
+   | `reward.json` | `{reward, **metrics}` | nothing — the disposition rides in `metrics` |
+   | `reward.txt` | the bare scalar, Harbor's fallback | a sibling marker, or Harbor must be required not to use the fallback for dropped samples |
+   | `judges.json` | `{reward, per_judge}`, no metrics | add the disposition to the sidecar |
+
+   A consumer reading `reward.txt` sees `0.0` and cannot tell a dropped sample
+   from a real zero, which is the failure this whole section exists to prevent
+   — silently training on a harness fault. So: name the supported training
+   consumers, carry the disposition through all three channels, and require a
+   consumer that cannot honour a drop to **fail loudly** rather than treat it
+   as a zero. A disposition that is merely available is not a contract.
 6. Deprecate `incomplete_cases` one minor release later.
 
-Steps 1–3 are behaviour-preserving. Step 4 makes containerised runs *start* failing
-where they silently passed, which is the point, and wants a release note. Step 5 changes
-RL training data and should land on its own.
+### Release impact, step by step
+
+Steps 1 and 3 are behaviour-preserving: they move where the same facts are stored
+and read, and `incomplete_cases` is derived so existing gates and docs keep working.
+
+**Step 2 is not**, and an earlier draft wrongly said it was. Adding the judge-error
+contributor would, under a naive "any `unmeasured` entry blocks", turn a run that
+passes today — nine scored cases and one provider 500, inside a declared
+`max_error_rate` — into a failing one. That is why the gate keys on
+`attribution`, not on the mere presence of an entry: a judge error is
+`harness`-attributed, so it drops the reward sample and leaves the score
+thresholds to `max_error_rate` exactly as today. With that rule, step 2 is
+behaviour-preserving for thresholds and changes only the reward path.
+
+Step 4 makes containerised runs *start* failing where they silently passed, which is
+the point, and wants a release note. Step 5 changes RL training data and should land
+on its own.
 
 ## Open questions
 
