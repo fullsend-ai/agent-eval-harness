@@ -164,8 +164,26 @@ the stamping loop disappears and per-judge counts derive by counting.
 | judges | `outputs["hook_failures"]`, a marker file, `staging_skips` | `outputs["unmeasured"]` |
 | thresholds | the `incomplete_staging` special case in `detect_regressions` | one rule: an **`agent`-attributed** unmeasured case blocks score thresholds and baselines; a `harness`-attributed one enters the widened `max_error_rate` numerator |
 | `summary.yaml` | `incomplete_cases` stamped by each layer | `unmeasured_cases`, derived by counting |
+| **aggregates** | every non-None judge value joins `mean`/`pass_rate` | an unmeasured case's observations are **excluded** |
 | reward | errored ⇒ `0.0` | `attribution: harness` ⇒ drop the sample; `agent` ⇒ `0.0` |
 | Harbor / EvalHub | counters dropped | one field to carry |
+
+**An unmeasured case's judge values are not measurements either.** A case can be
+unmeasured and still carry verdicts — a hook failed, or collection lost an artifact,
+while the judges ran and returned something. `score.py` appends every non-None value
+to the sample, so without this rule:
+
+- nine passes plus one harness-failed case that returned `False` gives `pass_rate 0.9`,
+  failing `min_pass_rate: 0.95` even though `max_error_rate: 0.1` was set to tolerate
+  exactly that one case; and
+- the same case returning `True` **inflates** the score with a verdict reached over
+  material the harness knows was incomplete.
+
+So: exclude an unmeasured case's observations from `mean`, `pass_rate` and the baseline
+comparison, whatever the attribution — the verdict is not evidence about the agent
+either way. Keep the case in the coverage denominator (it was attempted) and keep its
+raw verdict in `per_case` for diagnostics. Counting a case as unscored while still
+scoring it is the inconsistency this whole document exists to remove.
 
 The threshold rule **replaces** `incomplete_staging` rather than sitting beside it.
 `max_error_rate` still never auto-fails, for the reason #260 gave: that gate is the
@@ -236,8 +254,12 @@ What goes is the *derived verdict* each layer publishes next to its detail:
 
 ### Release impact, step by step
 
-Steps 1 and 3 are behaviour-preserving: they move where the same facts are stored
-and read, and `incomplete_cases` is derived so existing gates and docs keep working.
+Step 1 is behaviour-preserving: it moves where the same facts are stored and read, and
+`incomplete_cases` is derived so existing gates and docs keep working.
+
+**Step 3 is not**, and an earlier draft said it was. It widens the `max_error_rate`
+numerator and excludes unmeasured observations from the aggregates, either of which can
+newly fail a local run. The release note belongs here, not only on step 4.
 
 **Step 2 is not**, and an earlier draft wrongly said it was. Adding the judge-error
 contributor would, under a naive "any `unmeasured` entry blocks", turn a run that
@@ -245,7 +267,7 @@ passes today — nine scored cases and one provider 500, inside a declared
 `max_error_rate` — into a failing one. That is why the gate keys on
 `attribution`, not on the mere presence of an entry: a judge error is
 `harness`-attributed, so it drops the reward sample and leaves the score
-thresholds alone. It is not quite "as today", because the same step widens the
+thresholds alone. It is not quite "as today", because **step 3** widens the
 `max_error_rate` numerator to count harness-attributed cases whose judges still
 returned values — without that, such a case is exempt from both gates. For a
 judge error the two coincide (`errored_cases` already counts it), so the nine-plus-one
