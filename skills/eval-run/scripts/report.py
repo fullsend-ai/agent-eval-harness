@@ -1662,12 +1662,18 @@ def _render_scoring_summary(summary, config, baseline_summary=None):
                  f'<td>comparison</td><td>{pw_val}</td>')
         if has_bl:
             html += "<td>—</td>"
-        # A `min_win_rate` gate makes the row's verdict the detector's, like
-        # every judge row above; without one it stays the plain head-to-head.
+        # A `min_win_rate` or `max_error_rate` gate makes the row's verdict the
+        # detector's, like every judge row above; without one it stays the
+        # plain head-to-head.
         pw_thresh = thresholds.get("pairwise")
         pw_thresh_str = "—"
-        if isinstance(pw_thresh, dict) and "min_win_rate" in pw_thresh:
-            pw_thresh_str = f"&ge; {_esc(_pct(pw_thresh['min_win_rate']))}"
+        if isinstance(pw_thresh, dict) and (
+                "min_win_rate" in pw_thresh or "max_error_rate" in pw_thresh):
+            if "min_win_rate" in pw_thresh:
+                pw_thresh_str = f"&ge; {_esc(_pct(pw_thresh['min_win_rate']))}"
+            else:
+                pw_thresh_str = (
+                    f"&le; {_esc(_pct(pw_thresh['max_error_rate']))} errored")
             if "pairwise" in _breached:
                 pw_status_cls, pw_status = "fail", "FAIL"
             elif _breach_known:

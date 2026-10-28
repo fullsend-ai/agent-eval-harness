@@ -5491,11 +5491,21 @@ def _pairwise_regressions(judge_name, threshold, pairwise,
     compared = section.get("cases_compared") or 0
     if "max_error_rate" in threshold:
         errors = section.get("errors") or 0
-        rate = (errors / compared) if compared else 0.0
-        if rate > threshold["max_error_rate"]:
+        bound = f"<= {threshold['max_error_rate']}"
+        if not compared:
+            # 0 of 0 is an unmeasured error rate, not a 0% one — the same
+            # input `min_win_rate` reports as unavailable. A missing, empty or
+            # non-dict section all land here: none of them recorded a comparison.
             regressions.append(Regression(
-                judge_name, "error_rate", f"<= {threshold['max_error_rate']}",
-                f"{rate:.3f}", f"{errors} of {compared} cases errored"))
+                judge_name, "error_rate", bound, "n/a",
+                "error_rate unavailable — no pairwise comparison recorded "
+                "(run `score.py pairwise --baseline <id>`)"))
+        else:
+            rate = errors / compared
+            if rate > threshold["max_error_rate"]:
+                regressions.append(Regression(
+                    judge_name, "error_rate", bound,
+                    f"{rate:.3f}", f"{errors} of {compared} cases errored"))
     if "min_win_rate" not in threshold:
         return regressions
     incomplete = section.get("incomplete_cases") or 0

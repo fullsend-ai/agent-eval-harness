@@ -293,6 +293,25 @@ def test_pairwise_max_error_rate_is_left_alone_for_a_caller_without_a_comparison
         {}, {"pairwise": {"max_error_rate": 0.0}}) == []
 
 
+@pytest.mark.parametrize("section", [
+    None, {}, "not-a-dict", {"errors": 0, "cases_compared": 0},
+], ids=["none", "empty", "non-dict", "zero-compared"])
+def test_pairwise_max_error_rate_is_unavailable_without_a_comparison(section):
+    """0 of 0 is an unmeasured error rate, not a perfect one — `min_win_rate`
+    already reports the same input as unavailable."""
+    regs = detect_regressions(
+        {}, {"pairwise": {"max_error_rate": 0.0}}, pairwise=section)
+    assert [(r.metric, r.current_value) for r in regs] == [("error_rate", "n/a")]
+    assert "unavailable" in regs[0].detail
+
+
+def test_pairwise_error_rate_is_unavailable_alongside_min_win_rate():
+    regs = detect_regressions(
+        {}, {"pairwise": {"min_win_rate": 0.5, "max_error_rate": 0.0}},
+        pairwise=None)
+    assert [r.metric for r in regs] == ["error_rate", "win_rate"]
+
+
 def test_pairwise_error_rate_is_not_reported_twice_given_an_aggregate():
     pw = _pairwise_section("AAAAAAAAEE")
     regs = detect_regressions(
@@ -367,6 +386,20 @@ def test_the_summary_status_matches_the_detector(label, judges, verdicts,
                                                  thresholds, expected):
     assert _statuses(judges, thresholds,
                      _pairwise_section(verdicts)) == [expected], label
+
+
+def test_a_standalone_pairwise_coverage_breach_is_not_rendered_as_a_win():
+    """With only `max_error_rate` set the row used to keep its head-to-head
+    `WIN` while `score.py regression` exited 1."""
+    thresholds = {"pairwise": {"max_error_rate": 0.0}}
+    assert _statuses({}, thresholds, _pairwise_section("AAAAAAAAAEEEEE")) == ["FAIL"]
+    html = report._render_scoring_summary(
+        _summary({}, _pairwise_section("AAAAAAAAAEEEEE")),
+        {"thresholds": thresholds, "judges": []})
+    assert "&le; 0% errored" in html and ">WIN<" not in html
+    # Within budget it is the detector's PASS, with the bound shown.
+    assert _statuses({}, {"pairwise": {"max_error_rate": 0.5}},
+                     _pairwise_section("AAAAAAAAAE")) == ["PASS"]
 
 
 def test_an_ungated_pairwise_row_keeps_its_head_to_head_verdict():
