@@ -16,6 +16,7 @@ import agent_eval._bootstrap  # noqa: F401 — auto-activate venv
 import argparse
 import ast
 import copy
+import functools
 import importlib
 import json
 import logging
@@ -247,15 +248,22 @@ def _extract_verifiable_evidence(record):
 _SKIP_MODIFIED_PREFIXES = (".work", "subagents", "hooks")
 
 
-def _is_harness_namespace(rel: str) -> bool:
+def _is_harness_namespace(rel: str, prefixes=_SKIP_MODIFIED_PREFIXES) -> bool:
     """True when ``rel`` — a path RELATIVE TO ``_modified/`` — is inside one of
-    the harness's own namespaces (`_SKIP_MODIFIED_PREFIXES`).
+    the harness's own namespaces (``prefixes``, by default
+    `_SKIP_MODIFIED_PREFIXES`).
 
     The single statement of the rule. Every walk that can reach ``_modified``
     (the record's ``_modified`` walk, its declared-output walk, and staging)
     asks this rather than testing the prefixes itself, so they cannot drift.
+    Staging passes the ``exclude`` of the source it is copying, so a source
+    with a different exclusion gets its own rule through the same predicate.
+
+    Decided from the PATH alone — it must never touch the filesystem, so that
+    pruning cannot fail on a directory the walk was never going to read. Every
+    caller asks it BEFORE any stat, listing or resolve of the entry.
     """
-    return rel.startswith(_SKIP_MODIFIED_PREFIXES)
+    return rel.startswith(prefixes)
 
 
 def _in_harness_namespace(case_rel) -> bool:
@@ -334,23 +342,29 @@ def load_case_record(case_dir, config, run_id=None, runs_dir=None,
         if not output.path:
             continue
         out_path = output.path
+        # Decide from the PATH, before anything touches the filesystem: a
+        # declared output inside a harness namespace (`_modified/.work/x`)
+        # is not judge evidence, and `exists()` / `resolve()` on it would
+        # stat through a directory that may be unreadable. See
+        # `_is_harness_namespace`.
+        if _in_harness_namespace(out_path):
+            continue
         artifact_dir = case_dir / out_path
         if not artifact_dir.exists():
             continue
         _resolve_under(case_dir, artifact_dir)
         if not load_files:
             continue
-        # Prune the harness's namespaces BEFORE probing — whichever declared
-        # output (`_modified`, `_modified/.work`, or `.`) led here. They are
-        # not judge evidence, so an unreadable directory in one must not fail
-        # the case. See `_is_harness_namespace`.
-        if _in_harness_namespace(out_path):
-            continue
         _require_listable(artifact_dir)
         for f in sorted(artifact_dir.rglob("*")):
-            if f.is_symlink():
-                continue
+            # Prune the harness's namespaces BEFORE `is_symlink()` (an
+            # lstat) or anything else that stats the entry: whichever
+            # declared output (`_modified`, or `.`) led here, a child of a
+            # readable-but-not-searchable `.work` (mode 0400) is listed but
+            # its stat is denied. The decision needs only the path.
             if _in_harness_namespace(f.relative_to(case_dir)):
+                continue
+            if f.is_symlink():
                 continue
             kind = _entry_kind(f)
             if kind == "dir":
@@ -369,8 +383,10 @@ def load_case_record(case_dir, config, run_id=None, runs_dir=None,
     for output in config.outputs if load_files else ():
         if not output.path:
             continue
+        if _in_harness_namespace(output.path):
+            continue
         artifact_dir = case_dir / output.path
-        if not artifact_dir.exists() or _in_harness_namespace(output.path):
+        if not artifact_dir.exists():
             continue
         for f in sorted(artifact_dir.iterdir()):
             if f.is_file() and not f.is_symlink():
@@ -394,16 +410,17 @@ def load_case_record(case_dir, config, run_id=None, runs_dir=None,
         _resolve_under(case_dir, modified_dir)
         _require_listable(modified_dir)
         for f in sorted(modified_dir.rglob("*")):
-            if f.is_symlink():
-                continue
             rel = str(f.relative_to(modified_dir))
-            # Prune the harness's own namespaces BEFORE classifying or
-            # probing. They are not judge evidence, so an unreadable
-            # directory under `.work`/`hooks`/`subagents` must not fail the
-            # case: charging every judge with incomplete evidence over
-            # something nothing was going to grade blocks a run that lost
-            # nothing.
+            # Prune the harness's own namespaces BEFORE `is_symlink()` (an
+            # lstat), classifying or probing. They are not judge evidence, so
+            # an unreadable directory under `.work`/`hooks`/`subagents` — or
+            # a readable-but-not-searchable one (mode 0400), whose children
+            # are listed but cannot be stat-ed — must not fail the case:
+            # charging every judge with incomplete evidence over something
+            # nothing was going to grade blocks a run that lost nothing.
             if _is_harness_namespace(rel):
+                continue
+            if f.is_symlink():
                 continue
             kind = _entry_kind(f)
             if kind == "dir":
@@ -4413,7 +4430,10 @@ def _stage_case_outputs(workspace, case_dir, output_dirs, selected):
             if _skip_top(rel.split(os.sep, 1)[0]):
                 continue
             dest = workspace / rel
-            skip = _is_harness_namespace if exclude else None
+            # Parameterised by this source's `exclude`, so a source with a
+            # different exclusion gets its own prefixes, not `_modified`'s.
+            skip = (functools.partial(_is_harness_namespace, prefixes=exclude)
+                    if exclude else None)
         problems.extend(_copy_tree_dereferenced(src, dest, str(src), (),
                                                 skip=skip, budget=budget,
                                                 untrusted=True))

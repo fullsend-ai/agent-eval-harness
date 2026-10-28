@@ -2280,6 +2280,77 @@ class TestEvidenceLostBeforeStaging:
         # The readable artifacts were still read and graded.
         assert res["aggregated"]["graded"]["pass_rate"] == 1.0
 
+    @contextmanager
+    def _mode(self, path, mode):
+        old = path.stat().st_mode & 0o777
+        path.chmod(mode)
+        try:
+            yield
+        finally:
+            path.chmod(old)
+
+    def _score_with_work_0400(self, tmp_path, outputs):
+        """Score ten cases, one with `_modified/.work` at mode 0400.
+
+        0400 is readable but not searchable: `rglob` LISTS the children and
+        every stat on them is denied. Mode 000 (the tests above) lists
+        nothing, so it cannot tell a prune that runs before the first stat
+        from one that runs after it. Returns ``(res, aggregated-per-judge)``.
+        """
+        import score
+        config = _config(_agent_judge(feedback_type="bool", inputs=["out"]),
+                         outputs=outputs)
+        config.judges = [
+            config.judges[0],
+            JudgeConfig(name="graded", check=(
+                'return ("_modified/real.md" in outputs["files"] '
+                'and outputs["files"].get("out/ok.md", "fine") == "fine"), "ok"'))]
+
+        def case(name):
+            c = tmp_path / name
+            _make_case(c, {"out/ok.md": "fine", "_modified/real.md": "an edit"})
+            return c
+
+        bad = case("c0")
+        work = bad / "_modified" / ".work"
+        (work / "inner").mkdir(parents=True)
+        (work / "child.txt").write_text("harness scratch")
+        (work / "inner" / "scratch.txt").write_text("harness scratch")
+        cases = [bad] + [case(f"c{i}") for i in range(1, 10)]
+        with self._mode(work, 0o400), _patched_runners(self._runner()):
+            res = score.score_cases(
+                load_judges(config, project_root=str(tmp_path)), cases, config)
+        return res
+
+    def _assert_nothing_lost(self, res):
+        for judge in ("arch_score", "graded"):
+            agg = res["aggregated"][judge]
+            assert agg["incomplete_cases"] == 0, judge
+            assert agg["scored_cases"] == 10, judge
+            assert self._gate(res, {judge: {"min_pass_rate": 0.9}}) == [], judge
+        # The readable artifacts were still read and graded.
+        assert res["aggregated"]["graded"]["pass_rate"] == 1.0
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file modes")
+    @pytest.mark.parametrize("declared", ["_modified", ".", "out"])
+    def test_a_listable_but_unsearchable_harness_namespace_is_pruned(
+            self, tmp_path, declared):
+        """The prune is decided from the PATH, before any stat. A `.work` at
+        mode 0400 yields its children to the walk but denies the `is_symlink()`
+        stat on them, so a prune sitting behind that stat still failed."""
+        res = self._score_with_work_0400(tmp_path, [declared])
+        self._assert_nothing_lost(res)
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file modes")
+    def test_a_declared_output_under_an_unsearchable_harness_dir(
+            self, tmp_path):
+        """`outputs: [_modified/.work/inner]` is harness-owned, and `exists()`
+        / `resolve()` on it stat THROUGH `.work` — so the per-output prune has
+        to come before them, not after."""
+        res = self._score_with_work_0400(
+            tmp_path, ["_modified/.work/inner", "out"])
+        self._assert_nothing_lost(res)
+
     @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file modes")
     def test_an_unreadable_namespace_declared_directly_is_pruned(self, tmp_path):
         """`outputs: [_modified/.work]` is itself harness-owned: the walk, the
