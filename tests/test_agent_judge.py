@@ -2242,6 +2242,73 @@ class TestEvidenceLostBeforeStaging:
         assert self._gate(res, {"arch_score": {"min_pass_rate": 0.9}}) == []
 
     @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file modes")
+    @pytest.mark.parametrize("declared", ["_modified", "."])
+    def test_an_unreadable_harness_namespace_under_a_declared_output(
+            self, tmp_path, declared):
+        """The declared-output walk reaches `_modified` too: directly
+        (`outputs: [_modified]`) or as part of a larger tree (`outputs: ["."]`).
+        Both must prune the harness namespaces before probing, exactly as the
+        `_modified` walk does — the existing test above declares only `out`
+        and so passed while this path was broken."""
+        import score
+        config = _config(_agent_judge(feedback_type="bool", inputs=["out"]),
+                         outputs=[declared])
+        config.judges = [
+            config.judges[0],
+            JudgeConfig(name="graded", check=(
+                'return ("_modified/real.md" in outputs["files"] '
+                'and outputs["files"].get("out/ok.md", "fine") == "fine"), "ok"'))]
+
+        def case(name):
+            c = tmp_path / name
+            _make_case(c, {"out/ok.md": "fine", "_modified/real.md": "an edit"})
+            return c
+
+        bad = case("c0")
+        work = bad / "_modified" / ".work" / "inner"
+        work.mkdir(parents=True)
+        (work / "scratch.txt").write_text("harness scratch")
+        cases = [bad] + [case(f"c{i}") for i in range(1, 10)]
+        with self._unreadable(work), _patched_runners(self._runner()):
+            res = score.score_cases(
+                load_judges(config, project_root=str(tmp_path)), cases, config)
+        for judge in ("arch_score", "graded"):
+            agg = res["aggregated"][judge]
+            assert agg["incomplete_cases"] == 0, judge
+            assert agg["scored_cases"] == 10, judge
+            assert self._gate(res, {judge: {"min_pass_rate": 0.9}}) == [], judge
+        # The readable artifacts were still read and graded.
+        assert res["aggregated"]["graded"]["pass_rate"] == 1.0
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file modes")
+    def test_an_unreadable_namespace_declared_directly_is_pruned(self, tmp_path):
+        """`outputs: [_modified/.work]` is itself harness-owned: the walk, the
+        listability probe and the first-file convenience scan all skip it."""
+        import score
+        config = _config(_agent_judge(feedback_type="bool", inputs=["out"]),
+                         outputs=["_modified/.work"])
+        c = tmp_path / "c0"
+        _make_case(c, {"out/ok.md": "fine", "_modified/.work/x": "s"})
+        work = c / "_modified" / ".work"
+        with self._unreadable(work), _patched_runners(self._runner()):
+            record = score.load_case_record(c, config)
+        assert record["files"] == {}
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file modes")
+    def test_an_unreadable_dir_outside_the_namespace_still_counts(
+            self, tmp_path):
+        """The pruning is for the harness's namespaces only: an unreadable
+        directory next to them under `_modified` is real evidence lost."""
+        import score
+        config = _config(_agent_judge(feedback_type="bool", inputs=["out"]),
+                         outputs=["."])
+        c = tmp_path / "c0"
+        _make_case(c, {"out/ok.md": "fine", "_modified/src/x.py": "edit"})
+        with self._unreadable(c / "_modified" / "src"), \
+                pytest.raises(OSError):
+            score.load_case_record(c, config)
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file modes")
     def test_a_numeric_judge_arms_the_gate_through_mean(self, tmp_path):
         """`mean` is the half a boolean judge cannot exercise.
 

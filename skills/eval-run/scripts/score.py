@@ -247,6 +247,30 @@ def _extract_verifiable_evidence(record):
 _SKIP_MODIFIED_PREFIXES = (".work", "subagents", "hooks")
 
 
+def _is_harness_namespace(rel: str) -> bool:
+    """True when ``rel`` — a path RELATIVE TO ``_modified/`` — is inside one of
+    the harness's own namespaces (`_SKIP_MODIFIED_PREFIXES`).
+
+    The single statement of the rule. Every walk that can reach ``_modified``
+    (the record's ``_modified`` walk, its declared-output walk, and staging)
+    asks this rather than testing the prefixes itself, so they cannot drift.
+    """
+    return rel.startswith(_SKIP_MODIFIED_PREFIXES)
+
+
+def _in_harness_namespace(case_rel) -> bool:
+    """`_is_harness_namespace` for a path relative to the CASE directory.
+
+    A declared output may be ``_modified`` itself, something under it, or an
+    ancestor of it (``"."``), so a walk arrives at ``_modified/...`` through
+    any of them. Normalising to the path under ``_modified`` here is what makes
+    the pruning independent of which declaration led there.
+    """
+    parts = Path(os.path.normpath(str(case_rel))).parts
+    return (len(parts) > 1 and parts[0] == "_modified"
+            and _is_harness_namespace(os.sep.join(parts[1:])))
+
+
 def load_case_record(case_dir, config, run_id=None, runs_dir=None,
                      load_files=True):
     """Load all outputs, execution metadata, and traces for a case.
@@ -316,9 +340,17 @@ def load_case_record(case_dir, config, run_id=None, runs_dir=None,
         _resolve_under(case_dir, artifact_dir)
         if not load_files:
             continue
+        # Prune the harness's namespaces BEFORE probing — whichever declared
+        # output (`_modified`, `_modified/.work`, or `.`) led here. They are
+        # not judge evidence, so an unreadable directory in one must not fail
+        # the case. See `_is_harness_namespace`.
+        if _in_harness_namespace(out_path):
+            continue
         _require_listable(artifact_dir)
         for f in sorted(artifact_dir.rglob("*")):
             if f.is_symlink():
+                continue
+            if _in_harness_namespace(f.relative_to(case_dir)):
                 continue
             kind = _entry_kind(f)
             if kind == "dir":
@@ -338,7 +370,7 @@ def load_case_record(case_dir, config, run_id=None, runs_dir=None,
         if not output.path:
             continue
         artifact_dir = case_dir / output.path
-        if not artifact_dir.exists():
+        if not artifact_dir.exists() or _in_harness_namespace(output.path):
             continue
         for f in sorted(artifact_dir.iterdir()):
             if f.is_file() and not f.is_symlink():
@@ -371,7 +403,7 @@ def load_case_record(case_dir, config, run_id=None, runs_dir=None,
             # case: charging every judge with incomplete evidence over
             # something nothing was going to grade blocks a run that lost
             # nothing.
-            if rel.startswith(_SKIP_MODIFIED_PREFIXES):
+            if _is_harness_namespace(rel):
                 continue
             kind = _entry_kind(f)
             if kind == "dir":
@@ -4381,7 +4413,7 @@ def _stage_case_outputs(workspace, case_dir, output_dirs, selected):
             if _skip_top(rel.split(os.sep, 1)[0]):
                 continue
             dest = workspace / rel
-            skip = (lambda name, ex=exclude: name.startswith(ex)) if exclude else None
+            skip = _is_harness_namespace if exclude else None
         problems.extend(_copy_tree_dereferenced(src, dest, str(src), (),
                                                 skip=skip, budget=budget,
                                                 untrusted=True))
