@@ -2224,6 +2224,24 @@ class TestEvidenceLostBeforeStaging:
             {"arch_score": {"pass_rate": 1.0}})
 
     @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file modes")
+    def test_an_unreadable_harness_namespace_does_not_block_grading(
+            self, tmp_path):
+        """`_modified/.work`, `/hooks` and `/subagents` are the harness's own
+        and are never judge evidence. Probing them for listability before
+        pruning them charged the case for losing something nothing was going
+        to grade — the gate firing on a run that lost nothing."""
+        bad = self._case(tmp_path, "c0")
+        work = bad / "_modified" / ".work" / "inner"
+        work.mkdir(parents=True)
+        (work / "scratch.txt").write_text("harness scratch")
+        (bad / "_modified" / "real.md").write_text("an actual edit")
+        with self._unreadable(work):
+            res = self._run(tmp_path, [bad] + self._rest(tmp_path))
+        agg = res["aggregated"]["arch_score"]
+        assert agg["incomplete_cases"] == 0
+        assert self._gate(res, {"arch_score": {"min_pass_rate": 0.9}}) == []
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file modes")
     def test_a_numeric_judge_arms_the_gate_through_mean(self, tmp_path):
         """`mean` is the half a boolean judge cannot exercise.
 

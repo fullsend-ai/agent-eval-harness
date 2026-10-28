@@ -364,6 +364,15 @@ def load_case_record(case_dir, config, run_id=None, runs_dir=None,
         for f in sorted(modified_dir.rglob("*")):
             if f.is_symlink():
                 continue
+            rel = str(f.relative_to(modified_dir))
+            # Prune the harness's own namespaces BEFORE classifying or
+            # probing. They are not judge evidence, so an unreadable
+            # directory under `.work`/`hooks`/`subagents` must not fail the
+            # case: charging every judge with incomplete evidence over
+            # something nothing was going to grade blocks a run that lost
+            # nothing.
+            if rel.startswith(_SKIP_MODIFIED_PREFIXES):
+                continue
             kind = _entry_kind(f)
             if kind == "dir":
                 _resolve_under(case_dir, f)
@@ -372,9 +381,6 @@ def load_case_record(case_dir, config, run_id=None, runs_dir=None,
             if kind != "file":
                 continue
             _resolve_under(case_dir, f)
-            rel = str(f.relative_to(modified_dir))
-            if rel.startswith(_SKIP_MODIFIED_PREFIXES):
-                continue
             try:
                 content = f.read_text()
                 record["files"][f"_modified/{rel}"] = content

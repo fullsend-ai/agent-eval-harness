@@ -138,9 +138,13 @@ Baseline degradation is only checked for metrics present in both runs; the
 0.5 delta is fixed and not configurable.
 
 Passing a baseline also arms the [incomplete evidence](../runs-directory.md#incomplete-evidence)
-gate for the judges it can compare, since a baseline comparison rests on a
-score the same way `min_mean` does. A judge with only `max_error_rate` set is
-otherwise exempt from that gate; with a comparable baseline it is not.
+gate, since a baseline comparison rests on a score the same way `min_mean` does.
+A judge with only `max_error_rate` set is otherwise exempt from that gate; with a
+comparable baseline it is not.
+
+Both the comparison and that gate only run for judges that **have a `thresholds:`
+entry** — `detect_regressions` iterates the threshold map, so a judge named nowhere
+in it is never examined, baseline or no baseline.
 
 ## Related
 
