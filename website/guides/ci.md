@@ -42,6 +42,18 @@ four keys; a run regresses if the matching aggregate misses its bound.
 | `min_win_rate` | a pairwise judge (needs `--baseline`; checked by `score.py regression`) | `win_rate` | `win_rate >= min_win_rate` |
 | `max_error_rate` | any judge (opt-in) | fraction of cases where the judge errored | `error_rate <= max_error_rate` |
 
+!!! warning "`thresholds.pairwise` now gates; it used to be skipped"
+    Both pairwise keys are enforced by `score.py regression`, which reads the
+    `pairwise` section of `summary.yaml`. Until this landed, neither was: `win_rate`
+    was never written, so `min_win_rate` was silently skipped, and a `pairwise`
+    `max_error_rate` was never reached.
+
+    A pipeline that sets either key and runs `score.py regression` **without** having
+    run `score.py pairwise --baseline <id>` first will now exit 1, reporting the metric
+    as unavailable — 0 comparisons out of 0 is an unmeasured rate, not a clean one.
+    Either add the pairwise step, or drop the `thresholds.pairwise` entry if the gate
+    was never doing anything.
+
 ```yaml title="eval.yaml (excerpt)"
 judges:
   - name: has_content          # boolean judge → pass_rate
