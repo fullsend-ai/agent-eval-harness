@@ -76,6 +76,25 @@ produces `summary.yaml`, so it folds the execution-phase entries in as it goes a
 thresholds, reward, eval-anova — read one place; `unmeasured_cases` counts a case
 once however many entries it has.
 
+**`summary.yaml` is canonical for things that read a summary — the Harbor
+verifier is not one.** It composes the reward **in-container**, where no
+`summary.yaml` exists: `harbor/reward.py::_score_case_counted` keeps only
+`result["per_case"][case]` from `score_cases` and discards the rest, and the
+host writes `summary.yaml` in `harbor/run.py::build_summary` *after* the
+rewards are already written. So `score_cases` is the single canonical
+**producer**, and there are two readers of it:
+
+| path | how `compose_reward` gets the entries |
+| --- | --- |
+| local | `score.py` folds them into `summary.yaml`; consumers read that |
+| Harbor verifier | `score_cases` returns them beside `per_case`; `_score_case_counted` passes them to `compose_reward` explicitly |
+
+Migration steps 4 and 5 are incomplete without that: step 5 cannot drop a
+`harness`-attributed sample in the container if nothing carries the attribution
+there. Returning the entries from `score_cases` is the smaller change — the
+verifier already destructures that return value — and it keeps the host's
+`build_summary` (step 4) as the only thing that has to learn a new field.
+
 **A sibling mapping, NOT a key inside `per_case.<case>`.** That is a pure
 judge-name → record map today, and every consumer iterates its members
 expecting a record: `compose_reward` does `rec.get("value")` on each
@@ -113,8 +132,8 @@ than one thing can go wrong in a case and #276 already had to record two at once
 
 | | reward | score thresholds |
 | --- | --- | --- |
-| `agent` — the graded skill withheld or corrupted its own evidence | `0.0` | **blocks** |
-| `harness` — a positively identified, agent-independent infrastructure fault | **drop the sample** | counted by `max_error_rate` |
+| `agent` — the graded skill withheld or corrupted its own evidence | `0.0` | **blocks**, on top of being counted |
+| `harness` — a positively identified, agent-independent infrastructure fault | **drop the sample** | no extra block (coverage counts it, like every unmeasured case) |
 
 `max_error_rate` has to be widened for that to mean anything. Today its
 numerator is the judge aggregate's `errored_cases`, which increments only when
@@ -124,10 +143,22 @@ where the judges still returned values never reaches it — so a
 the coverage gate, i.e. gated by nothing, even with `max_error_rate: 0`.
 
 The coverage gate therefore counts **cases that produced no valid
-measurement**: the union of `errored_cases` and `harness`-attributed
-`unmeasured` cases, counted once per case, over a denominator that includes
-them. The same accounting is required locally, in Harbor and in EvalHub —
-otherwise this repeats the split #277 already complains about.
+measurement**: the union of `errored_cases` and **every** `unmeasured` case,
+counted once per case, over a denominator that includes them. The same
+accounting is required locally, in Harbor and in EvalHub — otherwise this
+repeats the split #277 already complains about.
+
+**Attribution-independent, deliberately.** An earlier draft counted only
+`harness`-attributed cases here, which left the `agent`-attributed ones in no
+gate at all: excluded from the aggregates, present in the denominator, absent
+from the numerator, and reached by the blocking rule only when a score
+threshold or baseline happens to be configured. Nine valid cases plus one
+agent-induced hook failure, with `max_error_rate: 0` as the only threshold,
+passed. Coverage asks *how many cases failed to produce a measurement*, which
+is a question about the measurement and not about whose fault it was.
+Attribution governs the two things that are about fault — the reward
+disposition, and the **additional** automatic block on score thresholds and
+baselines — and nothing else.
 
 The two consumers are asking different questions, and the same entry answers
 them differently. Reward asks *should this episode train the policy* — a
@@ -162,7 +193,7 @@ the stamping loop disappears and per-judge counts derive by counting.
 | Consumer | Today | With `unmeasured` |
 | --- | --- | --- |
 | judges | `outputs["hook_failures"]`, a marker file, `staging_skips` | `outputs["unmeasured"]` |
-| thresholds | the `incomplete_staging` special case in `detect_regressions` | one rule: an **`agent`-attributed** unmeasured case blocks score thresholds and baselines; a `harness`-attributed one enters the widened `max_error_rate` numerator |
+| thresholds | the `incomplete_staging` special case in `detect_regressions` | **every** unmeasured case enters the widened `max_error_rate` numerator; an **`agent`-attributed** one additionally blocks score thresholds and baselines |
 | `summary.yaml` | `incomplete_cases` stamped by each layer | `unmeasured_cases`, derived by counting |
 | **aggregates** | every non-None judge value joins `mean`/`pass_rate` | an unmeasured case's observations are **excluded** |
 | reward | errored ⇒ `0.0` | `attribution: harness` ⇒ drop the sample; `agent` ⇒ `0.0` |
@@ -220,11 +251,13 @@ What goes is the *derived verdict* each layer publishes next to its detail:
 3. Switch `detect_regressions` to read `unmeasured`; keep `incomplete_staging` as the
    regression metric name so CI output does not churn. Widen the `max_error_rate`
    numerator to "cases that produced no valid measurement" — `errored_cases` union
-   `harness`-attributed `unmeasured`, counted once per case — so the attribution rule
-   has a gate to land in.
+   **every** `unmeasured` case, counted once per case, whatever its attribution — so
+   every lost case lands in a gate and not only the ones with a score threshold.
 4. Carry the field in `harbor/run.py::build_summary` and
    `evalhub/runner.py::_metrics_to_summary`, so the gate stops being local-only.
-5. Teach `compose_reward` to drop a `harness`-attributed sample. `compose_reward`
+5. Teach `compose_reward` to drop a `harness`-attributed sample, and give the Harbor
+   verifier a source for the entries (see "canonical producer" above — it has no
+   `summary.yaml` at reward time). `compose_reward`
    currently returns a `float` that is written to the Harbor reward file and
    formatted `:.4f`, and `skills/eval-anova/scripts/analyze.py` calls
    `float(composite)` on it — so `None` is not available as a sentinel. Proposal:
@@ -268,8 +301,8 @@ passes today — nine scored cases and one provider 500, inside a declared
 `attribution`, not on the mere presence of an entry: a judge error is
 `harness`-attributed, so it drops the reward sample and leaves the score
 thresholds alone. It is not quite "as today", because **step 3** widens the
-`max_error_rate` numerator to count harness-attributed cases whose judges still
-returned values — without that, such a case is exempt from both gates. For a
+`max_error_rate` numerator to count unmeasured cases whose judges still returned
+values — without that, such a case is exempt from every gate. For a
 judge error the two coincide (`errored_cases` already counts it), so the nine-plus-one
 run above is unaffected; a hook failure that previously counted toward nothing now
 counts toward the author's declared error budget. Release-note that, and set it out
