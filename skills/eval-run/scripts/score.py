@@ -1933,8 +1933,11 @@ def _verdict_probe(backend, model, policy, route=""):
     under `auto`: until a start rung is known, one call probes and the others
     wait for it instead of all sending the same request. Yields the start rung
     known once it is this call's turn — `tool` means skip `json_schema`. An
-    explicit policy, or a key already learnt, never waits. A probe that fails
-    for another reason learns nothing; the next waiter probes in its place."""
+    explicit policy, or a key already learnt, never waits. The probe lock is
+    held across the request only by the call probing an unknown key; a waiter
+    that finds the rung learnt releases it before yielding, so the queued calls
+    run concurrently. A probe that fails for another reason learns nothing; the
+    next waiter probes in its place."""
     if policy != "auto":
         yield None
         return
@@ -1945,10 +1948,18 @@ def _verdict_probe(backend, model, policy, route=""):
     if probe is None:
         yield start
         return
-    with probe:
+    probe.acquire()
+    held = True
+    try:
         with _JUDGE_STATE_LOCK:
             start = _VERDICT_START.get(key)
+        if start:
+            probe.release()
+            held = False
         yield start
+    finally:
+        if held:
+            probe.release()
 
 
 def _note_verdict_stepdown(backend, model, exc, *, route=""):
@@ -1959,7 +1970,7 @@ def _note_verdict_stepdown(backend, model, exc, *, route=""):
     `judge_usage` counters)."""
     key = (backend, model, route)
     with _JUDGE_STATE_LOCK:
-        _VERDICT_START.setdefault(key, "tool")
+        _VERDICT_START[key] = "tool"
         first = key not in _VERDICT_STEPDOWNS
         _VERDICT_STEPDOWNS.add(key)
     if first:

@@ -2589,6 +2589,56 @@ class TestVerdictTransportAnthropic:
         assert all("output_config" in call for call in client.calls)
         assert score._verdict_transport_counts() == ({"json_schema": n}, 0)
 
+    def test_calls_queued_behind_a_successful_probe_run_concurrently(self):
+        import threading
+        import time
+        import score
+        n = 6
+        start_barrier = threading.Barrier(n)
+        # The n-1 calls queued behind the probe must all be in flight at once.
+        overlap = threading.Barrier(n - 1)
+        lock = threading.Lock()
+        sent = []
+        reply = _anthropic_text('{"rationale": "r", "passed": true}')
+
+        def create(**kwargs):
+            with lock:
+                sent.append(kwargs)
+                first = len(sent) == 1
+            if first:
+                time.sleep(0.3)  # let the other calls queue behind the probe
+            else:
+                overlap.wait(timeout=5)
+            return reply
+
+        client = SimpleNamespace(messages=SimpleNamespace(create=create))
+        results = []
+        errors = []
+
+        def judge():
+            start_barrier.wait()
+            try:
+                results.append(score._call_structured_judge("p", "claude-opus-5-5", "bool"))
+            except Exception as exc:  # BrokenBarrierError when the calls were serialised
+                errors.append(exc)
+
+        with patch("score._get_anthropic_client", return_value=client):
+            threads = [threading.Thread(target=judge) for _ in range(n)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=15)
+        assert errors == []
+        assert results == [(True, "r")] * n
+
+    def test_a_refusal_overrides_an_already_learnt_json_schema_rung(self, capsys):
+        import score
+        key = ("anthropic", "claude-opus-4-6", "")
+        score._VERDICT_START[key] = "json_schema"
+        score._note_verdict_stepdown("anthropic", "claude-opus-4-6", _output_config_refusal())
+        assert score._VERDICT_START[key] == "tool"
+        assert "rejected structured outputs for claude-opus-4-6" in capsys.readouterr().err
+
     def test_a_probe_that_fails_otherwise_learns_nothing_and_releases(self):
         import score
         client = _anthropic_client(
