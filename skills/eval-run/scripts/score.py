@@ -15,6 +15,7 @@ import agent_eval._bootstrap  # noqa: F401 — auto-activate venv
 
 import argparse
 import ast
+import contextlib
 import copy
 import functools
 import importlib
@@ -1551,53 +1552,62 @@ def _anthropic_verdict_request(client, *, model, tool, system_prompts, user_cont
     second. Returns `(response, transport, tool_choice_mode)`; the mode is
     None on `json_schema`. A refusal of the structured-output *parameter*
     (a 400 naming it, or an SDK without `output_config`) steps down; anything
-    else propagates."""
+    else propagates. Under `auto` a provider refusal is learnt before the tool
+    request goes out, and the first `json_schema` attempt per model is
+    serialised (`_verdict_probe`)."""
     rungs = _verdict_rungs("anthropic", model, policy)
     nominal = _nominal_verdict_rung("anthropic", model, policy)
     last = None
     for index, transport in enumerate(rungs):
         more = index + 1 < len(rungs)
-        try:
-            if transport == "json_schema":
-                response = client.messages.create(
-                    model=model, max_tokens=max_tokens,
-                    system=system_prompts["json_schema"],
-                    messages=[{"role": "user", "content": user_content}],
-                    output_config={"format": {
-                        "type": "json_schema",
-                        "schema": _strict_verdict_schema(tool["input_schema"])}})
-                mode = None
-            else:
-                response, mode = _anthropic_tool_request(
-                    client, model=model, tool=tool, system_prompt=system_prompts["tool"],
-                    user_content=user_content, max_tokens=max_tokens)
-        except TypeError as exc:
-            # An `anthropic` SDK older than 0.77.0 has no `output_config`.
-            if transport != "json_schema" or "output_config" not in str(exc) or not more:
-                raise
-            if "output_config" not in _SDK_WARNINGS:
-                _SDK_WARNINGS.add("output_config")
-                print("  WARNING: the installed anthropic SDK has no output_config "
-                      "(structured outputs need anthropic>=0.77); judges fall back to "
-                      "the forced tool call", file=sys.stderr, flush=True)
-            last = exc
-            continue
-        except Exception as exc:
-            if transport == "json_schema" and _is_structured_output_rejection(exc):
+        probe = (_verdict_probe("anthropic", model, policy) if transport == "json_schema"
+                 else contextlib.nullcontext())
+        with probe as start:
+            if start == "tool":
+                continue
+            try:
+                if transport == "json_schema":
+                    response = client.messages.create(
+                        model=model, max_tokens=max_tokens,
+                        system=system_prompts["json_schema"],
+                        messages=[{"role": "user", "content": user_content}],
+                        output_config={"format": {
+                            "type": "json_schema",
+                            "schema": _strict_verdict_schema(tool["input_schema"])}})
+                    mode = None
+                else:
+                    response, mode = _anthropic_tool_request(
+                        client, model=model, tool=tool, system_prompt=system_prompts["tool"],
+                        user_content=user_content, max_tokens=max_tokens)
+            except TypeError as exc:
+                # An `anthropic` SDK older than 0.77.0 has no `output_config`.
+                if transport != "json_schema" or "output_config" not in str(exc) or not more:
+                    raise
+                if "output_config" not in _SDK_WARNINGS:
+                    _SDK_WARNINGS.add("output_config")
+                    print("  WARNING: the installed anthropic SDK has no output_config "
+                          "(structured outputs need anthropic>=0.77); judges fall back to "
+                          "the forced tool call", file=sys.stderr, flush=True)
                 last = exc
-                if more:
-                    continue
-                raise JudgeProviderError(
-                    f"{model} rejected structured outputs and the verdict policy pins "
-                    f"json_schema: {exc}", error_type="verdict_unsupported",
-                    error_class="config", retryable=False,
-                    verdict_transport="json_schema") from exc
-            raise
-        _record_verdict_transport("anthropic", model, transport,
-                                  fell_back=(transport != nominal), learn=(policy == "auto"))
-        if mode is not None:
-            _record_tool_choice_mode(mode)
-        return response, transport, mode
+                continue
+            except Exception as exc:
+                if transport == "json_schema" and _is_structured_output_rejection(exc):
+                    last = exc
+                    if more:
+                        _note_verdict_stepdown("anthropic", model, exc)
+                        continue
+                    raise JudgeProviderError(
+                        f"{model} rejected structured outputs and the verdict policy pins "
+                        f"json_schema: {exc}", error_type="verdict_unsupported",
+                        error_class="config", retryable=False,
+                        verdict_transport="json_schema") from exc
+                raise
+            _record_verdict_transport("anthropic", model, transport,
+                                      fell_back=(transport != nominal),
+                                      learn=(policy == "auto"))
+            if mode is not None:
+                _record_tool_choice_mode(mode)
+            return response, transport, mode
     raise JudgeProviderError(
         f"no verdict transport served {model}: {last}", error_type="verdict_unsupported",
         error_class="config", retryable=False)
@@ -1830,12 +1840,17 @@ def _reset_tool_choice_fallbacks():
 # structured output: Anthropic `output_config.format`, OpenAI-shaped
 # `response_format`) or `tool` (the forced tool call, with the Decision 25
 # ladder). The policy (`models.judge_verdict`, per-judge `verdict`) picks the
-# rungs; the first transport that returns a verdict for a (backend, model, routing)
-# becomes the start rung for the rest of the run, so a fallback is paid once.
+# rungs; under `auto` the transport that serves a (backend, model, routing) first
+# becomes the start rung for the rest of the run, so a fallback is paid once. A
+# `json_schema` refusal is learnt the moment it arrives, and the first
+# `json_schema` attempt per key is serialised (`_verdict_probe`), so concurrent
+# judge calls do not each pay the refused request while the first is in flight.
 
 _VERDICT_TRANSPORTS = ("json_schema", "tool")
 _VERDICT_START = {}
 _VERDICT_COUNTS = {"json_schema": 0, "tool": 0, "fallbacks": 0}
+_VERDICT_PROBES = {}
+_VERDICT_STEPDOWNS = set()
 
 
 def _verdict_policy(jc, config):
@@ -1912,6 +1927,49 @@ def _record_verdict_transport(backend, model, transport, *, fell_back, learn=Tru
             _VERDICT_START.setdefault((backend, model, route), transport)
 
 
+@contextlib.contextmanager
+def _verdict_probe(backend, model, policy, route=""):
+    """Serialise the first `json_schema` attempt for (backend, model, route)
+    under `auto`: until a start rung is known, one call probes and the others
+    wait for it instead of all sending the same request. Yields the start rung
+    known once it is this call's turn — `tool` means skip `json_schema`. An
+    explicit policy, or a key already learnt, never waits. A probe that fails
+    for another reason learns nothing; the next waiter probes in its place."""
+    if policy != "auto":
+        yield None
+        return
+    key = (backend, model, route)
+    with _JUDGE_STATE_LOCK:
+        start = _VERDICT_START.get(key)
+        probe = None if start else _VERDICT_PROBES.setdefault(key, threading.Lock())
+    if probe is None:
+        yield start
+        return
+    with probe:
+        with _JUDGE_STATE_LOCK:
+            start = _VERDICT_START.get(key)
+        yield start
+
+
+def _note_verdict_stepdown(backend, model, exc, *, route=""):
+    """`json_schema` was refused for (backend, model, route) under `auto`:
+    learn `tool` as the start rung now — before the tool request is sent — so
+    calls that have not started yet skip the refused rung, and say so on
+    stderr once per key (the step-down is otherwise visible only in the
+    `judge_usage` counters)."""
+    key = (backend, model, route)
+    with _JUDGE_STATE_LOCK:
+        _VERDICT_START.setdefault(key, "tool")
+        first = key not in _VERDICT_STEPDOWNS
+        _VERDICT_STEPDOWNS.add(key)
+    if first:
+        where = f" (routing {route})" if route else ""
+        reason = " ".join(_http_error_text(exc).split())[:300]
+        print(f"  WARNING: {backend} rejected structured outputs for {model}{where}; "
+              f"judges fall back to the forced tool call for the rest of the run: "
+              f"{reason}", file=sys.stderr, flush=True)
+
+
 def _verdict_transport_counts():
     """`(transports, fallbacks)` for `summary.yaml` `judge_usage`."""
     with _JUDGE_STATE_LOCK:
@@ -1922,6 +1980,8 @@ def _verdict_transport_counts():
 def _reset_verdict_state():
     with _JUDGE_STATE_LOCK:
         _VERDICT_START.clear()
+        _VERDICT_PROBES.clear()
+        _VERDICT_STEPDOWNS.clear()
         for key in _VERDICT_COUNTS:
             _VERDICT_COUNTS[key] = 0
 
@@ -2497,23 +2557,28 @@ def _openai_judge_request(client, cfg, *, model, messages, tool, max_tokens,
         body = _json_schema_extra_body(extra_body, backend)
         if body:
             json_kwargs["extra_body"] = body
-        try:
-            response = _with_judge_retries(lambda: _send(**json_kwargs), cfg)
-        except Exception as exc:
-            if not (_is_structured_output_rejection(exc) or _is_routing_404(exc)):
-                raise
-            if "tool" not in rungs:
-                raise JudgeProviderError(
-                    f"{provider_name} rejected structured outputs for '{model}' and the "
-                    f"verdict policy pins json_schema: {exc}",
-                    error_type="verdict_unsupported", error_class="config",
-                    retryable=False, verdict_transport="json_schema") from exc
-        else:
-            _record_verdict_transport(backend, model, "json_schema",
-                                      fell_back=("json_schema" != nominal),
-                                      learn=(policy == "auto"), route=route)
-            _record_judge_usage(_usage_from_openai_response(response, model))
-            return response, "json_schema", None
+        # Under `auto` the first attempt per key is serialised, and a refusal
+        # is learnt before the tool request goes out (spec 015 sticky rung).
+        with _verdict_probe(backend, model, policy, route) as start:
+            if start != "tool":
+                try:
+                    response = _with_judge_retries(lambda: _send(**json_kwargs), cfg)
+                except Exception as exc:
+                    if not (_is_structured_output_rejection(exc) or _is_routing_404(exc)):
+                        raise
+                    if "tool" not in rungs:
+                        raise JudgeProviderError(
+                            f"{provider_name} rejected structured outputs for '{model}' and "
+                            f"the verdict policy pins json_schema: {exc}",
+                            error_type="verdict_unsupported", error_class="config",
+                            retryable=False, verdict_transport="json_schema") from exc
+                    _note_verdict_stepdown(backend, model, exc, route=route)
+                else:
+                    _record_verdict_transport(backend, model, "json_schema",
+                                              fell_back=("json_schema" != nominal),
+                                              learn=(policy == "auto"), route=route)
+                    _record_judge_usage(_usage_from_openai_response(response, model))
+                    return response, "json_schema", None
 
     kwargs = dict(model=model, messages=messages, tools=[tool], **token_kwargs)
     if extra_body:
