@@ -1,3 +1,10 @@
+## [1.61.3](https://github.com/fullsend-ai/agent-eval-harness/compare/v1.61.2...v1.61.3) (2026-10-29)
+
+
+### Bug Fixes
+
+* **runner:** follow a child harness's base: chain for the image pin ([#284](https://github.com/fullsend-ai/agent-eval-harness/issues/284)) ([61ba194](https://github.com/fullsend-ai/agent-eval-harness/commit/61ba1948720a5f53a1afeea2da160f7ca7b48674)), closes [#283](https://github.com/fullsend-ai/agent-eval-harness/issues/283)
+
 ## [1.61.2](https://github.com/fullsend-ai/agent-eval-harness/compare/v1.61.1...v1.61.2) (2026-10-28)
 
 
