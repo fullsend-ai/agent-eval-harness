@@ -2202,6 +2202,49 @@ class TestInterruptCleanup:
         if _killpg_permitted():
             assert not _alive(child)
 
+    def test_interrupt_with_a_pipe_held_outside_the_group(
+            self, tmp_path, monkeypatch, capsys):
+        # Ctrl-C while a descendant outside the group holds the pipes: the
+        # cleanup is bounded (the grace, then the pipe drain) and the readers
+        # are detached — a line the holder writes later is neither forwarded
+        # nor kept — and they close the pipes at EOF.
+        monkeypatch.setattr(fullsend_mod, "_PIPE_DRAIN_S", 1.0)
+        captures = _record_captures(monkeypatch)
+        script, flag = _pipe_holding_fullsend(tmp_path)
+        recording = fullsend_mod._ConsoleCapture
+        real_join = recording.join
+        interrupted = []
+
+        def interrupting_join(self, timeout_s):
+            if not interrupted:
+                interrupted.append(True)
+                deadline = time.monotonic() + 10
+                while "holder " not in self.stdout and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                raise KeyboardInterrupt
+            return real_join(self, timeout_s)
+
+        monkeypatch.setattr(recording, "join", interrupting_join)
+        runner = _runner(tmp_path, term_grace_s=1, log_prefix="eval")
+        start = time.monotonic()
+        with pytest.raises(KeyboardInterrupt):
+            runner._run([str(script)], _workspace(tmp_path), dict(os.environ), 60)
+        elapsed = time.monotonic() - start
+        ((proc, console),) = captures
+        holder = _holder_pid(console.stdout)
+        try:
+            assert elapsed < 10
+            assert proc.poll() is not None  # the leader was stopped and reaped
+            assert "  ✓ Sandbox created (1.0s)" in _streamed(capsys)
+            assert not proc.stdout.closed  # the holder has it: its reader is up
+            flag.write_text("")
+            assert console.join(10)  # the holder wrote its line and exited: EOF
+            assert proc.stdout.closed and proc.stderr.closed
+            assert "Late line" not in capsys.readouterr().out
+            assert "Late line" not in console.stdout
+        finally:
+            _kill_quietly(holder)
+
 
 class TestSettingsFailClosed:
     def test_malformed_settings_with_env_secret_refuses_the_run(
@@ -2505,6 +2548,122 @@ class TestConsoleFilter:
         exact = "  ⚙ Bash: " + "y" * (fullsend_mod._MAX_STREAM_LINE_CHARS - 10)
         assert self._select(exact + "\n") == [exact]
 
+    def test_unterminated_quoted_credential_redacted_to_the_end(self):
+        # A quoted value with no closing quote on the line (fullsend cut the
+        # command) is redacted to the end of the line: no fragment of it, and
+        # nothing after it, gets through on the strength of a blank.
+        text = ('  ⚙ Bash: PASSWORD="first second third\n'
+                "  ⚙ Bash: export API_SECRET='first second --flag\n"
+                'Error: token="abc def rejected\n')
+        assert self._select(text) == [
+            "  ⚙ Bash: PASSWORD=***", "  ⚙ Bash: export API_SECRET=***",
+            "Error: token=***"]
+
+    def test_escaped_quotes_inside_a_quoted_credential(self):
+        # An escaped delimiter does not end the value; one that is never
+        # closed still runs to the end of the line.
+        text = ('  ⚙ Bash: TOKEN="a\\"b c" python3 x.py\n'
+                "  ⚙ Bash: PASSWORD='it\\'s' --user me\n"
+                '  ⚙ Bash: PASSWORD="a\\"b --user me\n')
+        assert self._select(text) == [
+            "  ⚙ Bash: TOKEN=*** python3 x.py",
+            "  ⚙ Bash: PASSWORD=*** --user me",
+            "  ⚙ Bash: PASSWORD=***"]
+
+    def test_command_cut_inside_a_quoted_credential(self):
+        # The 120-rune cut as fullsend applies it to a displayed command,
+        # landing inside a quoted value with blanks in it: everything from
+        # the opening quote on is the value.
+        head = ('python3 scripts/submit.py --dry-run '
+                '--jira-url https://jira.example.test --password="')
+        command = head + " ".join(f"word{i}" for i in range(1, 30)) + '"'
+        cut = command[:120]
+        assert '"' not in cut[len(head):] and " " in cut[len(head):]
+        assert self._select("  ⚙ Bash: " + cut + "\n") == [
+            "  ⚙ Bash: python3 scripts/submit.py --dry-run "
+            "--jira-url https://jira.example.test --password=***"]
+
+    def test_non_secret_assignments_untouched(self):
+        text = ("  ⚙ Bash: STAGE=auto-fix rfe_id=RFE-001 MODE=\"dry run\" "
+                "LABEL='a b' --output=out.md python3 x.py\n"
+                '  ⚙ Bash: MODE="dry run --flag\n')
+        assert self._select(text) == [
+            "  ⚙ Bash: STAGE=auto-fix rfe_id=RFE-001 MODE=\"dry run\" "
+            "LABEL='a b' --output=out.md python3 x.py",
+            '  ⚙ Bash: MODE="dry run --flag']
+
+    def test_control_sequences_stripped(self):
+        # Beyond CSI: OSC strings ended by BEL or ST, DCS/SOS/PM/APC strings,
+        # the single-character and nF escapes, the 8-bit C1 forms, and the
+        # other C0/C1 control characters — the tab stays. A string with no
+        # terminator runs to the end of the line.
+        text = ("\x1b]0;window title\x07  ✓ OSC with BEL\n"
+                "\x1b]8;;https://x.test\x1b\\  ✓ OSC with ST\x1b]8;;\x1b\\\n"
+                "\x1bPq#0;2;0;0;0\x1b\\  ✓ DCS\x9b1m and 8-bit CSI\x9b0m\n"
+                "\x1bXsos\x9c\x1b^pm\x1b\\\x1b_apc\x1b\\  ✓ Strings\n"
+                "\x1b(B\x1b7  ✓ Single-char ESC\x1b8\x1bM\n"
+                "  ✓ C0\x00\x07\x08\x7f and C1\x81\x8d controls,\ttab kept\n"
+                "  ✓ Unterminated \x1b]title runs to the end\n"
+                "  ⚙ Bash: \x1b_unterminated apc hides the command\n")
+        assert self._select(text) == [
+            "  ✓ OSC with BEL", "  ✓ OSC with ST", "  ✓ DCS and 8-bit CSI",
+            "  ✓ Strings", "  ✓ Single-char ESC",
+            "  ✓ C0 and C1 controls,\ttab kept", "  ✓ Unterminated",
+            "  ⚙ Bash:"]
+
+
+def _record_captures(monkeypatch):
+    """Record every ``(proc, console)`` the runner builds."""
+    captures = []
+
+    class Recording(fullsend_mod._ConsoleCapture):
+        def __init__(self, proc, log_prefix=None):
+            captures.append((proc, self))
+            super().__init__(proc, log_prefix)
+
+    monkeypatch.setattr(fullsend_mod, "_ConsoleCapture", Recording)
+    return captures
+
+
+def _pipe_holding_fullsend(tmp_path):
+    """A fullsend stand-in whose descendant, in a session of its own, inherits
+    both pipes and outlives the group kill. The leader prints a forwardable
+    step line and ``holder <pid>``, then sleeps; the holder writes a
+    forwardable line once the flag file exists (the test creates it after the
+    run is over) and exits, which is the pipes' EOF. Returns ``(script,
+    flag)``; the script ignores its arguments, so it serves as ``binary``."""
+    flag = tmp_path / "late.flag"
+    holder = tmp_path / "holder.py"
+    holder.write_text(textwrap.dedent(f"""\
+        import os, time
+        deadline = time.monotonic() + 60
+        while not os.path.exists({str(flag)!r}) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        print("  ✓ Late line from the holder", flush=True)
+        """))
+    script = tmp_path / "holding-fullsend"
+    script.write_text(f"#!{sys.executable}\n" + textwrap.dedent(f"""\
+        import subprocess, sys, time
+        held = subprocess.Popen([sys.executable, {str(holder)!r}],
+                                start_new_session=True)
+        print("  ✓ Sandbox created (1.0s)")
+        print("holder", held.pid, flush=True)
+        time.sleep(60)
+        """))
+    script.chmod(0o755)
+    return script, flag
+
+
+def _holder_pid(console_text):
+    return int(console_text.split("holder ", 1)[1].split()[0])
+
+
+def _kill_quietly(pid):
+    try:
+        os.kill(pid, 9)
+    except OSError:
+        pass
+
 
 class TestFullsendConsoleStreaming:
     def _console_files(self, tmp_path, monkeypatch, out=STREAMED_CONSOLE,
@@ -2711,3 +2870,59 @@ class TestFullsendConsoleStreaming:
         assert result.exit_code == (0 if ending == "exit" else -1)
         (proc,) = procs
         assert proc.stdout.closed and proc.stderr.closed
+
+    def test_control_sequences_stripped_on_both_pipes(
+            self, tmp_path, fake_fullsend, monkeypatch, capsys):
+        # Terminal control in the console (a title, a hyperlink, a DCS string,
+        # colours, stray C0/C1 characters) is dropped from the forwarded lines
+        # of either pipe; the capture keeps the console as it was written.
+        out = ("\x1b]0;fullsend\x07  ✓ Sandbox created (1.0s)\x1b[0m\n"
+               "  ⚙ Bash: \x1bPq#0\x1b\\ls\x08\x08\x00 -la\x9b31m\x85\n")
+        err = ("\x1b]8;;https://example.test/run\x1b\\  ✗ Sandbox teardown failed"
+               "\x1b]8;;\x1b\\\n"
+               "\x1b_apc\x1b\\Error: \x07bell\tkept\n")
+        self._console_files(tmp_path, monkeypatch, out=out, err=err)
+        ws = _workspace(tmp_path)
+        result = _runner(tmp_path, log_prefix="eval").execute(
+            target="s", args="", workspace=ws, model="m", timeout_s=60)
+        assert result.exit_code == 0
+        printed = capsys.readouterr().out
+        assert not any(ch in printed for ch in "\x1b\x07\x08\x00\x9b\x85")
+        lead = "  eval | "
+        streamed = [line[len(lead):] for line in printed.splitlines()
+                    if line.startswith(lead)]
+        for line in ("  ✓ Sandbox created (1.0s)", "  ⚙ Bash: ls -la",
+                     "  ✗ Sandbox teardown failed", "Error: bell\tkept"):
+            assert streamed.count(line) == 1, line
+        assert out in result.stderr and err in result.stderr
+
+    def test_late_write_after_the_bounded_drain_not_forwarded(
+            self, tmp_path, monkeypatch, capsys):
+        # The descendant outside the group writes under this case's prefix
+        # only after the run returned with the drain incomplete: its line is
+        # neither forwarded (it would land after the FAIL line, or among a
+        # later case's lines) nor kept, and its pipe is closed at EOF.
+        monkeypatch.setattr(fullsend_mod, "_PIPE_DRAIN_S", 1.0)
+        captures = _record_captures(monkeypatch)
+        script, flag = _pipe_holding_fullsend(tmp_path)
+        ws = _workspace(tmp_path)
+        result = _runner(tmp_path, binary=str(script), term_grace_s=1,
+                         log_prefix="eval").execute(
+            target="s", args="", workspace=ws, model="m", timeout_s=1)
+        holder = _holder_pid(result.stderr)
+        try:
+            assert result.exit_code == -1
+            assert result.stderr.endswith("Console pipes still open after the group kill")
+            assert result.duration_s < 10
+            streamed = _streamed(capsys)
+            assert "  ✓ Sandbox created (1.0s)" in streamed
+            assert streamed[-1].startswith("FAIL (exit -1)")
+            ((proc, console),) = captures
+            assert not proc.stdout.closed  # the holder has it: its reader is up
+            flag.write_text("")
+            assert console.join(10)  # the holder wrote its line and exited: EOF
+            assert proc.stdout.closed and proc.stderr.closed
+            assert "Late line" not in capsys.readouterr().out
+            assert "Late line" not in console.stdout
+        finally:
+            _kill_quietly(holder)

@@ -414,21 +414,31 @@ after `Harness loaded`, the `→ Results` block), the agent activity lines (`�
 `Ignoring N permissions.allow entries …` line (the one behind permission denials in a
 sandbox that has not trusted the workspace), each cut at 200 characters. A forwarded
 line has `KEY=value` assignments whose key names a credential (`…token=`, `…secret=`,
-`…password=`, `…api_key=`) shown as `KEY=***`, as a `⚙ Bash:` line may carry one.
-The per-finding `! Sanitized […]` lines, the assistant's thinking (`🧠`, which the
-`claude-code` runner does not stream either) and multi-line text, and the pre/post-script
-output are not forwarded. A two-case run forwards about 360 lines (30 KB), so a long
-batch stays well inside a CI job log's output limit. The full console (stdout, then
-stderr) is still the case's `stderr.log`, unfiltered and unredacted, and the sandbox
-image is still read from it. There is no knob: streaming follows the harness's progress
-logging, as it does for the `claude-code` runner.
+`…password=`, `…api_key=`) shown as `KEY=***`, as a `⚙ Bash:` line may carry one: a
+quoted value is redacted through its closing quote (an escaped `\"` or `\'` inside does
+not end it) and, when fullsend's 120-character cut of the command left it without one,
+through the end of the line; a bare value is redacted up to the next blank. Terminal
+control sequences in a forwarded line (colours and cursor movement, OSC titles and
+hyperlinks, DCS/SOS/PM/APC strings, single-character escapes) and other control
+characters except the tab are stripped before it is printed, so a console line cannot
+drive the terminal showing the log. The per-finding `! Sanitized […]` lines, the
+assistant's thinking (`🧠`, which the `claude-code` runner does not stream either) and
+multi-line text, and the pre/post-script output are not forwarded. A two-case run
+forwards about 360 lines (30 KB), so a long batch stays well inside a CI job log's
+output limit. The full console (stdout, then stderr) is still the case's `stderr.log`,
+unfiltered, unredacted and with its control sequences, and the sandbox image is still
+read from it. There is no knob: streaming follows the harness's progress logging, as it
+does for the `claude-code` runner.
 
 fullsend writes some `💬` lines without a trailing newline, so they reach the log only
 when its next write ends the line — usually the `⏳` heartbeat, up to 30 seconds later,
 glued onto the same line (`💬 … ⏳ Agent running (…)`). That delay is not a stall. A
 timed-out run whose console pipes are still held open five seconds after the group kill
 (a descendant outside fullsend's process group) ends its `stderr.log` with
-`Console pipes still open after the group kill`: the console may be cut short.
+`Console pipes still open after the group kill`: the console may be cut short, and
+nothing that descendant writes later is forwarded or kept — the case's `FAIL` line is
+its last, and a later case's lines are its own. An interrupted run (Ctrl-C) stops the
+group and gives its pipes the same five-second drain before the interrupt propagates.
 
 #### Run provenance
 

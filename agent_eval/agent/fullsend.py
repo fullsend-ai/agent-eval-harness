@@ -29,11 +29,17 @@ step lines (``→``, ``•``, ``✓``, ``✗``, ``!``) with the indented detail 
 attached to them (the plan block, the ``→ Results`` block), the agent activity
 lines (``💬`` text, ``⚙`` tool call, ``⏳`` heartbeat), plain
 ``Error``/``Warning``/``fatal`` lines and Claude Code's ``Ignoring N
-permissions.allow entries`` line, each cut at :data:`_MAX_STREAM_LINE_CHARS`
-with ``…token=``/``…secret=``/``…password=``/``…api_key=`` assignments
-redacted. The per-finding ``! Sanitized […]`` lines, the assistant's thinking
-(``🧠``) and multi-line text and the pre/post-script output are not forwarded;
-the captured console keeps all of it, unredacted. See :class:`_ConsoleFilter`.
+permissions.allow entries`` line, each with its terminal control sequences
+stripped, its ``…token=``/``…secret=``/``…password=``/``…api_key=``
+assignments redacted (a quoted value cut short by fullsend is redacted to the
+end of the line) and cut at :data:`_MAX_STREAM_LINE_CHARS`. The per-finding
+``! Sanitized […]`` lines, the assistant's thinking (``🧠``) and multi-line
+text and the pre/post-script output are not forwarded; the captured console
+keeps all of it, unstripped and unredacted. Forwarding ends with the case: a
+pipe a descendant outside fullsend's process group still holds after the
+bounded drain that follows a timeout or an interrupt is emptied on, but
+nothing more of it is kept or printed. See :class:`_ConsoleFilter` and
+:class:`_ConsoleCapture`.
 
 :meth:`FullsendRunner.provenance` records what executed a run (fullsend and
 OpenShell versions, sandbox image, agent harness commit) for the run-level
@@ -123,10 +129,26 @@ _ALERT_LINE_RE = re.compile(
     r"^\s*(?:(?:error|warning|fatal)\b|ignoring \d+ permissions)", re.IGNORECASE)
 # A ``KEY=value`` whose key names a credential, as a ``⚙ Bash:`` line may carry
 # one: the value is replaced before the line is forwarded (fullsend caps the
-# command at 120 runes but does not redact it). The capture is left as is.
+# command at 120 runes but does not redact it). A quoted value runs to its
+# closing quote, over escaped quotes (``\"``, ``\'``), and — when that cut left
+# it without one — to the end of the line, so no fragment of it gets through;
+# a bare value is the run of non-blank characters. The capture is left as is.
 _SECRET_ASSIGNMENT_RE = re.compile(
     r"(?i)\b(\w*(?:token|secret|passw(?:or)?d|api[_-]?key)\w*=)"
-    r"(?:\"[^\"]*\"|'[^']*'|\S+)")
+    r"(?:\"(?:[^\"\\]|\\.)*(?:\"|$)|'(?:[^'\\]|\\.)*(?:'|$)|\S+)")
+# Terminal control in a forwarded line, dropped before it is printed (the
+# capture keeps it): CSI sequences (colour, cursor movement), OSC strings
+# (title, hyperlink, clipboard — ended by BEL or ST), DCS/SOS/PM/APC strings
+# (ended by ST), the nF and single-character escape sequences, then every
+# other C0/C1 control character but the tab. The 8-bit C1 introducers and ST
+# are taken as their 7-bit ``ESC`` forms are. A string with no terminator on
+# the line runs to its end, as a terminal would take it.
+_CONTROL_RE = re.compile(
+    r"(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]"                        # CSI
+    r"|(?:\x1b\]|\x9d).*?(?:\x07|\x1b\\|\x9c|$)"               # OSC
+    r"|(?:\x1b[PX^_]|[\x90\x98\x9e\x9f]).*?(?:\x1b\\|\x9c|$)"  # DCS SOS PM APC
+    r"|\x1b[ -/]*[0-~]"                                        # nF, Fp, Fe, Fs
+    r"|[\x00-\x08\x0a-\x1f\x7f-\x9f]")                         # other C0/C1
 _DETAIL_INDENT = " " * 4
 
 
@@ -467,8 +489,13 @@ class FullsendRunner(EvalRunner):
             if not console.join(_PIPE_DRAIN_S):
                 # A descendant outside the group still holds a pipe (what
                 # communicate(timeout) reported as the termination hanging):
-                # the console may be cut short and its reader is still up.
+                # the console may be cut short.
                 hung = hung or "Console pipes still open after the group kill"
+            # The case is over: a reader still up keeps its pipe from filling
+            # but forwards and keeps nothing more, so a late write of that
+            # descendant cannot land after this case's FAIL line or under a
+            # later case's prefix.
+            console.detach()
             # Exit code -1 with a "Timed out" stderr; the caller still maps
             # whatever the run directory holds (usage, stream, artifacts).
             timeout_err = "\n".join(
@@ -477,8 +504,15 @@ class FullsendRunner(EvalRunner):
             return -1, "", timeout_err, time.monotonic() - start
         except BaseException:
             # fullsend runs in its own session, so the terminal's SIGINT never
-            # reaches it: stop the group (and its sandbox) before re-raising.
-            terminate_process_group(proc, self._term_grace_s, capture_output=False)
+            # reaches it: stop the group (and its sandbox) before re-raising,
+            # with the same bounded drain and detach as a timeout, so a reader
+            # blocked on a pipe a descendant outside the group holds does not
+            # go on forwarding under this prefix.
+            try:
+                terminate_process_group(proc, self._term_grace_s, capture_output=False)
+                console.join(_PIPE_DRAIN_S)
+            finally:
+                console.detach()
             raise
         return proc.returncode, console.stdout, console.stderr, time.monotonic() - start
 
@@ -583,11 +617,16 @@ class _ConsoleCapture:
     ``  <prefix> | `` as they arrive. Reading both pipes at once is what keeps
     fullsend from blocking on a full one; the threads are daemons so a
     descendant that inherited a pipe and outlives fullsend cannot hang the
-    harness (:meth:`join` is bounded, and what was read by then is kept)."""
+    harness (:meth:`join` is bounded, and what was read by then is kept).
+    Once the run is over, :meth:`detach` ends the forwarding and the keeping;
+    a reader still blocked on such a pipe goes on emptying it (a blocked read
+    cannot be interrupted) and closes it at EOF."""
 
     def __init__(self, proc: subprocess.Popen, log_prefix: Optional[str] = None):
         self._lines: dict = {"stdout": [], "stderr": []}
         self._threads: list = []
+        # Written under _print_lock by detach(), read under it before a print.
+        self._detached = False
         for name, stream in (("stdout", proc.stdout), ("stderr", proc.stderr)):
             if stream is None:
                 continue
@@ -602,6 +641,8 @@ class _ConsoleCapture:
         select = _ConsoleFilter() if log_prefix else None
         try:
             for line in stream:
+                if self._detached:
+                    continue  # the run has returned: drain, keep nothing
                 lines.append(line)
                 if select is None:
                     continue
@@ -610,6 +651,12 @@ class _ConsoleCapture:
                     continue
                 try:
                     with _print_lock:
+                        # Read under the lock detach() writes under: once
+                        # detach() has returned, no forwarded line follows
+                        # the status line the caller prints under this lock.
+                        if self._detached:
+                            select = None
+                            continue
                         print(f"  {log_prefix} | {shown}", flush=True)
                 except (OSError, ValueError):
                     # The harness's stdout is gone (closed pipe) or cannot
@@ -633,6 +680,19 @@ class _ConsoleCapture:
             thread.join(max(0.0, deadline - time.monotonic()))
         return not any(thread.is_alive() for thread in self._threads)
 
+    def detach(self) -> None:
+        """End the forwarding and the keeping of lines: the run is over.
+
+        Taken under the print lock, so a forwarded line in flight has landed
+        before this returns and none lands after it — the caller's status
+        line, printed under the same lock, is the case's last. A reader still
+        blocked on a pipe (a descendant outside the killed group holds it)
+        goes on emptying the pipe, keeping nothing, and closes it at EOF;
+        what was read before is what :attr:`stdout`/:attr:`stderr` return.
+        Idempotent, and a no-op once both pipes reached EOF."""
+        with _print_lock:
+            self._detached = True
+
     @property
     def stdout(self) -> str:
         return "".join(self._lines["stdout"])
@@ -653,8 +713,9 @@ class _ConsoleFilter:
     lines starting with Error/Warning/fatal and Claude Code's ``Ignoring N
     permissions.allow entries`` line. Dropped: everything else — the
     assistant's thinking (``🧠``) and the multi-line text after a ``💬``/``🧠``
-    line, the pre/post-script output, the sandbox's own chatter. A forwarded
-    line has credential assignments redacted and is clipped (see
+    line, the pre/post-script output, the sandbox's own chatter. A line is
+    matched, and forwarded, with its terminal control stripped
+    (:data:`_CONTROL_RE`), credential assignments redacted and clipped (see
     :func:`_present`). One instance per pipe: the only state is whether a
     detail block is open."""
 
@@ -662,7 +723,7 @@ class _ConsoleFilter:
         self._in_block = False
 
     def select(self, line: str) -> Optional[str]:
-        text = _ANSI_RE.sub("", line).rstrip()
+        text = _CONTROL_RE.sub("", line).rstrip()
         if not text.strip():
             self._in_block = False
             return None
@@ -684,8 +745,9 @@ class _ConsoleFilter:
 
 
 def _present(text: str) -> str:
-    """A console line as forwarded: credential values redacted, then cut at
-    :data:`_MAX_STREAM_LINE_CHARS`."""
+    """A console line as forwarded: credential values redacted (a quoted one
+    left open by fullsend's 120-rune cut to the end of the line, see
+    :data:`_SECRET_ASSIGNMENT_RE`), then cut at :data:`_MAX_STREAM_LINE_CHARS`."""
     text = _SECRET_ASSIGNMENT_RE.sub(r"\1***", text)
     if len(text) <= _MAX_STREAM_LINE_CHARS:
         return text
