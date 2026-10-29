@@ -1745,6 +1745,97 @@ class TestProvenance:
         (fs_dir / "harness" / "rfe-creator-eval.yaml").symlink_to(fs_dir / "shared.yaml")
         assert fullsend_mod.harness_file_image(fs_dir, "rfe-creator-eval") == "shared:1"
 
+    def test_child_harness_image_from_local_base(
+            self, tmp_path, fake_fullsend, monkeypatch):
+        """A child harness that leaves image: to its base: (resolved relative
+        to the child file) records the base's pin as the harness-file image."""
+        monkeypatch.setenv("FAKE_FULLSEND_NO_IMAGE", "1")
+        runner = _runner(tmp_path)
+        fs_dir = Path(runner._fullsend_dir)
+        (fs_dir / "sub").mkdir()
+        (fs_dir / "sub" / "rfe-creator.yaml").write_text(
+            "agent: agents/rfe.md\nimage: ghcr.io/x/sandbox@sha256:" + "d" * 64 + "\n")
+        (fs_dir / "sub" / "rfe-creator-eval.yaml").write_text(
+            "base: rfe-creator.yaml\nagent: agents/rfe-eval.md\n")
+        (fs_dir / "config.yaml").write_text(yaml.dump({"agents": [
+            {"source": "sub/rfe-creator-eval.yaml"}]}))
+        result = runner.execute("rfe.speedrun", "", _workspace(tmp_path), "opus")
+        assert "Image:" not in result.stderr
+        prov = runner.provenance([result.stderr])
+        assert prov["sandbox_image"] == "ghcr.io/x/sandbox@sha256:" + "d" * 64
+        assert prov["sandbox_image_source"] == "harness-file"
+
+    @pytest.mark.parametrize("child_image, expected", [
+        ("image: child:1\n", "child:1"),
+        ("image: ''\n", "base:1"),
+        ("image: '  '\n", "base:1"),
+        ("", "base:1"),
+    ], ids=["child-wins", "empty-falls-through", "blank-falls-through", "unset"])
+    def test_base_chain_child_image_overrides_only_when_non_empty(
+            self, tmp_path, child_image, expected):
+        fs_dir = Path(_runner(tmp_path)._fullsend_dir)
+        (fs_dir / "harness").mkdir()
+        (fs_dir / "harness" / "base.yaml").write_text("image: base:1\n")
+        (fs_dir / "harness" / "rfe-creator-eval.yaml").write_text(
+            "base: base.yaml\n" + child_image)
+        assert fullsend_mod.harness_file_image(fs_dir, "rfe-creator-eval") == expected
+
+    def test_base_chain_three_levels_reaches_root_image(self, tmp_path):
+        fs_dir = Path(_runner(tmp_path)._fullsend_dir)
+        (fs_dir / "harness").mkdir()
+        (fs_dir / "common").mkdir()
+        (fs_dir / "common" / "root.yaml").write_text("image: root:1\n")
+        (fs_dir / "harness" / "middle.yaml").write_text(
+            "base: ../common/root.yaml\nimage: ''\n")
+        (fs_dir / "harness" / "rfe-creator-eval.yaml").write_text("base: middle.yaml\n")
+        assert fullsend_mod.harness_file_image(fs_dir, "rfe-creator-eval") == "root:1"
+
+    def test_base_chain_cycle_is_none(self, tmp_path):
+        fs_dir = Path(_runner(tmp_path)._fullsend_dir)
+        (fs_dir / "harness").mkdir()
+        (fs_dir / "harness" / "a.yaml").write_text("base: rfe-creator-eval.yaml\n")
+        (fs_dir / "harness" / "rfe-creator-eval.yaml").write_text("base: a.yaml\n")
+        assert fullsend_mod.harness_file_image(fs_dir, "rfe-creator-eval") is None
+
+    def test_base_chain_self_reference_is_none(self, tmp_path):
+        fs_dir = Path(_runner(tmp_path)._fullsend_dir)
+        (fs_dir / "harness").mkdir()
+        (fs_dir / "harness" / "rfe-creator-eval.yaml").write_text(
+            "base: ./rfe-creator-eval.yaml\n")
+        assert fullsend_mod.harness_file_image(fs_dir, "rfe-creator-eval") is None
+
+    def test_base_chain_longer_than_bound_is_none(self, tmp_path):
+        fs_dir = Path(_runner(tmp_path)._fullsend_dir)
+        harness = fs_dir / "harness"
+        harness.mkdir()
+        depth = fullsend_mod._MAX_BASE_CHAIN
+        (harness / "rfe-creator-eval.yaml").write_text("base: b1.yaml\n")
+        for i in range(1, depth):
+            (harness / f"b{i}.yaml").write_text(f"base: b{i + 1}.yaml\n")
+        (harness / f"b{depth}.yaml").write_text("image: deep:1\n")
+        assert fullsend_mod.harness_file_image(fs_dir, "rfe-creator-eval") is None
+        (harness / f"b{depth - 1}.yaml").write_text("image: deep:1\n")
+        assert fullsend_mod.harness_file_image(fs_dir, "rfe-creator-eval") == "deep:1"
+
+    @pytest.mark.parametrize("base", [
+        "https://example.com/org/repo/base.yaml",
+        "../../outside/base.yaml",
+        "ABSOLUTE",
+        "missing.yaml",
+        "broken.yaml",
+        "[base.yaml]",
+    ], ids=["url", "escaping", "absolute", "missing", "unparsable", "not-a-string"])
+    def test_base_chain_unfollowable_base_is_none(self, tmp_path, base):
+        fs_dir = Path(_runner(tmp_path)._fullsend_dir)
+        (fs_dir / "harness").mkdir()
+        (fs_dir.parent / "outside").mkdir()
+        (fs_dir.parent / "outside" / "base.yaml").write_text("image: out:1\n")
+        (fs_dir / "harness" / "broken.yaml").write_text("image: [unclosed\n")
+        if base == "ABSOLUTE":
+            base = str(fs_dir.parent / "outside" / "base.yaml")
+        (fs_dir / "harness" / "rfe-creator-eval.yaml").write_text(f"base: {base}\n")
+        assert fullsend_mod.harness_file_image(fs_dir, "rfe-creator-eval") is None
+
     @pytest.mark.parametrize("raises", [False, True], ids=["real-loop", "resolve-raises"])
     def test_looping_symlink_in_fullsend_dir_nulls_only_the_image(
             self, tmp_path, fake_fullsend, monkeypatch, capsys, raises):

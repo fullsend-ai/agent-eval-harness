@@ -1279,13 +1279,41 @@ def _read_yaml_mapping(path: Path) -> Optional[dict]:
     return data if isinstance(data, dict) else None
 
 
-def _image_of(path: Path) -> Optional[str]:
-    data = _read_yaml_mapping(path)
-    image = data.get("image") if data else None
-    return image.strip() if isinstance(image, str) and image.strip() else None
-
-
 _URL_SOURCE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
+
+# Bound on the harness files read while following a ``base:`` chain.
+_MAX_BASE_CHAIN = 16
+
+
+def _image_of(root: Path, path: Path) -> Optional[str]:
+    """The first non-empty ``image:`` walking the harness file ``path`` and
+    then its ``base:`` chain, the way fullsend composes a child harness: a
+    local ``base:`` resolves relative to the directory of the file naming it,
+    and an empty ``image:`` does not override the base's.
+
+    ``None`` when a file in the chain is missing, unreadable or resolves
+    outside ``root``, when a ``base:`` is a URL or an absolute path, when the
+    chain loops, or when no file in it sets an image."""
+    seen = set()
+    while len(seen) < _MAX_BASE_CHAIN:
+        resolved = _contained(root, path)
+        if resolved is None or resolved in seen:
+            return None
+        seen.add(resolved)
+        data = _read_yaml_mapping(resolved)
+        if data is None:
+            return None
+        image = data.get("image")
+        if isinstance(image, str) and image.strip():
+            return image.strip()
+        base = data.get("base")
+        if not isinstance(base, str) or not base.strip():
+            return None
+        base = base.strip()
+        if _URL_SOURCE_RE.match(base) or Path(base).is_absolute():
+            return None
+        path = path.parent / base
+    return None
 
 
 def _registered_agent_entry(config: dict, agent: str) -> Optional[dict]:
@@ -1335,7 +1363,8 @@ def harness_file_image(fullsend_dir, agent: str) -> Optional[str]:
     ``image:``; a URL source, an override-only entry (no ``source``) or an
     unreadable file gives ``None``. Only when no entry matches is
     ``<fullsend_dir>/harness/<agent>.yaml`` (``.yml`` when no ``.yaml`` exists)
-    tried. ``None`` when nothing yields an image."""
+    tried. A file without an ``image:`` takes it from its ``base:`` chain
+    (see :func:`_image_of`). ``None`` when nothing yields an image."""
     if not agent or not isinstance(agent, str) or Path(agent).name != agent:
         return None
     root = Path(fullsend_dir)
@@ -1349,13 +1378,11 @@ def harness_file_image(fullsend_dir, agent: str) -> Optional[str]:
         source = source.split("#", 1)[0].strip()
         if not source or _URL_SOURCE_RE.match(source) or Path(source).is_absolute():
             return None
-        path = _contained(root, root / source)
-        return _image_of(path) if path else None
+        return _image_of(root, root / source)
     for suffix in (".yaml", ".yml"):
         candidate = root / "harness" / f"{agent}{suffix}"
         if candidate.is_file():
-            path = _contained(root, candidate)
-            return _image_of(path) if path else None
+            return _image_of(root, candidate)
     return None
 
 
