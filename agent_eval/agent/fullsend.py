@@ -131,11 +131,15 @@ _ALERT_LINE_RE = re.compile(
 # one: the value is replaced before the line is forwarded (fullsend caps the
 # command at 120 runes but does not redact it). A quoted value runs to its
 # closing quote, over escaped quotes (``\"``, ``\'``), and — when that cut left
-# it without one — to the end of the line, so no fragment of it gets through;
-# a bare value is the run of non-blank characters. The capture is left as is.
+# it without one — to the end of the line, a trailing lone backslash included
+# (the cut can land right after one), so no fragment of it gets through; a
+# bare value is the run of non-blank characters. The quoted rule needs the
+# value to open with the quote: a quote further in (``TOKEN=ab"c d"``) or
+# around the whole assignment (``"api_key=ab cd"``) leaves it a bare value,
+# redacted to the first blank. The capture is left as is.
 _SECRET_ASSIGNMENT_RE = re.compile(
     r"(?i)\b(\w*(?:token|secret|passw(?:or)?d|api[_-]?key)\w*=)"
-    r"(?:\"(?:[^\"\\]|\\.)*(?:\"|$)|'(?:[^'\\]|\\.)*(?:'|$)|\S+)")
+    r"(?:\"(?:[^\"\\]|\\.?)*(?:\"|$)|'(?:[^'\\]|\\.?)*(?:'|$)|\S+)")
 # Terminal control in a forwarded line, dropped before it is printed (the
 # capture keeps it): CSI sequences (colour, cursor movement), OSC strings
 # (title, hyperlink, clipboard — ended by BEL or ST), DCS/SOS/PM/APC strings
@@ -475,45 +479,44 @@ class FullsendRunner(EvalRunner):
         # here on, so the teardown below only reaps.
         console = _ConsoleCapture(proc, self._log_prefix)
         try:
-            # The contract of communicate(timeout): both pipes at EOF and the
-            # process exited within the timeout, otherwise TimeoutExpired with
-            # the leader still unreaped.
-            if not console.join(timeout_s):
-                raise subprocess.TimeoutExpired(cmd, timeout_s)
-            proc.wait(timeout=max(0.0, start + timeout_s - time.monotonic()))
-        except subprocess.TimeoutExpired:
-            # SIGTERM lets fullsend tear its sandbox down; the group is killed
-            # only while the leader is still unreaped (see base.py).
-            _, hung = terminate_process_group(
-                proc, self._term_grace_s, capture_output=False)
-            if not console.join(_PIPE_DRAIN_S):
-                # A descendant outside the group still holds a pipe (what
-                # communicate(timeout) reported as the termination hanging):
-                # the console may be cut short.
-                hung = hung or "Console pipes still open after the group kill"
-            # The case is over: a reader still up keeps its pipe from filling
-            # but forwards and keeps nothing more, so a late write of that
-            # descendant cannot land after this case's FAIL line or under a
-            # later case's prefix.
-            console.detach()
-            # Exit code -1 with a "Timed out" stderr; the caller still maps
-            # whatever the run directory holds (usage, stream, artifacts).
-            timeout_err = "\n".join(
-                s for s in (f"Timed out after {timeout_s}s", console.stdout,
-                            console.stderr, hung) if s)
-            return -1, "", timeout_err, time.monotonic() - start
-        except BaseException:
-            # fullsend runs in its own session, so the terminal's SIGINT never
-            # reaches it: stop the group (and its sandbox) before re-raising,
-            # with the same bounded drain and detach as a timeout, so a reader
-            # blocked on a pipe a descendant outside the group holds does not
-            # go on forwarding under this prefix.
             try:
+                # The contract of communicate(timeout): both pipes at EOF and
+                # the process exited within the timeout, otherwise
+                # TimeoutExpired with the leader still unreaped.
+                if not console.join(timeout_s):
+                    raise subprocess.TimeoutExpired(cmd, timeout_s)
+                proc.wait(timeout=max(0.0, start + timeout_s - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                # SIGTERM lets fullsend tear its sandbox down; the group is
+                # killed only while the leader is still unreaped (see base.py).
+                _, hung = terminate_process_group(
+                    proc, self._term_grace_s, capture_output=False)
+                if not console.join(_PIPE_DRAIN_S):
+                    # A descendant outside the group still holds a pipe (what
+                    # communicate(timeout) reported as the termination
+                    # hanging): the console may be cut short.
+                    hung = hung or "Console pipes still open after the group kill"
+                # Exit code -1 with a "Timed out" stderr; the caller still maps
+                # whatever the run directory holds (usage, stream, artifacts).
+                timeout_err = "\n".join(
+                    s for s in (f"Timed out after {timeout_s}s", console.stdout,
+                                console.stderr, hung) if s)
+                return -1, "", timeout_err, time.monotonic() - start
+            except BaseException:
+                # fullsend runs in its own session, so the terminal's SIGINT
+                # never reaches it: stop the group (and its sandbox) before
+                # re-raising, with the same bounded drain as a timeout.
                 terminate_process_group(proc, self._term_grace_s, capture_output=False)
                 console.join(_PIPE_DRAIN_S)
-            finally:
-                console.detach()
-            raise
+                raise
+        finally:
+            # The case is over, however it ended (a Ctrl-C that lands during
+            # the timeout teardown included): a reader still up keeps its pipe
+            # from filling but forwards and keeps nothing more, so a late
+            # write of a descendant outside the group cannot land after this
+            # case's status line or under a later case's prefix. A no-op once
+            # both pipes reached EOF.
+            console.detach()
         return proc.returncode, console.stdout, console.stderr, time.monotonic() - start
 
     # ── Run directory → RunResult ────────────────────────────────────

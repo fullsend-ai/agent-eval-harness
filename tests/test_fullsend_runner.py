@@ -2245,6 +2245,39 @@ class TestInterruptCleanup:
         finally:
             _kill_quietly(holder)
 
+    def test_interrupt_during_the_timeout_teardown_still_detaches(
+            self, tmp_path, monkeypatch, capsys):
+        # Ctrl-C landing inside the timeout handler (the term-grace wait, the
+        # drain) propagates past the interrupt handler, a sibling clause: the
+        # readers are detached all the same, so a line the holder writes
+        # later is neither forwarded under this case's prefix nor kept.
+        monkeypatch.setattr(fullsend_mod, "_PIPE_DRAIN_S", 1.0)
+        captures = _record_captures(monkeypatch)
+        script, flag = _pipe_holding_fullsend(tmp_path)
+
+        def interrupted_terminate(proc, grace_s, **kwargs):
+            raise KeyboardInterrupt  # during the term-grace wait
+
+        monkeypatch.setattr(
+            fullsend_mod, "terminate_process_group", interrupted_terminate)
+        runner = _runner(tmp_path, term_grace_s=1, log_prefix="eval")
+        with pytest.raises(KeyboardInterrupt):
+            runner._run([str(script)], _workspace(tmp_path), dict(os.environ), 3)
+        ((proc, console),) = captures
+        holder = _holder_pid(console.stdout)
+        try:
+            assert "  ✓ Sandbox created (1.0s)" in _streamed(capsys)
+            flag.write_text("")
+            proc.kill()  # the leader was never stopped: the fake raised instead
+            proc.wait(timeout=5)
+            assert console.join(10)  # the holder wrote its line and exited: EOF
+            assert proc.stdout.closed and proc.stderr.closed
+            assert "Late line" not in capsys.readouterr().out
+            assert "Late line" not in console.stdout
+        finally:
+            _kill_quietly(holder)
+            _kill_quietly(proc.pid)
+
 
 class TestSettingsFailClosed:
     def test_malformed_settings_with_env_secret_refuses_the_run(
@@ -2551,13 +2584,19 @@ class TestConsoleFilter:
     def test_unterminated_quoted_credential_redacted_to_the_end(self):
         # A quoted value with no closing quote on the line (fullsend cut the
         # command) is redacted to the end of the line: no fragment of it, and
-        # nothing after it, gets through on the strength of a blank.
+        # nothing after it, gets through on the strength of a blank. A line
+        # ending in a lone backslash (the cut landed right after one, or a
+        # shell line continuation) is the same case: the backslash is part of
+        # the value, not a reason to fall back to the bare-value rule.
         text = ('  ⚙ Bash: PASSWORD="first second third\n'
                 "  ⚙ Bash: export API_SECRET='first second --flag\n"
-                'Error: token="abc def rejected\n')
+                'Error: token="abc def rejected\n'
+                '  ⚙ Bash: PASSWORD="abc def\\\n'
+                "  ⚙ Bash: PASSWORD='abc def\\\n")
         assert self._select(text) == [
             "  ⚙ Bash: PASSWORD=***", "  ⚙ Bash: export API_SECRET=***",
-            "Error: token=***"]
+            "Error: token=***", "  ⚙ Bash: PASSWORD=***",
+            "  ⚙ Bash: PASSWORD=***"]
 
     def test_escaped_quotes_inside_a_quoted_credential(self):
         # An escaped delimiter does not end the value; one that is never
@@ -2655,6 +2694,10 @@ def _pipe_holding_fullsend(tmp_path):
 
 
 def _holder_pid(console_text):
+    """The pid the holder-spawning leader printed; a clear failure when the
+    leader was stopped before it got to print it."""
+    assert "holder " in console_text, (
+        f"the leader did not get to print its holder's pid: {console_text!r}")
     return int(console_text.split("holder ", 1)[1].split()[0])
 
 
@@ -2833,18 +2876,18 @@ class TestFullsendConsoleStreaming:
             """)
         runner = _runner(tmp_path, log_prefix="eval", term_grace_s=1)
         rc, out, err, duration = runner._run(
-            [sys.executable, "-c", child], tmp_path, dict(os.environ), timeout_s=1)
+            [sys.executable, "-c", child], tmp_path, dict(os.environ), timeout_s=3)
+        holder = _holder_pid(err)
         try:
             assert rc == -1
-            assert err.startswith("Timed out after 1s\n")
+            assert err.startswith("Timed out after 3s\n")
             assert "  ✓ Sandbox created (1.0s)\n" in err
             assert err.endswith("Console pipes still open after the group kill")
             assert "Process group termination hung" not in err  # the leader exited
             assert duration < 10
             assert "  ✓ Sandbox created (1.0s)" in _streamed(capsys)
         finally:
-            holder = int(err.split("holder ", 1)[1].split()[0])
-            os.kill(holder, 9)
+            _kill_quietly(holder)
 
     @pytest.mark.parametrize("ending", ["exit", "timeout"])
     def test_pipes_closed_once_drained(self, tmp_path, fake_fullsend, monkeypatch,
@@ -2908,7 +2951,7 @@ class TestFullsendConsoleStreaming:
         ws = _workspace(tmp_path)
         result = _runner(tmp_path, binary=str(script), term_grace_s=1,
                          log_prefix="eval").execute(
-            target="s", args="", workspace=ws, model="m", timeout_s=1)
+            target="s", args="", workspace=ws, model="m", timeout_s=3)
         holder = _holder_pid(result.stderr)
         try:
             assert result.exit_code == -1
