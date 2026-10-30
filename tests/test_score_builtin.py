@@ -2509,6 +2509,166 @@ class TestVerdictTransportAnthropic:
             score._call_structured_judge("p", "claude-opus-5-5", "bool", verdict="json_schema")
         assert exc.value.error_type == "verdict_unsupported"
         assert exc.value.error_class == "config" and len(client.calls) == 1
+        assert score._VERDICT_START == {}
+
+    def test_a_refusal_is_learnt_before_the_tool_request_with_one_warning(self, capsys):
+        import score
+        seen = []
+        tool_reply = _anthropic_tool_use("submit_evaluation", {"rationale": "r", "passed": True})
+
+        def create(**kwargs):
+            seen.append(dict(score._VERDICT_START))
+            if "output_config" in kwargs:
+                raise _output_config_refusal()
+            return tool_reply
+
+        client = SimpleNamespace(messages=SimpleNamespace(create=create))
+        with patch("score._get_anthropic_client", return_value=client):
+            score._call_structured_judge("p", "claude-opus-4-6", "bool")
+            score._call_structured_judge("p", "claude-opus-4-6", "bool")
+        assert seen[1] == {("anthropic", "claude-opus-4-6", ""): "tool"}
+        assert len(seen) == 3
+        err = capsys.readouterr().err
+        assert err.count("rejected structured outputs for claude-opus-4-6") == 1
+        assert "output_config" in err
+
+    def test_concurrent_calls_pay_one_refused_json_schema_request(self, capsys):
+        import threading
+        import score
+        n = 6
+        barrier = threading.Barrier(n)
+        lock = threading.Lock()
+        sent = {"json_schema": 0, "tool": 0}
+        tool_reply = _anthropic_tool_use("submit_evaluation", {"rationale": "r", "passed": True})
+
+        def create(**kwargs):
+            transport = "json_schema" if "output_config" in kwargs else "tool"
+            with lock:
+                sent[transport] += 1
+            if transport == "json_schema":
+                raise _output_config_refusal()
+            return tool_reply
+
+        client = SimpleNamespace(messages=SimpleNamespace(create=create))
+        results = []
+
+        def judge():
+            barrier.wait()
+            results.append(score._call_structured_judge("p", "claude-opus-4-6", "bool"))
+
+        with patch("score._get_anthropic_client", return_value=client):
+            threads = [threading.Thread(target=judge) for _ in range(n)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=10)
+        assert results == [(True, "r")] * n
+        assert sent == {"json_schema": 1, "tool": n}
+        assert score._verdict_transport_counts() == ({"tool": n}, n)
+        assert capsys.readouterr().err.count("rejected structured outputs") == 1
+
+    def test_concurrent_calls_all_use_json_schema_once_it_serves(self):
+        import threading
+        import score
+        n = 6
+        barrier = threading.Barrier(n)
+        client = _anthropic_client(_anthropic_text('{"rationale": "r", "passed": true}'))
+        results = []
+
+        def judge():
+            barrier.wait()
+            results.append(score._call_structured_judge("p", "claude-opus-5-5", "bool"))
+
+        with patch("score._get_anthropic_client", return_value=client):
+            threads = [threading.Thread(target=judge) for _ in range(n)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=10)
+        assert results == [(True, "r")] * n
+        assert all("output_config" in call for call in client.calls)
+        assert score._verdict_transport_counts() == ({"json_schema": n}, 0)
+
+    def test_calls_queued_behind_a_successful_probe_run_concurrently(self):
+        import threading
+        import time
+        import score
+        n = 6
+        start_barrier = threading.Barrier(n)
+        # The n-1 calls queued behind the probe must all be in flight at once.
+        overlap = threading.Barrier(n - 1)
+        lock = threading.Lock()
+        sent = []
+        reply = _anthropic_text('{"rationale": "r", "passed": true}')
+
+        def create(**kwargs):
+            with lock:
+                sent.append(kwargs)
+                first = len(sent) == 1
+            if first:
+                time.sleep(0.3)  # let the other calls queue behind the probe
+            else:
+                overlap.wait(timeout=5)
+            return reply
+
+        client = SimpleNamespace(messages=SimpleNamespace(create=create))
+        results = []
+        errors = []
+
+        def judge():
+            start_barrier.wait()
+            try:
+                results.append(score._call_structured_judge("p", "claude-opus-5-5", "bool"))
+            except Exception as exc:  # BrokenBarrierError when the calls were serialised
+                errors.append(exc)
+
+        with patch("score._get_anthropic_client", return_value=client):
+            threads = [threading.Thread(target=judge) for _ in range(n)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=15)
+        assert errors == []
+        assert results == [(True, "r")] * n
+
+    def test_the_stepdown_warning_prints_an_allowlisted_diagnostic(self, capsys):
+        """The provider's error text is never echoed: a 400 body can carry the
+        request (headers, URLs with userinfo) and control sequences; the line
+        names the status, the refused parameter and the request id only."""
+        import score
+        exc = _HttpError(400, 'Provider returned error', body={
+            "message": "Provider returned error", "code": 400,
+            "metadata": {"raw": "output_config is not supported; "
+                                "request: Authorization: Bearer sk-live-secret-0123456789 "
+                                "https://user:hunter2@gateway.example/v1 \x1b]0;owned\x07"}})
+        exc.response.headers["request-id"] = "req_01HXYZ\x1b[31m"
+        score._note_verdict_stepdown("anthropic", "claude-opus-4-6\x1b[0m", exc)
+        err = capsys.readouterr().err
+        assert err.count("WARNING: anthropic rejected structured outputs") == 1
+        assert "HTTP 400" in err and "output_config rejected" in err
+        assert "request id req_01HXYZ" in err
+        for leaked in ("sk-live-secret", "hunter2", "gateway.example", "Bearer", "owned"):
+            assert leaked not in err, leaked
+        assert "\x1b" not in err and "\x07" not in err  # controls are escaped, not printed
+
+    def test_a_refusal_overrides_an_already_learnt_json_schema_rung(self, capsys):
+        import score
+        key = ("anthropic", "claude-opus-4-6", "")
+        score._VERDICT_START[key] = "json_schema"
+        score._note_verdict_stepdown("anthropic", "claude-opus-4-6", _output_config_refusal())
+        assert score._VERDICT_START[key] == "tool"
+        assert "rejected structured outputs for claude-opus-4-6" in capsys.readouterr().err
+
+    def test_a_probe_that_fails_otherwise_learns_nothing_and_releases(self):
+        import score
+        client = _anthropic_client(
+            _HttpError(500, "overloaded"), _anthropic_text('{"rationale": "r", "passed": true}'))
+        with patch("score._get_anthropic_client", return_value=client):
+            with pytest.raises(_HttpError):
+                score._call_structured_judge("p", "claude-opus-5-5", "bool")
+            assert score._VERDICT_START == {}
+            assert score._call_structured_judge("p", "claude-opus-5-5", "bool") == (True, "r")
+        assert "output_config" in client.calls[1]
 
     def test_an_explicit_tool_policy_is_not_learnt_as_the_start_rung(self):
         import score
@@ -2605,6 +2765,42 @@ class TestVerdictTransportOpenRouter:
         assert len(client.calls) == 3 and or_env == []
         assert score._verdict_transport_counts() == ({"tool": 2}, 2)
         assert score._tool_choice_fallback_count() == 0
+
+    def test_concurrent_judges_pay_one_refused_response_format_request(
+            self, or_env, monkeypatch, capsys):
+        import threading
+        import score
+        n = 6
+        barrier = threading.Barrier(n)
+        lock = threading.Lock()
+        calls = []
+
+        def create(**kwargs):
+            with lock:
+                calls.append(kwargs)
+            if "response_format" in kwargs:
+                raise _response_format_refusal()
+            return _or_ok()
+
+        client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+        monkeypatch.setattr(score, "_client_for", lambda cfg: client)
+        _, scorer, *_ = load_judges(_or_config(verdict="auto"))[0]
+        results = []
+
+        def judge():
+            barrier.wait()
+            results.append(scorer(outputs={"files": {"output.txt": "test"}}))
+
+        threads = [threading.Thread(target=judge) for _ in range(n)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+        assert results == [(True, "solid")] * n
+        assert sum("response_format" in c for c in calls) == 1
+        assert sum("tools" in c for c in calls) == n
+        err = capsys.readouterr().err
+        assert err.count(f"openrouter rejected structured outputs for {_OR_SLUG}") == 1
 
     def test_a_routing_404_on_the_json_rung_steps_to_the_tool_ladder(self, or_env, monkeypatch):
         client = _or_client(_routing_404(), _or_ok())

@@ -100,12 +100,20 @@ A refusal of the request itself — any other 400, auth, 429/5xx — never chang
 it propagates through the existing retry policy (`_with_judge_retries` S:1712-1726) as
 today. Rung changes are not backed off (a 400 and a 404 do not heal).
 
-**Sticky rung.** The first rung that returns a verdict for a `(backend, model, routing)`
+**Sticky rung.** Under `auto`, the rung that serves a `(backend, model, routing)`
 (`routing` = the `routing_sha` of the request's provider body, empty when there is none, so
 a pinned and an unpinned judge on one slug learn separately) becomes
 the starting rung for every later call of that key in the process (a small locked dict,
 reset with the other judge-side counters in `score_cases` S:2610). With `auto` on Opus
 5.5 through OpenRouter this means one request per verdict instead of three.
+
+A `json_schema` refusal is learnt the moment it arrives — `tool` becomes the start rung
+before the tool request is sent — so calls that have not started yet skip the refused rung,
+and a one-time stderr warning per key names the step-down. The first `json_schema` attempt
+per key is serialised (`_verdict_probe`): one call probes while the others wait, so
+concurrent judge calls do not each pay the same refused request. Once the rung is known the
+waiters release the probe lock and run concurrently. A probe that fails for any other reason
+learns nothing and the next waiter probes in its place.
 
 **Explicit policy.** `json_schema` or `tool` pins the transport: no cross-transport
 fallback (the Decision 25 ladder inside `tool` still runs), so an operator holding a
