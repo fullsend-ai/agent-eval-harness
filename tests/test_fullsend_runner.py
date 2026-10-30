@@ -9,6 +9,7 @@ would carry), then writes a run directory shaped like a real ``fullsend run``:
 repository by the project's post-script.
 """
 
+import io
 import json
 import os
 import subprocess
@@ -88,6 +89,14 @@ FAKE_FULLSEND = textwrap.dedent('''\
             "FAKE_FULLSEND_IMAGE", "ghcr.io/fullsend-ai/sandbox@sha256:" + "a" * 64))
         print("  Arch: arm64")
     print("fullsend console stderr", file=sys.stderr)
+    for var, stream in (("FAKE_FULLSEND_CONSOLE", sys.stdout),
+                        ("FAKE_FULLSEND_CONSOLE_ERR", sys.stderr)):
+        # Replay a console transcript (a file) on that pipe, as the real CLI
+        # prints its steps and the agent's activity; flushed, so a run killed
+        # while it sleeps below has emitted it.
+        if os.environ.get(var):
+            stream.write(Path(os.environ[var]).read_text())
+            stream.flush()
     if os.environ.get("FAKE_FULLSEND_SLEEP"):
         time.sleep(float(os.environ["FAKE_FULLSEND_SLEEP"]))
     if os.environ.get("FAKE_FULLSEND_NO_RUN"):
@@ -189,7 +198,8 @@ def fake_fullsend(fake_bin, tmp_path, monkeypatch):
     for var in ("FAKE_FULLSEND_SLEEP", "FAKE_FULLSEND_EXIT", "FAKE_FULLSEND_ARTIFACTS",
                 "FAKE_FULLSEND_NO_RUN", "FAKE_FULLSEND_HANG_AFTER_RUN",
                 "FAKE_FULLSEND_ITERATIONS",
-                "FAKE_FULLSEND_NO_IMAGE", "FAKE_FULLSEND_IMAGE"):
+                "FAKE_FULLSEND_NO_IMAGE", "FAKE_FULLSEND_IMAGE",
+                "FAKE_FULLSEND_CONSOLE", "FAKE_FULLSEND_CONSOLE_ERR"):
         monkeypatch.delenv(var, raising=False)
     return record
 
@@ -2256,20 +2266,22 @@ class TestInterruptCleanup:
             f"open({str(pidfile)!r}, 'w').write(json.dumps([os.getpid(), child.pid]))\n"
             "time.sleep(60)\n")
 
-        real_popen = subprocess.Popen
+        # Ctrl-C reaches the main thread while it blocks in the console
+        # readers' join (a signal interrupts the lock acquire underneath), so
+        # that is where the fake raises it from.
+        real_join = fullsend_mod._ConsoleCapture.join
         interrupted = []
 
-        class InterruptingPopen(real_popen):
-            def communicate(self, *args, **kwargs):
-                if not interrupted:
-                    interrupted.append(True)
-                    deadline = time.monotonic() + 10
-                    while not pidfile.exists() and time.monotonic() < deadline:
-                        time.sleep(0.05)
-                    raise KeyboardInterrupt
-                return super().communicate(*args, **kwargs)
+        def interrupting_join(self, timeout_s):
+            if not interrupted:
+                interrupted.append(True)
+                deadline = time.monotonic() + 10
+                while not pidfile.exists() and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                raise KeyboardInterrupt
+            return real_join(self, timeout_s)
 
-        monkeypatch.setattr(fullsend_mod.subprocess, "Popen", InterruptingPopen)
+        monkeypatch.setattr(fullsend_mod._ConsoleCapture, "join", interrupting_join)
         runner = _runner(tmp_path, term_grace_s=2)
         with pytest.raises(KeyboardInterrupt):
             runner._run([sys.executable, "-c", code], ws, dict(os.environ), 60)
@@ -2280,6 +2292,82 @@ class TestInterruptCleanup:
         assert not _alive(leader)
         if _killpg_permitted():
             assert not _alive(child)
+
+    def test_interrupt_with_a_pipe_held_outside_the_group(
+            self, tmp_path, monkeypatch, capsys):
+        # Ctrl-C while a descendant outside the group holds the pipes: the
+        # cleanup is bounded (the grace, then the pipe drain) and the readers
+        # are detached — a line the holder writes later is neither forwarded
+        # nor kept — and they close the pipes at EOF.
+        monkeypatch.setattr(fullsend_mod, "_PIPE_DRAIN_S", 1.0)
+        captures = _record_captures(monkeypatch)
+        script, flag = _pipe_holding_fullsend(tmp_path)
+        recording = fullsend_mod._ConsoleCapture
+        real_join = recording.join
+        interrupted = []
+
+        def interrupting_join(self, timeout_s):
+            if not interrupted:
+                interrupted.append(True)
+                deadline = time.monotonic() + 10
+                while "holder " not in self.stdout and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                raise KeyboardInterrupt
+            return real_join(self, timeout_s)
+
+        monkeypatch.setattr(recording, "join", interrupting_join)
+        runner = _runner(tmp_path, term_grace_s=1, log_prefix="eval")
+        start = time.monotonic()
+        with pytest.raises(KeyboardInterrupt):
+            runner._run([str(script)], _workspace(tmp_path), dict(os.environ), 60)
+        elapsed = time.monotonic() - start
+        ((proc, console),) = captures
+        holder = _holder_pid(console.stdout)
+        try:
+            assert elapsed < 10
+            assert proc.poll() is not None  # the leader was stopped and reaped
+            assert "  ✓ Sandbox created (1.0s)" in _streamed(capsys)
+            assert not proc.stdout.closed  # the holder has it: its reader is up
+            flag.write_text("")
+            assert console.join(10)  # the holder wrote its line and exited: EOF
+            assert proc.stdout.closed and proc.stderr.closed
+            assert "Late line" not in capsys.readouterr().out
+            assert "Late line" not in console.stdout
+        finally:
+            _kill_quietly(holder)
+
+    def test_interrupt_during_the_timeout_teardown_still_detaches(
+            self, tmp_path, monkeypatch, capsys):
+        # Ctrl-C landing inside the timeout handler (the term-grace wait, the
+        # drain) propagates past the interrupt handler, a sibling clause: the
+        # readers are detached all the same, so a line the holder writes
+        # later is neither forwarded under this case's prefix nor kept.
+        monkeypatch.setattr(fullsend_mod, "_PIPE_DRAIN_S", 1.0)
+        captures = _record_captures(monkeypatch)
+        script, flag = _pipe_holding_fullsend(tmp_path)
+
+        def interrupted_terminate(proc, grace_s, **kwargs):
+            raise KeyboardInterrupt  # during the term-grace wait
+
+        monkeypatch.setattr(
+            fullsend_mod, "terminate_process_group", interrupted_terminate)
+        runner = _runner(tmp_path, term_grace_s=1, log_prefix="eval")
+        with pytest.raises(KeyboardInterrupt):
+            runner._run([str(script)], _workspace(tmp_path), dict(os.environ), 3)
+        ((proc, console),) = captures
+        holder = _holder_pid(console.stdout)
+        try:
+            assert "  ✓ Sandbox created (1.0s)" in _streamed(capsys)
+            flag.write_text("")
+            proc.kill()  # the leader was never stopped: the fake raised instead
+            proc.wait(timeout=5)
+            assert console.join(10)  # the holder wrote its line and exited: EOF
+            assert proc.stdout.closed and proc.stderr.closed
+            assert "Late line" not in capsys.readouterr().out
+            assert "Late line" not in console.stdout
+        finally:
+            _kill_quietly(holder)
+            _kill_quietly(proc.pid)
 
 
 class TestSettingsFailClosed:
@@ -2390,3 +2478,1059 @@ class TestRunDirContainment:
         outside.write_text("{}\n")
         (run / "security" / "link.jsonl").symlink_to(outside)
         assert self._map(tmp_path, ws).raw_output["security_files"] == 1
+
+
+# ── Console capture and live streaming ───────────────────────────────
+
+# A console in the shapes fullsend 0.51 prints (an excerpt of a real two-case
+# run), with every line kind the filter decides on.
+STREAMED_CONSOLE = textwrap.dedent("""\
+    ⚡ fullsend 0.51.0
+      Autonomous agentic development for Git-hosted organizations
+
+    → Running agent: rfe-creator-eval
+      ! Git token not available; private repo skill fetches may fail
+      ✓ Harness loaded (0.5s)
+        Model: claude-opus-4-6 (from --model flag)
+        Timeout: 170 minutes
+      • Running pre-script: /project/.fullsend/pre.sh
+    pre-script: bootstrapping the workspace
+      ✓ Pre-script completed (4.0s)
+      • Creating sandbox: fs-rfe-9223ab8e5c70
+      ✓ Sandbox created (17.6s)
+    → Iteration 1 of 2
+      💬 Good, the batch file exists. Let me read it.
+      ⚙ Read: /sandbox/workspace/batch.yaml
+      ⚙ Bash: JIRA_TOKEN=s3cr3t python3 scripts/submit.py --dry-run
+      ⚙ Write: /sandbox/workspace/artifacts/rfe-tasks/RFE-001.md
+      ⚙ Agent: STAGE=auto-fix TYPE=rfe Review RFE-001 with JIRA_TOKEN=abc
+      ⚙ Skill
+      💬 """ + "Reading the batch file. " * 20 + """
+      🧠 Let me parse the task and follow the skill instructions.
+
+    Task: `/rfe-speedrun --headless --dry-run --input batch.yaml`
+    - `--headless`: true
+      ⏳ Agent running (30s elapsed, 2h49m30s remaining)
+      ⚙ Bash: """ + "python3 scripts/frontmatter.py set " + "x" * 400 + """
+      ✗ Failed to collect OpenShell logs: gateway unreachable
+      ! Skipping transcript export
+      ! Sanitized [env_assignment] in iteration-1/transcripts/a.jsonl: Redacted env_assignment (9 chars) -> ***
+      ! Sanitized 96 finding(s) in output files
+    → Results
+        Agent exit code: 0
+        Validation: passed
+
+      • Running post-script: /project/.fullsend/post.sh
+    Result: action=completed pipeline=rfe-speedrun
+    Error: post-script could not reach Jira (dry run)
+      ✓ Post-script completed (0.1s)
+    """)
+
+# What the filter forwards from STREAMED_CONSOLE, in order.
+STREAMED_FORWARDED = [
+    "⚡ fullsend 0.51.0",
+    "→ Running agent: rfe-creator-eval",
+    "  ! Git token not available; private repo skill fetches may fail",
+    "  ✓ Harness loaded (0.5s)",
+    "    Model: claude-opus-4-6 (from --model flag)",
+    "    Timeout: 170 minutes",
+    "  • Running pre-script: /project/.fullsend/pre.sh",
+    "  ✓ Pre-script completed (4.0s)",
+    "  • Creating sandbox: fs-rfe-9223ab8e5c70",
+    "  ✓ Sandbox created (17.6s)",
+    "→ Iteration 1 of 2",
+    "  💬 Good, the batch file exists. Let me read it.",
+    "  ⚙ Read: /sandbox/workspace/batch.yaml",
+    "  ⚙ Bash: python3",
+    "  ⚙ Write: /sandbox/workspace/artifacts/rfe-tasks/RFE-001.md",
+    "  ⚙ Agent",
+    "  ⚙ Skill",
+    ("  💬 " + "Reading the batch file. " * 20)[:199] + "…",
+    "  ⏳ Agent running (30s elapsed, 2h49m30s remaining)",
+    "  ⚙ Bash: python3",
+    "  ✗ Failed to collect OpenShell logs: gateway unreachable",
+    "  ! Skipping transcript export",
+    "  ! Sanitized 96 finding(s) in output files",
+    "→ Results",
+    "    Agent exit code: 0",
+    "    Validation: passed",
+    "  • Running post-script: /project/.fullsend/post.sh",
+    "Error: post-script could not reach Jira (dry run)",
+    "  ✓ Post-script completed (0.1s)",
+]
+
+STREAMED_DROPPED = [
+    "Autonomous agentic development",
+    "pre-script: bootstrapping",
+    "🧠 Let me parse the task",
+    "Task: `/rfe-speedrun",
+    "- `--headless`: true",
+    "JIRA_TOKEN=s3cr3t",
+    "scripts/submit.py",
+    "JIRA_TOKEN=abc",
+    "Review RFE-001",
+    "frontmatter.py",
+    "Sanitized [env_assignment]",
+    "Result: action=completed",
+]
+
+# Claude Code's note (on fullsend's stderr) that the workspace's allow list
+# was dropped — the line behind the eval permission denials, longer than a
+# forwarded line.
+PERMISSIONS_IGNORED_LINE = (
+    "Ignoring 81 permissions.allow entries from .claude/settings.json: this "
+    "workspace has not been trusted. Run Claude Code interactively here once and "
+    "accept the trust dialog, or set projects[\"/sandbox/workspace/case\"]"
+    ".hasTrustDialogAccepted: true in /sandbox/claude-config/.claude.json")
+assert len(PERMISSIONS_IGNORED_LINE) > fullsend_mod._MAX_STREAM_LINE_CHARS
+
+CONSOLE_ERR = ("Cloning into '.context/architecture-context'...\n"
+               "  ✗ Sandbox teardown failed: gateway unreachable\n"
+               + PERMISSIONS_IGNORED_LINE + "\n")
+
+# What the filter forwards from CONSOLE_ERR.
+CONSOLE_ERR_FORWARDED = [
+    "  ✗ Sandbox teardown failed: gateway unreachable",
+    PERMISSIONS_IGNORED_LINE[:fullsend_mod._MAX_STREAM_LINE_CHARS - 1] + "…",
+]
+
+
+def _streamed(capsys, prefix="eval"):
+    """The ``  <prefix> | `` lines the runner printed, prefix removed."""
+    lead = f"  {prefix} | "
+    return [line[len(lead):] for line in capsys.readouterr().out.splitlines()
+            if line.startswith(lead)]
+
+
+class TestConsoleFilter:
+    # The credentials in these fixtures are placeholders (<pw>, <jwt>, <b64>,
+    # <pat>, <aws-key-id>): a value a secret scanner reads as a credential, a
+    # base64 user:pass pair or a provider's key prefix, is an alert even in a
+    # test, and the rules go by the key, the flag or the header, never by the
+    # value's shape.
+    def _select(self, text):
+        select = fullsend_mod._ConsoleFilter()
+        return [s for s in (select.select(line)
+                            for line in text.splitlines(keepends=True))
+                if s is not None]
+
+    def test_sample_console(self):
+        assert self._select(STREAMED_CONSOLE) == STREAMED_FORWARDED
+
+    def test_detail_lines_follow_a_step_or_section_only(self):
+        text = ("  ✓ Harness loaded (0.5s)\n"
+                "    Model: opus\n"
+                "    Image: img\n"
+                "\n"
+                "    orphan detail after a blank line\n"
+                "  💬 Let me look.\n"
+                "    indented prose under the assistant text\n"
+                "  ! Sanitized [x] in a.jsonl: Redacted\n"
+                "    detail after a dropped line\n"
+                "→ Results\n"
+                "    Validation: passed\n")
+        assert self._select(text) == [
+            "  ✓ Harness loaded (0.5s)", "    Model: opus", "    Image: img",
+            "  💬 Let me look.", "→ Results", "    Validation: passed"]
+
+    def test_plain_alert_lines(self):
+        text = ("Error: boom\n"
+                "WARNING: disk almost full\n"
+                "fatal: not a git repository\n"
+                + PERMISSIONS_IGNORED_LINE + "\n"
+                "Errors: none\n"
+                "Warnings are listed below\n"
+                "Ignoring unknown flag --x\n"
+                "runtime: selected claude\n")
+        assert self._select(text) == [
+            "Error: boom", "WARNING: disk almost full", "fatal: not a git repository",
+            CONSOLE_ERR_FORWARDED[1]]
+
+    def test_thinking_not_forwarded(self):
+        # Parity with the claude-code runner, which streams assistant text and
+        # tool calls but never thinking; the heartbeat after it still is.
+        text = ("  ⚙ Read: batch.yaml\n"
+                "  🧠 Let me think about the Error: handling here.\n"
+                "Error: this is the thinking's own prose, at column 0\n"
+                "    and an indented line of it\n"
+                "  ⏳ Agent running (30s elapsed)\n")
+        assert self._select(text) == [
+            "  ⚙ Read: batch.yaml",
+            "Error: this is the thinking's own prose, at column 0",
+            "  ⏳ Agent running (30s elapsed)"]
+
+    def test_credential_assignments_redacted(self):
+        # In the lines that keep their text (assistant text, alerts, detail
+        # lines): the key stays, the value is ***, however it is quoted. A
+        # key names a credential by a word of its own (JIRA_TOKEN, api-key,
+        # AWS_ACCESS_KEY_ID, X-Amz-Signature) or by ending in one (MYSECRET,
+        # SSH_PASSPHRASE). A ⚙ Bash line never shows its command
+        # (test_tool_call_lines_show_no_raw_argument).
+        text = ("  💬 Ran JIRA_TOKEN=abc123 python3 scripts/submit.py "
+                "--api-key=xyz --password=\"a b\" api_secret='q r' "
+                "STAGE=auto-fix rfe_id=RFE-001\n"
+                "Error: GITHUB_TOKEN=<pat> rejected\n"
+                "  ✓ Environment\n"
+                "    AWS_ACCESS_KEY_ID=<aws-key-id> MYSECRET=x TOKEN = spaced\n"
+                "    SSH_PASSPHRASE=p1 Signature=s1 https://s3.test/o?X-Amz-Signature=sg "
+                "SIGNATURES=3\n")
+        assert self._select(text) == [
+            "  💬 Ran JIRA_TOKEN=*** python3 scripts/submit.py "
+            "--api-key=*** --password=*** api_secret=*** "
+            "STAGE=auto-fix rfe_id=RFE-001",
+            "Error: GITHUB_TOKEN=*** rejected",
+            "  ✓ Environment",
+            "    AWS_ACCESS_KEY_ID=*** MYSECRET=*** TOKEN = ***",
+            "    SSH_PASSPHRASE=*** Signature=*** https://s3.test/o?X-Amz-Signature=*** "
+            "SIGNATURES=3"]
+
+    def test_tool_call_lines_show_no_raw_argument(self):
+        # A ⚙ line never forwards a command or a prompt: Bash shows the
+        # program name alone (the first word after any leading assignments;
+        # none when that word is not a plain program name or the command was
+        # cut inside a quote), a file tool keeps its path or pattern, every
+        # other tool — known or not — shows its name alone.
+        text = ("  ⚙ Bash: JIRA_TOKEN=s3cr3t python3 scripts/submit.py --dry-run\n"
+                "  ⚙ Bash: curl --password <pw> https://example.test\n"
+                '  ⚙ Bash: TOKEN="a b" ./scripts/run.sh --token abc\n'
+                '  ⚙ Bash: echo "$FULLSEND_TASK"\n'
+                "  ⚙ Bash: cd /sandbox && make all\n"
+                '  ⚙ Bash: PASSWORD="first second\n'
+                "  ⚙ Bash: --output=x python3\n"
+                "  ⚙ Bash: (cd x && make)\n"
+                "  ⚙ Bash: $PYTHON x.py\n"
+                "  ⚙ Bash:\n"
+                "  ⚙ Bash\n"
+                "  ⚙ Read: /sandbox/workspace/batch.yaml\n"
+                "  ⚙ Write: /sandbox/workspace/artifacts/rfe-tasks/RFE-001.md\n"
+                "  ⚙ Grep: submit_issue in scripts/\n"
+                "  ⚙ Agent: STAGE=auto-fix TYPE=rfe Review RFE-001 with JIRA_TOKEN=abc\n"
+                "  ⚙ Task: fetch https://user:<pw>@jira.example.test\n"
+                "  ⚙ Skill: rfe-speedrun --headless\n"
+                "  ⚙ Skill\n"
+                "  ⚙ WebFetch: https://example.test/?token=abc\n"
+                '  ⚙ mcp__atlassian__getJiraIssue: {"token": "abc"}\n'
+                "  ⚙ Bash cmd without a colon\n"
+                "  ⚙\n")
+        assert self._select(text) == [
+            "  ⚙ Bash: python3", "  ⚙ Bash: curl", "  ⚙ Bash: ./scripts/run.sh",
+            "  ⚙ Bash: echo", "  ⚙ Bash: cd", "  ⚙ Bash", "  ⚙ Bash", "  ⚙ Bash",
+            "  ⚙ Bash", "  ⚙ Bash", "  ⚙ Bash",
+            "  ⚙ Read: /sandbox/workspace/batch.yaml",
+            "  ⚙ Write: /sandbox/workspace/artifacts/rfe-tasks/RFE-001.md",
+            "  ⚙ Grep: submit_issue in scripts/",
+            "  ⚙ Agent", "  ⚙ Task", "  ⚙ Skill", "  ⚙ Skill", "  ⚙ WebFetch",
+            "  ⚙ mcp__atlassian__getJiraIssue", "  ⚙", "  ⚙"]
+
+    def test_shell_concatenated_credential_values_redacted_whole(self):
+        # A quote opening after unquoted characters, a backslash-escaped
+        # blank, an assignment opened inside a quoted word: the value is the
+        # whole shell word, quoted parts included, so nothing of it gets
+        # through on the strength of a blank. An assignment inside a
+        # non-credential value is still found.
+        text = ('  💬 Ran TOKEN=ab"c d" next\n'
+                "  💬 Ran TOKEN=abc\\ def next\n"
+                '  💬 Ran "api_key=ab cd" next\n'
+                "  💬 Ran 'PASSWORD=ab cd'\"ef gh\" next\n"
+                '  💬 Ran MODE="x TOKEN=abc" next\n')
+        assert self._select(text) == [
+            "  💬 Ran TOKEN=*** next", "  💬 Ran TOKEN=*** next",
+            '  💬 Ran "api_key=*** next', "  💬 Ran 'PASSWORD=*** next",
+            '  💬 Ran MODE="x TOKEN=***']
+
+    def test_credential_flags_headers_fields_and_urls_redacted(self):
+        # Space-separated credential flags (the flag kept, -p is not one),
+        # Authorization values and a bare Bearer — the value ending at a
+        # blank or a quote, so a quoted header keeps its closing quote and
+        # in compact JSON the next field is still found as a field (its value
+        # past the first blank would otherwise stand outside any key) —
+        # JSON/YAML/header fields whose key names a credential (fullsend's
+        # Tokens: line does not), a bare field value running to a delimiter
+        # or the end of the line, blanks included, URL userinfo whole (a
+        # username is a token as often as not). On the safe side: a key that
+        # merely ends in "key",
+        # the word "bearer" in prose and the rest of a line after a
+        # credential-named "key:" are redacted too.
+        text = ("  💬 Ran curl --password <pw> -H 'Authorization: Bearer <jwt>' "
+                "https://user:<pw>@jira.example.test/x\n"
+                '  💬 Ran ./x --token "a b" --api-key k1 -p tmp/x --access-key-id <id> '
+                "--sort-key name --passphrase pw1\n"
+                "Error: Authorization: Basic <b64> rejected, Bearer <t> too\n"
+                '  💬 Sent {"Authorization":"Bearer <t>","password":"p w"}\n'
+                '  💬 headers={"Authorization":"Bearer <t>"};data={"api_key":"k e y"}\n'
+                '  💬 Wrote {"token": "abc", "user": "me"} and password: <pw>\n'
+                "  💬 Headers: X-Api-Key: k1, Private-Token: t1, Content-Type: json\n"
+                "  💬 password: correct horse battery staple\n"
+                "  💬 Set {token: abc def, user: me} and api_key: k 1; next: x\n"
+                "  💬 The function signature: run(cfg, timeout)\n"
+                "  💬 Cloning https://<pat>@github.com/x and https://example.test:8443/y\n"
+                "  💬 Pushed to https://<pat>:x-oauth-basic@github.com/x\n"
+                "  ✓ Harness loaded (0.5s)\n"
+                "    Tokens: in=158 out=54740 reasoning=14976 cache_read=4674845\n"
+                "  💬 Basic usage of the bearer concept\n")
+        assert self._select(text) == [
+            "  💬 Ran curl --password *** -H 'Authorization: Bearer ***' "
+            "https://***@jira.example.test/x",
+            "  💬 Ran ./x --token *** --api-key *** -p tmp/x --access-key-id *** "
+            "--sort-key *** --passphrase ***",
+            "Error: Authorization: Basic *** rejected, Bearer *** too",
+            '  💬 Sent {"Authorization":"Bearer ***","password":***}',
+            '  💬 headers={"Authorization":"Bearer ***"};data={"api_key":***}',
+            '  💬 Wrote {"token": ***, "user": "me"} and password: ***',
+            "  💬 Headers: X-Api-Key: ***, Private-Token: ***, Content-Type: json",
+            "  💬 password: ***",
+            "  💬 Set {token: ***, user: me} and api_key: ***; next: x",
+            "  💬 The function signature: ***, timeout)",
+            "  💬 Cloning https://***@github.com/x and https://example.test:8443/y",
+            "  💬 Pushed to https://***@github.com/x",
+            "  ✓ Harness loaded (0.5s)",
+            "    Tokens: in=158 out=54740 reasoning=14976 cache_read=4674845",
+            "  💬 Basic usage of the bearer ***"]
+
+    def test_authorization_values_redacted_in_every_form(self):
+        # The header name bare (after a dot, a dash or an escaped line break,
+        # Markdown-decorated too; after a "/" it is a path), quoted as a JSON
+        # or dict key
+        # (Proxy-Authorization, X-Authorization, a bytes key too) or opening
+        # a quoted word, followed by ":", "=" or "=>". A quoted value, or the
+        # value of a header that opened a quoted word (curl -H '…'), is
+        # hidden through the closing quote, the scheme kept when known — so a
+        # Digest's last quoted parameter never shows past the shell quote —
+        # and a string holding the scheme alone hides the operand
+        # concatenated after it, glued or after a "+" (a word, a quoted
+        # string, a $(…) substitution, a quoted scheme alone chaining once
+        # more), failing which the scheme word (a grep pattern). A bare
+        # value: one word after a
+        # token68 scheme (or its name=value list, Rails' Token token="…";
+        # the word ending at a quote or a delimiter, so the next field
+        # stays apart; a "="-padded token in a quoted header never passes for
+        # a name=value parameter and swallows the next field's quote), the
+        # name=value list after a parameter scheme (Digest, AWS SigV4;
+        # comma-, semicolon- or blank-separated, blanks around "=" allowed, a
+        # list that does not parse hidden whole), the inside of a bracketed
+        # value (a Go header map, a JSON list), and the whole value through
+        # the next quote or delimiter otherwise — an unknown scheme (DPoP,
+        # SSWS, its token quoted or not), a prose "authorization:" losing the
+        # rest of its clause. After
+        # a quoted name a bare value is hidden only behind a known scheme or
+        # inside brackets: an f-string is left to the bare Bearer rule, which
+        # hides its placeholder as it did. "Authorization" is not a
+        # credential key, so the field rule never swallows a header's
+        # neighbours; a URL path or a comparison is no header.
+        text = ('  💬 Sent {"Authorization":"Basic <b64>","user":"me"}\n'
+                "  💬 Sent {'Authorization': 'token <t>', "
+                "'Proxy-Authorization': 'Bearer a b'}\n"
+                '  💬 Sent {"authorization":"<raw>"} and Authorization: <raw> then x\n'
+                "  💬 Sent {'Authorization': 'Digest username=\"me\", response=\"<h>\"'}\n"
+                '  💬 Sent Authorization: Digest username="me", realm="r", '
+                'response="<h>" ok\n'
+                "  💬 Sent Authorization: AWS4-HMAC-SHA256 Credential=<id>/20261030/eu/"
+                "s3/aws4_request, SignedHeaders=host, Signature=<sig>\n"
+                "  💬 Sent X-Authorization: Negotiate <t> and Authorization:Bearer <t>\n"
+                '  💬 Sent "Authorization": Bearer <t>, "X-Request-Id": 7\n'
+                '  💬 Sent {"Authorization":"Bearer "}\n'
+                "Error: Authorization: Bearer\n"
+                "  💬 Missing authorization: the request needs a token\n"
+                '  💬 Ran curl -H "Authorization: Basic <b64>=" -d \'{"password":"p w"}\' '
+                "https://x\n"
+                "  💬 Got map[Authorization:[Bearer <jwt>] Content-Type:[text/plain]]\n"
+                "  💬 Sent Authorization: DPoP <jwt> next\n"
+                "  💬 Ran curl -H 'Authorization: SSWS <t>' https://x\n"
+                '  💬 Sent Authorization: "Bearer <t>" and '
+                "{b'Authorization': b'Basic <b64>'}\n"
+                '  💬 Set headers = {"Authorization": f"Bearer {token}"}\n'
+                '  💬 Set {"authorization": {"type": "bearer", "token": "<t>"}}\n'
+                "  💬 Note (authorization: 'pending') on the ticket\n"
+                "  💬 Ran curl -H 'Authorization: Digest username=\"me\", "
+                "response=\"<h>\"' https://x\n"
+                '  💬 Ran curl -H "Authorization: Digest username=\\"me\\", '
+                'response=\\"<h>\\"" https://x\n'
+                '  💬 Got map[Authorization:[Digest username="me", response="<h>"] '
+                "Accept:[*/*]]\n"
+                '  💬 Sent Authorization: Digest username="me" response="<h>".\n'
+                "  💬 Saw Bearer [<t>] and Bearer {<t>} and the 'Authorization: Bearer' "
+                "header\n"
+                '  💬 Sent {"Authorization":["Basic <b64>"],"Accept":["*/*"]}\n'
+                "  💬 Ran curl -H 'Authorization: Basic '<b64> https://x\n"
+                "  💬 Set h = 'Authorization: Bearer ' + '<jwt>'\n"
+                '  💬 Sent Authorization: Digest username = "me", response = "<h>"\n'
+                "  💬 Saw **Authorization**: Basic <b64> and HTTP_AUTHORIZATION=Basic <b64>\n"
+                '  💬 Logged authorization="Basic <b64>" method=GET and '
+                '{"Authorization"=>"Basic <b64>"}\n'
+                "  💬 Sent {b'password': b'<t>', b'Authorization': [b'Basic <b64>']}\n"
+                'Error: Authorization: []string{"Basic <b64>"} rejected\n'
+                "  💬 See docs/authorization:latest and if authorization == granted\n"
+                "  💬 Saw headers.authorization: Basic <b64> and "
+                "X-Custom-Authorization: token <t>\n"
+                "  💬 Saw _Authorization_: Basic <b64>\n"
+                "  💬 Ran curl -H 'Authorization: Basic '$(echo -n me:<pw> | base64) https://h\n"
+                "  💬 Ran curl -H 'Authorization: Basic '<b64>' -H 'X-Api-Key: <k>'\n"
+                "  💬 Set h = 'Authorization: ' + 'Basic ' + '<b64>' and "
+                "g = 'Authorization: Basic '+ <b64>\n"
+                '  💬 Sent Authorization: SSWS "<t>" y\n'
+                '  💬 Sent Bearer " <jwt>" and Authorization: Digest response="<h>"x\n'
+                "  💬 send: b'GET / HTTP/1.1\\r\\nHost: x\\r\\nAuthorization: Basic <b64>"
+                "\\r\\n\\r\\n'\n"
+                '  💬 Sent Authorization: Token token="<t>" and \\tAuthorization: NTLM <t>\n'
+                "  💬 send: b'GET / HTTP/1.1\\r\\nAuthorization: Basic b64pad==\\r\\n"
+                "X-Api-Key: <k>\\r\\n\\r\\n'\n"
+                "  💬 Sent Authorization: Basic b64pad= --password <pw> and "
+                "Authorization: Bearer <jwt>\\r\\nX-Api-Key: <k>\n")
+        assert self._select(text) == [
+            '  💬 Sent {"Authorization":"Basic ***","user":"me"}',
+            "  💬 Sent {'Authorization': 'token ***', 'Proxy-Authorization': 'Bearer ***'}",
+            '  💬 Sent {"authorization":"***"} and Authorization: ***',
+            "  💬 Sent {'Authorization': 'Digest ***'}",
+            "  💬 Sent Authorization: Digest *** ok",
+            "  💬 Sent Authorization: AWS4-HMAC-SHA256 ***",
+            "  💬 Sent X-Authorization: Negotiate *** and Authorization:Bearer ***",
+            '  💬 Sent "Authorization": Bearer ***, "X-Request-Id": 7',
+            '  💬 Sent {"Authorization":"***"}',
+            "Error: Authorization: ***",
+            "  💬 Missing authorization: ***",
+            '  💬 Ran curl -H "Authorization: Basic ***" -d \'{"password":***}\' https://x',
+            "  💬 Got map[Authorization:[***] Content-Type:[text/plain]]",
+            "  💬 Sent Authorization: ***",
+            "  💬 Ran curl -H 'Authorization: ***' https://x",
+            '  💬 Sent Authorization: "Bearer ***" and {b\'Authorization\': b\'Basic ***\'}',
+            '  💬 Set headers = {"Authorization": f"Bearer ***"}',
+            '  💬 Set {"authorization": {***}}',
+            "  💬 Note (authorization: '***') on the ticket",
+            "  💬 Ran curl -H 'Authorization: Digest ***' https://x",
+            '  💬 Ran curl -H "Authorization: Digest ***" https://x',
+            "  💬 Got map[Authorization:[***] Accept:[*/*]]",
+            "  💬 Sent Authorization: Digest ***.",
+            "  💬 Saw Bearer *** and Bearer *** and the 'Authorization: ***' header",
+            '  💬 Sent {"Authorization":[***],"Accept":["*/*"]}',
+            "  💬 Ran curl -H 'Authorization: Basic '*** https://x",
+            "  💬 Set h = 'Authorization: Bearer ' + ***",
+            "  💬 Sent Authorization: Digest ***",
+            "  💬 Saw **Authorization**: Basic *** and HTTP_AUTHORIZATION=Basic ***",
+            '  💬 Logged authorization="Basic ***" method=GET and '
+            '{"Authorization"=>"Basic ***"}',
+            "  💬 Sent {b'password': ***, b'Authorization': [***]}",
+            "Error: Authorization: ***",
+            "  💬 See docs/authorization:latest and if authorization == granted",
+            "  💬 Saw headers.authorization: Basic *** and X-Custom-Authorization: token ***",
+            "  💬 Saw _Authorization_: Basic ***",
+            "  💬 Ran curl -H 'Authorization: Basic '*** https://h",
+            "  💬 Ran curl -H 'Authorization: Basic '***' -H 'X-Api-Key: ***",
+            "  💬 Set h = 'Authorization: ' + 'Basic ' + *** and g = 'Authorization: Basic '+ ***",
+            "  💬 Sent Authorization: ***",
+            "  💬 Sent Bearer *** and Authorization: Digest ***",
+            "  💬 send: b'GET / HTTP/1.1\\r\\nHost: x\\r\\nAuthorization: Basic ***"
+            "\\r\\n\\r\\n'",
+            "  💬 Sent Authorization: Token *** and \\tAuthorization: NTLM ***",
+            "  💬 send: b'GET / HTTP/1.1\\r\\nAuthorization: Basic ***\\r\\nX-Api-Key: ***",
+            "  💬 Sent Authorization: Basic *** --password *** and "
+            "Authorization: Bearer ***\\r\\nX-Api-Key: ***"]
+
+    def test_environment_credential_values_masked(self):
+        # The values of the credential-named variables of fullsend's
+        # environment (eight characters or more, each line of a multi-line
+        # value on its own) are masked wherever they appear, longest first;
+        # a short value or the value of another variable is not. A variable
+        # named by "auth"/"oauth" counts too (DOCKER_AUTH_CONFIG's "auth"
+        # field is none of the key rule's words), a wider rule than the line
+        # redaction's since masking can only hide.
+        env = {"JIRA_TOKEN": "s3cr3t-value", "ANTHROPIC_API_KEY": "<api-key>",
+               "AWS_ACCESS_KEY_ID": "<aws-key-id>", "DB_PASSWD": "<db-passwd>",
+               "GOOGLE_APPLICATION_CREDENTIALS": "/home/me/creds.json",
+               "SSH_PRIVATE_KEY": "-----BEGIN KEY-----\nMIIEpAIBAAKCAQEA\n-----END KEY-----\n",
+               "DOCKER_AUTH_CONFIG": '{"auths": {"r.test": {"auth": "<b64>"}}}',
+               "GITHUB_OAUTH": "<oauth-value>", "AUTHOR": "antonin-stefanutti",
+               "PREFIX_TOKEN": "abcdefgh", "LONGER_TOKEN": "abcdefgh-ijkl",
+               "SHORT_TOKEN": "short", "TOKENIZERS_PARALLELISM": "false-false-false",
+               "STAGE": "auto-fix-long-value", "PATH": "/usr/bin:/bin",
+               "EMPTY_SECRET": "", "PADDED_SECRET": "        ",
+               3: "not-a-string-name", "INT_TOKEN": 12345678}
+        secrets = fullsend_mod._secret_values(env)
+        assert set(secrets) == {
+            "s3cr3t-value", "<api-key>", "<aws-key-id>", "<db-passwd>",
+            "/home/me/creds.json", "-----BEGIN KEY-----", "MIIEpAIBAAKCAQEA",
+            "-----END KEY-----", '{"auths": {"r.test": {"auth": "<b64>"}}}',
+            "<oauth-value>", "abcdefgh", "abcdefgh-ijkl"}
+        assert list(secrets) == sorted(secrets, key=lambda v: (-len(v), v))
+        select = fullsend_mod._ConsoleFilter(secrets)
+        shown = [select.select(line + "\n") for line in (
+            "  ✓ Logged in with s3cr3t-value as <aws-key-id>",
+            "  💬 The key abcdefgh-ijkl is not abcdefgh; short and auto-fix-long-value stay",
+            "  💬 MIIEpAIBAAKCAQEA /home/me/creds.json false-false-false",
+            "  ⚙ Read: /home/me/creds.json",
+            "  ⚙ Bash: s3cr3t-value",
+            "  💬 Sent Bearer abcdefghijkl to the API")]
+        assert shown == [
+            "  ✓ Logged in with *** as ***",
+            "  💬 The key *** is not ***; short and auto-fix-long-value stay",
+            "  💬 *** *** false-false-false",
+            "  ⚙ Read: ***",
+            "  ⚙ Bash: ***",
+            "  💬 Sent Bearer *** to the API"]  # a masked prefix: the Bearer rule takes the rest
+        assert fullsend_mod._secret_values({}) == () == fullsend_mod._secret_values(None)
+
+    def test_clip_then_redact_leaves_no_fragment_of_a_cut_credential(self):
+        # The line is cut to the forwarded length first and redacted after:
+        # a bare value cut short is still the rest of its word, a quoted one
+        # runs to the end of the line, a flag's value is the rest of the
+        # line, a userinfo cut before its @ is taken for one — so a
+        # credential past the cut costs nothing and shows nothing. A line the
+        # redaction lengthened is cut again.
+        max_chars = fullsend_mod._MAX_STREAM_LINE_CHARS
+        for padding, tail, shown in (
+                (180, " TOKEN=abcdefghijklmnop", " TOKEN=***…"),
+                (180, ' TOKEN="abc defghijklm', " TOKEN=***…"),
+                (180, " --password abcdefghijklmno", " --password ***…"),
+                (170, " https://user:<longpassword>@h", " https://***…"),
+                (165, ' "Authorization":"Bearer abcdefghij', ' "Authorization":"Bearer ***…')):
+            lead = "  💬 " + "x" * padding
+            assert len(lead + tail) > max_chars > len(lead) + 7
+            (out,) = self._select(lead + tail + "\n")
+            assert out == lead + shown, tail
+            assert len(out) <= max_chars
+        grown = "  💬 " + "x" * (max_chars - len("  💬 ") - len(" TOKEN=a")) + " TOKEN=a"
+        assert len(grown) == max_chars
+        (out,) = self._select(grown + "\n")
+        assert len(out) == max_chars and out.endswith(" TOKEN=…")
+
+    def test_pathological_line_redacts_in_linear_time(self):
+        # One 100 KB word repeating a credential name with no "=" made the
+        # former key pattern backtrack quadratically, and it ran before the
+        # clip (1.3 s at 50 KB, 5.4 s at 100 KB, holding the GIL); a ⚙ Bash
+        # line's program name was read by shlex, a per-character lexer, from
+        # the whole command (6 s at 1 MB). The line is clipped first, each
+        # key pattern is one forward scan and the program name is read from
+        # the clipped command: well under a second of CPU time (immune to a
+        # loaded runner) whatever the shape, clipped or not.
+        max_chars = fullsend_mod._MAX_STREAM_LINE_CHARS
+        bodies = ("token" * 20_000, "a=b " * 25_000, "a-" * 50_000 + ":",
+                  "--password x " * 8_000, 'TOKEN="' + "a b" * 34_000,
+                  "https://" + "a:" * 50_000, "k:" * 50_000, "Bearer " * 15_000,
+                  '"Authorization":"' * 6_000, "Authorization: Digest " + "a=b, " * 20_000,
+                  "Authorization: Digest " + 'a="x b=' * 15_000, "Authorization: " * 7_000,
+                  "Authorization: " + "x " * 50_000, "Authorization:[" * 7_000,
+                  "Authorization: Digest a=b" + " " * 100_000 + "x", "'Authorization: " * 7_000,
+                  "Authorization: Digest " + 'a="x", ' * 15_000,
+                  "Authorization: Digest " + 'a="x" ' * 17_000 + "y", "Authorization: " + "[]" * 50_000,
+                  "'Authorization: Basic ' + '" + "x" * 100_000, "Authorization: x" + ',a="b"' * 17_000,
+                  "Authorization: X " + 'a="b"c' * 17_000, "Bearer " + '"' * 100_000,
+                  "'Authorization: Basic ' + " + "'Basic ' + " * 10_000,
+                  "Authorization: Basic b64pad=\\r\\nX: " * 4_000, "Authorization: Token " + "a=" * 50_000,
+                  "password: " + "a " * 50_000, "\x1b]" * 50_000, "\\" * 100_000)
+        lines = ["Error: " + body for body in bodies] + [
+            '  ⚙ Bash: "' + "x" * 100_000, "  ⚙ Bash: " + "x" * 100_000,
+            "  ⚙ Bash: " + "\\x" * 50_000, "  ⚙ Bash: " + "TOKEN=a " * 12_500 + "x",
+            "  ⚙ Read: " + "/x" * 50_000]
+        for line in lines:
+            assert len(line) >= 100_000
+            start = time.process_time()
+            shown = fullsend_mod._ConsoleFilter().select(line + "\n")
+            assert time.process_time() - start < 1.0, line[:20]
+            assert shown is not None and len(shown) <= max_chars
+            start = time.process_time()
+            fullsend_mod._redact(line, cut=True)  # unclipped: linear too
+            assert time.process_time() - start < 1.0, line[:20]
+        assert fullsend_mod._ConsoleFilter().select("Error: " + "token" * 20_000) == (
+            ("Error: " + "token" * 20_000)[:max_chars - 1] + "…")
+        # The cut command: a quote it lands inside is no program name, a
+        # word it splits is cut again, leading assignments alone are none.
+        select = fullsend_mod._ConsoleFilter()
+        assert select.select('  ⚙ Bash: "' + "x" * 100_000) == "  ⚙ Bash"
+        assert select.select("  ⚙ Bash: " + "x" * 100_000) == (
+            "  ⚙ Bash: " + "x" * (max_chars - len("  ⚙ Bash: ") - 1) + "…")
+        assert select.select("  ⚙ Bash: " + "TOKEN=a " * 12_500 + "x") == "  ⚙ Bash"
+
+    def test_bidi_and_zero_width_characters_stripped(self):
+        # Unicode format characters that reorder or hide text in a log
+        # viewer are dropped from a forwarded line; ordinary non-ASCII text
+        # and the markers' variation selector stay. Fed line by line: the
+        # reader splits the console on newlines only, not on U+2028/9.
+        select = fullsend_mod._ConsoleFilter()
+        lines = ("\u202e  ✓ Reversed\u202c by an override\n",
+                 "  ✓ Isolates \u2066hidden\u2069 and \u2068x\u2069 marks\u200e\u200f\u061c\n",
+                 "  💬 Zero\u200bwidth\u200c join\u200ders\u2060\u2061 and a\ufeffBOM\n",
+                 "  ✓ Line\u2028and paragraph\u2029separators\n",
+                 "  ⚙️ Read: /tmp/Résumé — naïve 日本語.md\n",
+                 # Stripped before the redaction, so a joiner inside a
+                 # credential name does not hide the name from the key rule
+                 # (the price: an emoji ZWJ sequence loses its joiners).
+                 "  💬 Set TO\u200dKEN=abc and pass\u200cword: x y\n")
+        assert [select.select(line) for line in lines] == [
+            "  ✓ Reversed by an override",
+            "  ✓ Isolates hidden and x marks",
+            "  💬 Zerowidth joiners and aBOM",
+            "  ✓ Lineand paragraphseparators",
+            "  ⚙️ Read: /tmp/Résumé — naïve 日本語.md",
+            "  💬 Set TOKEN=*** and password: ***"]
+
+    def test_ansi_stripped_padding_trimmed_blank_dropped(self):
+        text = ("\x1b[32m  ✓\x1b[0m Done   \n"
+                "                                        \n"
+                "  ⏳ Agent running.                         \n")
+        assert self._select(text) == ["  ✓ Done", "  ⏳ Agent running."]
+
+    def test_marker_with_variation_selector(self):
+        assert self._select("  ⚙️ Bash: ls\n  •️ Step\n") == [
+            "  ⚙️ Bash: ls", "  •️ Step"]
+
+    def test_long_lines_clipped(self):
+        line = "  💬 " + "y" * 1000
+        (shown,) = self._select(line + "\n")
+        assert len(shown) == fullsend_mod._MAX_STREAM_LINE_CHARS
+        assert shown.endswith("…")
+        assert shown.startswith("  💬 yyy")
+        exact = "  💬 " + "y" * (fullsend_mod._MAX_STREAM_LINE_CHARS - len("  💬 "))
+        assert len(exact) == fullsend_mod._MAX_STREAM_LINE_CHARS
+        assert self._select(exact + "\n") == [exact]
+
+    def test_unterminated_quoted_credential_redacted_to_the_end(self):
+        # A quoted value with no closing quote on the line (fullsend cut the
+        # command) is redacted to the end of the line: no fragment of it, and
+        # nothing after it, gets through on the strength of a blank. A line
+        # ending in a lone backslash (the cut landed right after one, or a
+        # shell line continuation) is the same case: the backslash is part of
+        # the value, not a reason to fall back to the bare-value rule.
+        text = ('  💬 Ran PASSWORD="first second third\n'
+                "  💬 Ran export API_SECRET='first second --flag\n"
+                'Error: token="abc def rejected\n'
+                '  💬 Ran PASSWORD="abc def\\\n'
+                "  💬 Ran PASSWORD='abc def\\\n")
+        assert self._select(text) == [
+            "  💬 Ran PASSWORD=***", "  💬 Ran export API_SECRET=***",
+            "Error: token=***", "  💬 Ran PASSWORD=***",
+            "  💬 Ran PASSWORD=***"]
+
+    def test_escaped_quotes_inside_a_quoted_credential(self):
+        # An escaped delimiter does not end the value; one that is never
+        # closed still runs to the end of the line.
+        text = ('  💬 Ran TOKEN="a\\"b c" python3 x.py\n'
+                "  💬 Ran PASSWORD='it\\'s' --user me\n"
+                '  💬 Ran PASSWORD="a\\"b --user me\n')
+        assert self._select(text) == [
+            "  💬 Ran TOKEN=*** python3 x.py",
+            "  💬 Ran PASSWORD=*** --user me",
+            "  💬 Ran PASSWORD=***"]
+
+    def test_command_cut_inside_a_quoted_credential(self):
+        # The 120-rune cut as fullsend applies it to a displayed command,
+        # landing inside a quoted value with blanks in it, quoted back by the
+        # assistant: everything from the opening quote on is the value.
+        head = ('python3 scripts/submit.py --dry-run '
+                '--jira-url https://jira.example.test --password="')
+        command = head + " ".join(f"word{i}" for i in range(1, 30)) + '"'
+        cut = command[:120]
+        assert '"' not in cut[len(head):] and " " in cut[len(head):]
+        assert self._select("  💬 I ran " + cut + "\n") == [
+            "  💬 I ran python3 scripts/submit.py --dry-run "
+            "--jira-url https://jira.example.test --password=***"]
+
+    def test_non_secret_assignments_untouched(self):
+        text = ("  💬 Ran STAGE=auto-fix rfe_id=RFE-001 MODE=\"dry run\" "
+                "LABEL='a b' --output=out.md python3 x.py\n"
+                '  💬 Ran MODE="dry run --flag\n'
+                "  ✓ Harness loaded (0.5s)\n"
+                "    Model: claude-opus-4-6 (from --model flag)\n"
+                "  💬 Key findings: the token is missing, so is the secret\n")
+        assert self._select(text) == [
+            "  💬 Ran STAGE=auto-fix rfe_id=RFE-001 MODE=\"dry run\" "
+            "LABEL='a b' --output=out.md python3 x.py",
+            '  💬 Ran MODE="dry run --flag',
+            "  ✓ Harness loaded (0.5s)",
+            "    Model: claude-opus-4-6 (from --model flag)",
+            "  💬 Key findings: the token is missing, so is the secret"]
+
+    def test_control_sequences_stripped(self):
+        # Beyond CSI: OSC strings ended by BEL or ST, DCS/SOS/PM/APC strings,
+        # the single-character and nF escapes, the 8-bit C1 forms, and the
+        # other C0/C1 control characters — the tab stays. A string with no
+        # terminator runs to the end of the line.
+        text = ("\x1b]0;window title\x07  ✓ OSC with BEL\n"
+                "\x1b]8;;https://x.test\x1b\\  ✓ OSC with ST\x1b]8;;\x1b\\\n"
+                "\x1bPq#0;2;0;0;0\x1b\\  ✓ DCS\x9b1m and 8-bit CSI\x9b0m\n"
+                "\x1bXsos\x9c\x1b^pm\x1b\\\x1b_apc\x1b\\  ✓ Strings\n"
+                "\x1b(B\x1b7  ✓ Single-char ESC\x1b8\x1bM\n"
+                "  ✓ C0\x00\x07\x08\x7f and C1\x81\x8d controls,\ttab kept\n"
+                "  ✓ Unterminated \x1b]title runs to the end\n"
+                "  ⚙ Bash: \x1b_unterminated apc hides the command\n")
+        assert self._select(text) == [
+            "  ✓ OSC with BEL", "  ✓ OSC with ST", "  ✓ DCS and 8-bit CSI",
+            "  ✓ Strings", "  ✓ Single-char ESC",
+            "  ✓ C0 and C1 controls,\ttab kept", "  ✓ Unterminated",
+            "  ⚙ Bash"]
+
+
+def _record_captures(monkeypatch):
+    """Record every ``(proc, console)`` the runner builds."""
+    captures = []
+
+    class Recording(fullsend_mod._ConsoleCapture):
+        def __init__(self, proc, log_prefix=None, **kwargs):
+            captures.append((proc, self))
+            super().__init__(proc, log_prefix, **kwargs)
+
+    monkeypatch.setattr(fullsend_mod, "_ConsoleCapture", Recording)
+    return captures
+
+
+def _pipe_holding_fullsend(tmp_path):
+    """A fullsend stand-in whose descendant, in a session of its own, inherits
+    both pipes and outlives the group kill. The leader prints a forwardable
+    step line and ``holder <pid>``, then sleeps; the holder writes a
+    forwardable line once the flag file exists (the test creates it after the
+    run is over) and exits, which is the pipes' EOF. Returns ``(script,
+    flag)``; the script ignores its arguments, so it serves as ``binary``."""
+    flag = tmp_path / "late.flag"
+    holder = tmp_path / "holder.py"
+    holder.write_text(textwrap.dedent(f"""\
+        import os, time
+        deadline = time.monotonic() + 60
+        while not os.path.exists({str(flag)!r}) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        print("  ✓ Late line from the holder", flush=True)
+        """))
+    script = tmp_path / "holding-fullsend"
+    script.write_text(f"#!{sys.executable}\n" + textwrap.dedent(f"""\
+        import subprocess, sys, time
+        held = subprocess.Popen([sys.executable, {str(holder)!r}],
+                                start_new_session=True)
+        print("  ✓ Sandbox created (1.0s)")
+        print("holder", held.pid, flush=True)
+        time.sleep(60)
+        """))
+    script.chmod(0o755)
+    return script, flag
+
+
+def _holder_pid(console_text):
+    """The pid the holder-spawning leader printed; a clear failure when the
+    leader was stopped before it got to print it."""
+    assert "holder " in console_text, (
+        f"the leader did not get to print its holder's pid: {console_text!r}")
+    return int(console_text.split("holder ", 1)[1].split()[0])
+
+
+def _kill_quietly(pid):
+    try:
+        os.kill(pid, 9)
+    except OSError:
+        pass
+
+
+class TestFullsendConsoleStreaming:
+    def _console_files(self, tmp_path, monkeypatch, out=STREAMED_CONSOLE,
+                       err=CONSOLE_ERR):
+        out_file = tmp_path / "console-out.txt"
+        out_file.write_text(out)
+        monkeypatch.setenv("FAKE_FULLSEND_CONSOLE", str(out_file))
+        err_file = tmp_path / "console-err.txt"
+        err_file.write_text(err)
+        monkeypatch.setenv("FAKE_FULLSEND_CONSOLE_ERR", str(err_file))
+
+    def test_lines_forwarded_under_the_prefix_in_order(
+            self, tmp_path, fake_fullsend, monkeypatch, capsys):
+        self._console_files(tmp_path, monkeypatch)
+        ws = _workspace(tmp_path)
+        result = _runner(tmp_path, log_prefix="eval").execute(
+            target="s", args="", workspace=ws, model="m", timeout_s=60)
+        assert result.exit_code == 0
+        streamed = _streamed(capsys)
+        # The launch lines frame the stream, as they did before.
+        assert streamed[0].startswith("Running: ")
+        assert streamed[-1].startswith("OK (")
+        # fullsend's stderr is forwarded too; it is read by its own thread,
+        # so where its lines land among the stdout lines is not fixed.
+        for line in CONSOLE_ERR_FORWARDED:
+            assert streamed.count(line) == 1, line
+        assert "Cloning into '.context/architecture-context'..." not in streamed
+        # fullsend's stdout, forwarded in the order it was printed.
+        from_stdout = [s for s in streamed if s not in CONSOLE_ERR_FORWARDED]
+        first = from_stdout.index(STREAMED_FORWARDED[0])
+        assert from_stdout[first:first + len(STREAMED_FORWARDED)] == STREAMED_FORWARDED
+
+    def test_dropped_lines_not_forwarded(
+            self, tmp_path, fake_fullsend, monkeypatch, capsys):
+        self._console_files(tmp_path, monkeypatch)
+        ws = _workspace(tmp_path)
+        _runner(tmp_path, log_prefix="eval").execute(
+            target="s", args="", workspace=ws, model="m", timeout_s=60)
+        out = capsys.readouterr().out
+        for dropped in STREAMED_DROPPED:
+            assert dropped not in out, dropped
+        assert all(len(line) <= len("  eval | ") + fullsend_mod._MAX_STREAM_LINE_CHARS
+                   for line in out.splitlines())
+
+    def test_full_console_still_captured(
+            self, tmp_path, fake_fullsend, monkeypatch, capsys):
+        self._console_files(tmp_path, monkeypatch)
+        ws = _workspace(tmp_path)
+        result = _runner(tmp_path, log_prefix="eval").execute(
+            target="s", args="", workspace=ws, model="m", timeout_s=60)
+        # Byte for byte what the fake wrote: stdout, then stderr, nothing
+        # filtered, nothing clipped — the provenance parse and stderr.log
+        # read this text.
+        expected_out = ("-> Running agent: rfe-creator-eval\n"
+                        "    Image: ghcr.io/fullsend-ai/sandbox@sha256:" + "a" * 64 + "\n"
+                        "  Arch: arm64\n" + STREAMED_CONSOLE)
+        expected_err = "fullsend console stderr\n" + CONSOLE_ERR
+        assert result.stderr == expected_out + "\n" + expected_err
+        prov = _runner(tmp_path).provenance([result.stderr])
+        assert prov["sandbox_image"] == "ghcr.io/fullsend-ai/sandbox@sha256:" + "a" * 64
+
+    def test_no_streaming_without_log_prefix(
+            self, tmp_path, fake_fullsend, monkeypatch, capsys):
+        self._console_files(tmp_path, monkeypatch)
+        ws = _workspace(tmp_path)
+        result = _runner(tmp_path).execute(
+            target="s", args="", workspace=ws, model="m", timeout_s=60)
+        assert result.exit_code == 0
+        assert STREAMED_CONSOLE in result.stderr
+        assert capsys.readouterr().out == ""
+
+    def test_timeout_streams_then_terminates(
+            self, tmp_path, fake_fullsend, monkeypatch, capsys):
+        self._console_files(tmp_path, monkeypatch)
+        monkeypatch.setenv("FAKE_FULLSEND_SLEEP", "30")
+        ws = _workspace(tmp_path)
+        result = _runner(tmp_path, term_grace_s=2, log_prefix="eval").execute(
+            target="s", args="", workspace=ws, model="m", timeout_s=1)
+        assert result.exit_code == -1
+        assert result.stderr.startswith("Timed out after 1s\n")
+        # The console emitted before the kill is kept, stdout then stderr.
+        assert STREAMED_CONSOLE in result.stderr
+        assert CONSOLE_ERR in result.stderr
+        assert result.stderr.index(STREAMED_CONSOLE) < result.stderr.index(CONSOLE_ERR)
+        assert result.duration_s < 20
+        streamed = _streamed(capsys)
+        assert "  ✓ Sandbox created (17.6s)" in streamed
+        assert streamed[-1].startswith("FAIL (exit -1)")
+
+    def test_both_pipes_drained_past_the_pipe_buffer(
+            self, tmp_path, fake_fullsend, monkeypatch, capsys):
+        # Far more than a pipe buffer (64 KiB) on each pipe at once: a reader
+        # that served one pipe at a time would deadlock the fake on the other.
+        out = "".join(f"stdout line {i} " + "o" * 80 + "\n" for i in range(20_000))
+        err = "".join(f"stderr line {i} " + "e" * 80 + "\n" for i in range(20_000))
+        self._console_files(tmp_path, monkeypatch, out=out, err=err)
+        ws = _workspace(tmp_path)
+        result = _runner(tmp_path, log_prefix="eval").execute(
+            target="s", args="", workspace=ws, model="m", timeout_s=60)
+        assert result.exit_code == 0
+        assert out in result.stderr
+        assert err in result.stderr
+        assert len(result.stderr) > 2 * len(out)
+        # None of it is worth forwarding.
+        streamed = _streamed(capsys)
+        assert not any("line" in s for s in streamed)
+
+    # A child in place of fullsend: a forwarded first line on each pipe, then
+    # far more than a pipe buffer (64 KiB) of unforwarded text on stdout.
+    _CHATTY_CHILD = textwrap.dedent("""\
+        import sys
+        sys.stdout.write("  ✓ Sandbox created (1.0s)\\n"); sys.stdout.flush()
+        sys.stderr.write("  ✗ Sandbox teardown failed\\n"); sys.stderr.flush()
+        for i in range(20000):
+            sys.stdout.write("x" * 80 + "\\n")
+        sys.stdout.write("  ✓ Done\\n")
+        """)
+    _CHATTY_STDOUT_CHARS = len("  ✓ Sandbox created (1.0s)\n") + 20000 * 81 + len("  ✓ Done\n")
+
+    @pytest.mark.parametrize("harness_stdout", ["ascii", "broken"])
+    def test_forwarding_failure_keeps_draining(self, tmp_path, monkeypatch,
+                                               harness_stdout):
+        # The harness's own stdout cannot take the forwarded line (it cannot
+        # encode the marker, or the pipe behind it is gone): forwarding stops
+        # at the first failure and the reader keeps draining fullsend's pipe,
+        # which would otherwise fill and stall the run until the timeout.
+        writes = []
+        if harness_stdout == "ascii":
+            sink = io.TextIOWrapper(io.BytesIO(), encoding="ascii", errors="strict")
+        else:
+            class Broken(io.TextIOBase):
+                def write(self, text):
+                    writes.append(text)
+                    raise BrokenPipeError(32, "Broken pipe")
+            sink = Broken()
+        monkeypatch.setattr(sys, "stdout", sink)
+        runner = _runner(tmp_path, log_prefix="eval", term_grace_s=1)
+        rc, out, err, duration = runner._run(
+            [sys.executable, "-c", self._CHATTY_CHILD], tmp_path,
+            dict(os.environ), timeout_s=15)
+        assert rc == 0
+        assert duration < 10
+        assert len(out) == self._CHATTY_STDOUT_CHARS
+        assert out.endswith("  ✓ Done\n")
+        assert err == "  ✗ Sandbox teardown failed\n"
+        if harness_stdout == "ascii":
+            assert sink.buffer.getvalue() == b""
+        else:
+            # One attempt per pipe at most, none for the later ✓ Done line.
+            assert 1 <= len(writes) <= 2
+            assert not any("Done" in w for w in writes)
+
+    def test_timeout_notes_pipes_held_past_the_group_kill(
+            self, tmp_path, monkeypatch, capsys):
+        # A descendant outside fullsend's process group (its own session)
+        # inherits the pipes and outlives the group kill: the drain is
+        # bounded and the case's stderr says the console may be cut short.
+        monkeypatch.setattr(fullsend_mod, "_PIPE_DRAIN_S", 1.0)
+        child = textwrap.dedent("""\
+            import subprocess, sys, time
+            held = subprocess.Popen(
+                [sys.executable, "-c", "import time; time.sleep(60)"],
+                start_new_session=True)
+            print("  ✓ Sandbox created (1.0s)")
+            print("holder", held.pid, flush=True)
+            time.sleep(60)
+            """)
+        runner = _runner(tmp_path, log_prefix="eval", term_grace_s=1)
+        rc, out, err, duration = runner._run(
+            [sys.executable, "-c", child], tmp_path, dict(os.environ), timeout_s=3)
+        holder = _holder_pid(err)
+        try:
+            assert rc == -1
+            assert err.startswith("Timed out after 3s\n")
+            assert "  ✓ Sandbox created (1.0s)\n" in err
+            assert err.endswith("Console pipes still open after the group kill")
+            assert "Process group termination hung" not in err  # the leader exited
+            assert duration < 10
+            assert "  ✓ Sandbox created (1.0s)" in _streamed(capsys)
+        finally:
+            _kill_quietly(holder)
+
+    @pytest.mark.parametrize("ending", ["exit", "timeout"])
+    def test_pipes_closed_once_drained(self, tmp_path, fake_fullsend, monkeypatch,
+                                       capsys, ending):
+        # communicate() closed the pipes; the readers do now (no unclosed-file
+        # ResourceWarning when the Popen is collected).
+        procs = []
+
+        class Recording(fullsend_mod._ConsoleCapture):
+            def __init__(self, proc, log_prefix=None, **kwargs):
+                procs.append(proc)
+                super().__init__(proc, log_prefix, **kwargs)
+
+        monkeypatch.setattr(fullsend_mod, "_ConsoleCapture", Recording)
+        self._console_files(tmp_path, monkeypatch)
+        timeout_s = 60
+        if ending == "timeout":
+            monkeypatch.setenv("FAKE_FULLSEND_SLEEP", "30")
+            timeout_s = 1
+        ws = _workspace(tmp_path)
+        result = _runner(tmp_path, term_grace_s=2, log_prefix="eval").execute(
+            target="s", args="", workspace=ws, model="m", timeout_s=timeout_s)
+        assert result.exit_code == (0 if ending == "exit" else -1)
+        (proc,) = procs
+        assert proc.stdout.closed and proc.stderr.closed
+
+    def test_control_sequences_stripped_on_both_pipes(
+            self, tmp_path, fake_fullsend, monkeypatch, capsys):
+        # Terminal control in the console (a title, a hyperlink, a DCS string,
+        # colours, stray C0/C1 characters) is dropped from the forwarded lines
+        # of either pipe; the capture keeps the console as it was written.
+        out = ("\x1b]0;fullsend\x07  ✓ Sandbox created (1.0s)\x1b[0m\n"
+               "  ⚙ Bash: \x1bPq#0\x1b\\ls\x08\x08\x00 -la\x9b31m\x85\n")
+        err = ("\x1b]8;;https://example.test/run\x1b\\  ✗ Sandbox teardown failed"
+               "\x1b]8;;\x1b\\\n"
+               "\x1b_apc\x1b\\Error: \x07bell\tkept\n")
+        self._console_files(tmp_path, monkeypatch, out=out, err=err)
+        ws = _workspace(tmp_path)
+        result = _runner(tmp_path, log_prefix="eval").execute(
+            target="s", args="", workspace=ws, model="m", timeout_s=60)
+        assert result.exit_code == 0
+        printed = capsys.readouterr().out
+        assert not any(ch in printed for ch in "\x1b\x07\x08\x00\x9b\x85")
+        lead = "  eval | "
+        streamed = [line[len(lead):] for line in printed.splitlines()
+                    if line.startswith(lead)]
+        for line in ("  ✓ Sandbox created (1.0s)", "  ⚙ Bash: ls",
+                     "  ✗ Sandbox teardown failed", "Error: bell\tkept"):
+            assert streamed.count(line) == 1, line
+        assert out in result.stderr and err in result.stderr
+
+    def test_bidi_and_zero_width_characters_stripped_on_both_pipes(
+            self, tmp_path, fake_fullsend, monkeypatch, capsys):
+        # Bidi controls, zero-width characters, the BOM and the line and
+        # paragraph separators are dropped from the forwarded lines of either
+        # pipe; ordinary non-ASCII text stays; the capture keeps the console
+        # as it was written.
+        out = ("\u202e  ✓ Sandbox created (1.0s)\u202c\n"
+               "  ⚙ Read: /tmp/a\u200bb.md\u2066\n")
+        err = ("  ✗ Sandbox\u2029teardown failed\u2069\n"
+               "\ufeffError: naïve 日本語 kept\n")
+        self._console_files(tmp_path, monkeypatch, out=out, err=err)
+        ws = _workspace(tmp_path)
+        result = _runner(tmp_path, log_prefix="eval").execute(
+            target="s", args="", workspace=ws, model="m", timeout_s=60)
+        assert result.exit_code == 0
+        printed = capsys.readouterr().out
+        assert not any(ch in printed for ch in "\u202e\u202c\u200b\u2066\u2029\u2069\ufeff")
+        lead = "  eval | "
+        streamed = [line[len(lead):] for line in printed.splitlines()
+                    if line.startswith(lead)]
+        for line in ("  ✓ Sandbox created (1.0s)", "  ⚙ Read: /tmp/ab.md",
+                     "  ✗ Sandboxteardown failed", "Error: naïve 日本語 kept"):
+            assert streamed.count(line) == 1, line
+        assert out in result.stderr and err in result.stderr
+
+    def test_environment_credential_values_masked_on_both_pipes(
+            self, tmp_path, fake_fullsend, monkeypatch, capsys):
+        # The values of the credential-named variables fullsend runs with —
+        # the process environment, execution.env, runner.env — are masked in
+        # the forwarded lines of either pipe, a short one or a non-credential
+        # variable's is not; the capture keeps them all.
+        monkeypatch.setenv("JIRA_TOKEN", "s3cr3t-from-env")
+        monkeypatch.setenv("JIRA_USER", "someone@example.test")
+        monkeypatch.setenv("SHORT_KEY", "short")
+        out = ("  ✓ Logged in with s3cr3t-from-env as someone@example.test\n"
+               "  ⚙ Bash: curl -u someone@example.test:s3cr3t-from-env https://jira.example.test\n"
+               "  💬 runner-env-secret-1 and exec-env-secret-2 and short\n")
+        err = "Error: exec-env-secret-2 rejected for s3cr3t-from-env\n"
+        self._console_files(tmp_path, monkeypatch, out=out, err=err)
+        ws = _workspace(tmp_path)
+        result = _runner(tmp_path, log_prefix="eval",
+                         runner_env={"MY_API_KEY": "runner-env-secret-1"},
+                         execution_env={"EXEC_PASSWORD": "exec-env-secret-2"}).execute(
+            target="s", args="", workspace=ws, model="m", timeout_s=60)
+        assert result.exit_code == 0
+        printed = capsys.readouterr().out
+        for secret in ("s3cr3t-from-env", "runner-env-secret-1", "exec-env-secret-2"):
+            assert secret not in printed, secret
+            assert secret in result.stderr, secret
+        lead = "  eval | "
+        streamed = [line[len(lead):] for line in printed.splitlines()
+                    if line.startswith(lead)]
+        for line in ("  ✓ Logged in with *** as someone@example.test",
+                     "  ⚙ Bash: curl",
+                     "  💬 *** and *** and short",
+                     "Error: *** rejected for ***"):
+            assert streamed.count(line) == 1, line
+
+    def test_late_write_after_the_bounded_drain_not_forwarded(
+            self, tmp_path, monkeypatch, capsys):
+        # The descendant outside the group writes under this case's prefix
+        # only after the run returned with the drain incomplete: its line is
+        # neither forwarded (it would land after the FAIL line, or among a
+        # later case's lines) nor kept, and its pipe is closed at EOF.
+        monkeypatch.setattr(fullsend_mod, "_PIPE_DRAIN_S", 1.0)
+        captures = _record_captures(monkeypatch)
+        script, flag = _pipe_holding_fullsend(tmp_path)
+        ws = _workspace(tmp_path)
+        result = _runner(tmp_path, binary=str(script), term_grace_s=1,
+                         log_prefix="eval").execute(
+            target="s", args="", workspace=ws, model="m", timeout_s=3)
+        holder = _holder_pid(result.stderr)
+        try:
+            assert result.exit_code == -1
+            assert result.stderr.endswith("Console pipes still open after the group kill")
+            assert result.duration_s < 10
+            streamed = _streamed(capsys)
+            assert "  ✓ Sandbox created (1.0s)" in streamed
+            assert streamed[-1].startswith("FAIL (exit -1)")
+            ((proc, console),) = captures
+            assert not proc.stdout.closed  # the holder has it: its reader is up
+            flag.write_text("")
+            assert console.join(10)  # the holder wrote its line and exited: EOF
+            assert proc.stdout.closed and proc.stderr.closed
+            assert "Late line" not in capsys.readouterr().out
+            assert "Late line" not in console.stdout
+        finally:
+            _kill_quietly(holder)

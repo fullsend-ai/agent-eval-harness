@@ -403,6 +403,104 @@ runner:
   extra_args: [--keep-sandbox]
 ```
 
+#### Live progress
+
+While the harness logs progress (the `  eval | ` lines of a batch run, `  eval:<case> | `
+per case) the runner streams a filtered subset of fullsend's console as it runs, under
+that prefix, between its `Running: …` and `OK`/`FAIL` lines: the section and step lines
+(`→`, `•`, `✓`, `✗`, `!`) with the detail lines indented under them (the plan block
+after `Harness loaded`, the `→ Results` block), the agent activity lines (`💬` text,
+`⚙` tool call, `⏳` heartbeat), plain `Error`/`Warning`/`fatal` lines and Claude Code's
+`Ignoring N permissions.allow entries …` line (the one behind permission denials in a
+sandbox that has not trusted the workspace). A `⚙` line is forwarded without its raw
+argument: a file tool (`Read`, `Write`, `Edit`, `MultiEdit`, `Glob`, `Grep`,
+`NotebookEdit`, `LS`) keeps its path or pattern (`⚙ Read: /sandbox/workspace/batch.yaml`),
+`Bash` shows the program name alone — the first shell word after any leading `NAME=value`
+assignments (`⚙ Bash: python3`, `⚙ Bash: curl`), read from the first 200 characters of
+the command, or nothing when that word is not a plain program name or a cut of the
+command (fullsend's at 120 characters, the runner's at 200) landed inside a quote — and
+every other tool (`Agent`, `Task`, `Skill`, `WebFetch`, `WebSearch`, an MCP tool,
+an unknown name) shows its name alone, its argument being a command or a free-text
+prompt that can carry anything. The per-finding `! Sanitized […]` lines, the assistant's
+thinking (`🧠`, which the `claude-code` runner does not stream either) and multi-line
+text, and the pre/post-script output are not forwarded. A two-case run forwards about
+360 lines (30 KB), so a long batch stays well inside a CI job log's output limit. There
+is no knob: streaming follows the harness's progress logging, as it does for the
+`claude-code` runner.
+
+Every forwarded line is redacted before it is printed, in this order. Terminal control
+sequences (colours and cursor movement, OSC titles and hyperlinks, DCS/SOS/PM/APC
+strings, single-character escapes), the other control characters except the tab, and
+the Unicode bidi controls, line and paragraph separators and zero-width characters
+(U+061C, U+200B–U+200F, U+2028–U+202E, U+2060–U+2064, U+2066–U+2069, U+FEFF) are
+stripped, so a console line can neither drive the terminal showing the log nor reorder
+or hide text in a log viewer; ordinary non-ASCII text stays. The zero-width joiners are
+stripped with the rest — an emoji sequence or a joined script loses them — because the
+strip runs before the redaction and a joiner inside a credential name (`TO‍KEN=`) would
+otherwise hide the name from it. The values of the credential-named variables of the
+environment fullsend runs with — the process environment with `execution.env`,
+`runner.env` and a hook's variables over it; a name that has `token`, `secret`,
+`password`/`passwd`, `passphrase`, `api_key`, `access_key`, `private_key` or `signature`
+as a word of its own or `credential` anywhere, or that ends in `key`, `token`, `secret`,
+`password` or `passphrase` (`JIRA_TOKEN`, `ANTHROPIC_API_KEY`, `AWS_ACCESS_KEY_ID`), and
+for a variable also `auth`/`oauth` as a word of its own (`DOCKER_AUTH_CONFIG`, whose
+`auth` field none of the other words catch; masking can only hide, so the wider rule
+costs nothing); a value of eight characters or more, each line of a multi-line one — are
+masked wherever they appear, longest first; they are read once per run, kept on the
+console reader and never logged. The line is then cut at 200 characters and, cut,
+redacted by pattern — in that order, so the redaction's cost is bounded by the cut (as
+the shell scan behind a `Bash` program name is), and the cut cannot expose anything: a
+bare value cut short is still the rest of its word, a quoted one runs to the end of the
+line, a URL userinfo cut before its `@` is taken for one. The patterns, each found with
+one forward scan of the line: `KEY=value` whose key names a credential by the rule above
+(`JIRA_TOKEN=***`, `--api-key=***`, `AWS_ACCESS_KEY_ID=***`, `X-Amz-Signature=***`), the
+value being one shell word — quoted parts, backslash-escaped blanks and concatenations
+included (`TOKEN=ab"c d"`, `TOKEN=abc\ def`), an unterminated quote through the end of
+the line, an assignment opened inside a quoted word (`"api_key=ab cd"`) through that
+word; a `--flag value` or `-flag value` whose flag names a credential (`--password ***`,
+`--token ***`, `--passphrase ***`; `-p` is not one); a `key: value` field or header and
+a `"key": value` JSON field whose key names a credential (`password: ***`,
+`X-Api-Key: ***`, `"token": ***`, a bytes key `b'password': ***` too; fullsend's `Tokens:`
+usage line is not one), a
+quoted value through its closing quote and a bare one through the next `,` `;` `}` `]`
+or the end of the line, blanks included (`password: correct horse battery staple` is
+hidden whole, and so is the rest of a line that merely reads `token: …`);
+an `Authorization` value (`Proxy-Authorization` too), the header name bare (after a dot,
+a dash or the escaped line break of a logged raw request too), quoted as a JSON or dict
+key, or opening a quoted word, and followed by `:`, `=` or `=>`: a quoted
+value, or the value of a header that opened a quoted word, is hidden through the closing
+quote, its scheme kept when known (`"Authorization":"Basic ***"`,
+`-H 'Authorization: Digest ***'`, a compact JSON `{"Authorization":"Bearer x","password":"…"}`
+keeping its fields apart), and a string holding the scheme alone hides the operand
+concatenated after it, glued or after a `+`, a `$(…)` substitution included
+(`-H 'Authorization: Basic '***`, `'Authorization: ' + 'Basic ' + ***`); a bare value is
+hidden as one word
+after `Bearer`, `Basic`, `token`, `Negotiate` or `NTLM` (`Authorization: Bearer ***`, the
+word ending at a blank, a quote or a delimiter; a `name=value` list there, Rails'
+`Token token="…"`, as one), as its `name=value` list after `Digest`,
+`OAuth`, `AWS4-HMAC-SHA256`, `Hawk` or `SCRAM` (`Authorization: Digest ***`, a list that does
+not parse hidden whole), inside its brackets when it opens some (Go's
+`map[Authorization:[***]]`, a JSON list `"Authorization":[***]`), and whole, through the
+next delimiter or a quote glued to a word, otherwise (`Authorization: ***`: a scheme the
+rule does not know may carry a multi-word credential); a bare `Bearer <x>` anywhere counts
+too; and a URL's
+userinfo, whole (`https://***@host`: a username is a token as often as not, as in
+`https://<token>:x-oauth-basic@github.com`). The key rule errs on the safe side: `--sort-key x` and
+`signature: f(a, b)` are redacted too, and a prose `authorization:` loses the rest of its
+clause — false positives that hide a progress detail where a miss would show a credential. The full console (stdout,
+then stderr) is still the case's `stderr.log`, unfiltered, unredacted and with its
+control sequences, and the sandbox image is still read from it.
+
+fullsend writes some `💬` lines without a trailing newline, so they reach the log only
+when its next write ends the line — usually the `⏳` heartbeat, up to 30 seconds later,
+glued onto the same line (`💬 … ⏳ Agent running (…)`). That delay is not a stall. A
+timed-out run whose console pipes are still held open five seconds after the group kill
+(a descendant outside fullsend's process group) ends its `stderr.log` with
+`Console pipes still open after the group kill`: the console may be cut short, and
+nothing that descendant writes later is forwarded or kept — the case's `FAIL` line is
+its last, and a later case's lines are its own. An interrupted run (Ctrl-C) stops the
+group and gives its pipes the same five-second drain before the interrupt propagates.
+
 #### Run provenance
 
 A fullsend run records what executed it, so results stay comparable across runs.

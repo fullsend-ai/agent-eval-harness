@@ -467,7 +467,12 @@ Per case (or once per batch) the runner:
    `cache_create`) from `metrics.json`, with `tool_calls`, `iterations` and the count
    of `security/` files in `raw_output`. `stdout` is the concatenation of every
    iteration's `output.jsonl` (Claude Code stream-json), so events, MLflow traces and
-   reasoning judges work unchanged. fullsend's own console output goes to `stderr`.
+   reasoning judges work unchanged. fullsend's own console output goes to `stderr`,
+   read from both pipes as fullsend writes them; while the harness logs progress, its
+   steps, agent activity (a tool call by name — a file tool's path, a `Bash` program
+   name, never a raw command or prompt) and results are also streamed live under the
+   `eval |` prefix, credentials redacted (see
+   [live progress](../reference/config/runner.md#live-progress)).
    Per-model usage, turns and message ids come from those streams plus every
    iteration's subagent transcripts (`transcripts/*-agent-*.jsonl`), which are copied
    into `<workspace>/subagents/` (a name already taken by an earlier iteration gets an
