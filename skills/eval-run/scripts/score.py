@@ -51,7 +51,9 @@ from agent_eval.prompt_backends import (
     split_model_uri,
 )
 from agent_eval.providers import JudgeProviderError
-from agent_eval.providers.openrouter.errors import is_structured_output_400, is_tool_choice_400
+from agent_eval.providers.openrouter.errors import (STRUCTURED_OUTPUT_400_MARKERS,
+                                                    is_structured_output_400,
+                                                    is_tool_choice_400)
 from agent_eval.providers.openrouter.routing import routing_sha
 
 # Log (don't silently blank) any undefined variable a judge template references.
@@ -1974,11 +1976,41 @@ def _note_verdict_stepdown(backend, model, exc, *, route=""):
         first = key not in _VERDICT_STEPDOWNS
         _VERDICT_STEPDOWNS.add(key)
     if first:
-        where = f" (routing {route})" if route else ""
-        reason = " ".join(_http_error_text(exc).split())[:300]
-        print(f"  WARNING: {backend} rejected structured outputs for {model}{where}; "
-              f"judges fall back to the forced tool call for the rest of the run: "
-              f"{reason}", file=sys.stderr, flush=True)
+        where = f" (routing {_escape_staging_text(route)})" if route else ""
+        print(f"  WARNING: {_escape_staging_text(backend)} rejected structured outputs for "
+              f"{_escape_staging_text(model)}{where}; judges fall back to the forced tool "
+              f"call for the rest of the run ({_stepdown_diagnostic(exc)})",
+              file=sys.stderr, flush=True)
+
+
+def _stepdown_diagnostic(exc):
+    """What the step-down warning says about the refusal: an allowlist, never
+    the provider's text. A 400 body can echo the request, and OpenRouter
+    relays the upstream body verbatim, so the line carries only the HTTP
+    status, the structured-output parameter the refusal named (one of
+    `STRUCTURED_OUTPUT_400_MARKERS`, or the routing 404), and the request id
+    when the SDK kept one. The full text stays available to a debugger on the
+    exception itself."""
+    parts = []
+    status = getattr(exc, "status_code", None)
+    if status is not None:
+        parts.append(f"HTTP {_escape_staging_text(status)}")
+    text = _http_error_text(exc)
+    marker = next((m for m in STRUCTURED_OUTPUT_400_MARKERS if m in text), None)
+    if marker:
+        parts.append(f"{marker} rejected")
+    elif "no endpoints found" in text:
+        parts.append("no endpoint serves the request")
+    request_id = getattr(exc, "request_id", None)
+    if not request_id:
+        headers = getattr(getattr(exc, "response", None), "headers", None) or {}
+        try:
+            request_id = headers.get("request-id") or headers.get("x-request-id")
+        except AttributeError:
+            request_id = None
+    if request_id:
+        parts.append(f"request id {_escape_staging_text(str(request_id)[:80])}")
+    return ", ".join(parts) or "provider refusal"
 
 
 def _verdict_transport_counts():

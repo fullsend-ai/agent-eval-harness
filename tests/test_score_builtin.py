@@ -2631,6 +2631,26 @@ class TestVerdictTransportAnthropic:
         assert errors == []
         assert results == [(True, "r")] * n
 
+    def test_the_stepdown_warning_prints_an_allowlisted_diagnostic(self, capsys):
+        """The provider's error text is never echoed: a 400 body can carry the
+        request (headers, URLs with userinfo) and control sequences; the line
+        names the status, the refused parameter and the request id only."""
+        import score
+        exc = _HttpError(400, 'Provider returned error', body={
+            "message": "Provider returned error", "code": 400,
+            "metadata": {"raw": "output_config is not supported; "
+                                "request: Authorization: Bearer sk-live-secret-0123456789 "
+                                "https://user:hunter2@gateway.example/v1 \x1b]0;owned\x07"}})
+        exc.response.headers["request-id"] = "req_01HXYZ\x1b[31m"
+        score._note_verdict_stepdown("anthropic", "claude-opus-4-6\x1b[0m", exc)
+        err = capsys.readouterr().err
+        assert err.count("WARNING: anthropic rejected structured outputs") == 1
+        assert "HTTP 400" in err and "output_config rejected" in err
+        assert "request id req_01HXYZ" in err
+        for leaked in ("sk-live-secret", "hunter2", "gateway.example", "Bearer", "owned"):
+            assert leaked not in err, leaked
+        assert "\x1b" not in err and "\x07" not in err  # controls are escaped, not printed
+
     def test_a_refusal_overrides_an_already_learnt_json_schema_rung(self, capsys):
         import score
         key = ("anthropic", "claude-opus-4-6", "")
