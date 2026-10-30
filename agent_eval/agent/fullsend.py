@@ -37,11 +37,12 @@ and zero-width characters stripped, the values of the credential-named
 variables of fullsend's environment masked, and is cut at
 :data:`_MAX_STREAM_LINE_CHARS` before the pattern redaction — ``KEY=value``,
 ``--flag value`` and ``key: value`` whose key names a credential, the value
-of an ``Authorization`` header and URL userinfo, shown as ``***`` — so a
-line's cost is bounded by the cut and nothing of a credential gets through
-it. The per-finding ``! Sanitized […]`` lines, the assistant's thinking
-(``🧠``) and multi-line text and the pre/post-script output are not
-forwarded; the captured console keeps all of it, unstripped and unredacted.
+of an ``Authorization`` header and URL userinfo, shown as ``***`` — and a
+``Bash`` program name is read from the cut command, so a line's cost is
+bounded by the cut and nothing of a credential gets through it. The
+per-finding ``! Sanitized […]`` lines, the assistant's thinking (``🧠``) and
+multi-line text and the pre/post-script output are not forwarded; the
+captured console keeps all of it, unstripped and unredacted.
 Forwarding ends with the case: a
 pipe a descendant outside fullsend's process group still holds after the
 bounded drain that follows a timeout or an interrupt is emptied on, but
@@ -138,15 +139,19 @@ _ALERT_LINE_RE = re.compile(
 # A key — of a KEY=value, a --flag value, a key: value field, an environment
 # variable — names a credential when a credential word stands on its own in
 # it, set off by the start, the end or a non-letter (JIRA_TOKEN, api-key,
-# apiKey, AWS_ACCESS_KEY_ID, X-Api-Key, TOKEN_FILE), when it ends in key,
-# token, secret or password (MYSECRET, --sort-key: a false positive hides a
-# progress detail, a miss shows a credential), or when it contains
-# "credential". fullsend's ``Tokens:`` usage line is none of these. Matched
-# against the lowercased name.
+# apiKey, AWS_ACCESS_KEY_ID, X-Api-Key, TOKEN_FILE, X-Amz-Signature), when
+# it ends in key, token, secret, password or passphrase (MYSECRET,
+# --sort-key: a false positive hides a progress detail, a miss shows a
+# credential), or when it contains "credential". fullsend's ``Tokens:``
+# usage line is none of these. Matched against the lowercased name.
 _SECRET_KEY_RE = re.compile(
-    r"(?:^|[^a-z])(?:token|secret|passw(?:or)?d|api[_-]?key|private[_-]?key"
-    r"|access[_-]?key)(?:$|[^a-z])"
-    r"|credential|(?:token|secret|passw(?:or)?d|key)$")
+    r"(?:^|[^a-z])(?:token|secret|passw(?:or)?d|passphrase|api[_-]?key"
+    r"|private[_-]?key|access[_-]?key|signature)(?:$|[^a-z])"
+    r"|credential|(?:token|secret|passw(?:or)?d|passphrase|key)$")
+# An environment variable is credential-named by the word "auth" or "oauth"
+# as well (DOCKER_AUTH_CONFIG, GITHUB_OAUTH): a wider rule than the line
+# redaction's, as masking a value can only hide text, never show any.
+_ENV_AUTH_NAME_RE = re.compile(r"(?:^|[^a-z])o?auth(?:$|[^a-z])")
 # Shortest value of a credential-named environment variable that is masked
 # wherever it appears in a forwarded line (_secret_values).
 _MIN_MASKED_VALUE_CHARS = 8
@@ -173,17 +178,24 @@ _QUOTED_TAIL_RE = {
     '"': re.compile(r'(?:[^"\\]|\\.?)*(?:"|$)'),
     "'": re.compile(r"(?:[^'\\]|\\.?)*(?:'|$)"),
 }
-# A field's value: a quoted string, or a bare scalar up to a blank or a
-# JSON/YAML delimiter.
+# A field's value: a quoted string, or a bare scalar up to a JSON/YAML
+# delimiter (``,`` ``;`` ``}`` ``]``) or the end of the line, blanks
+# included — a multi-word password in prose (``password: correct horse
+# battery staple``) is hidden whole, at the price of the rest of a line that
+# merely reads ``token: …`` (the safe side).
 _FIELD_VALUE_RE = re.compile(
-    r"""(?:"(?:[^"\\]|\\.?)*(?:"|$)|'(?:[^'\\]|\\.?)*(?:'|$)|[^\s,;}\]]+)""")
-# ``Authorization: Bearer|Basic|token <x>`` and a bare ``Bearer <x>``; the
-# userinfo of a URL, ``user:pass@`` shown as ``user:***@`` and a bare
-# ``token@`` as ``***@``. The cut form takes the end of a clipped line for
-# the ``@`` a userinfo cut before its host no longer has.
+    r"""(?:"(?:[^"\\]|\\.?)*(?:"|$)|'(?:[^'\\]|\\.?)*(?:'|$)|[^,;}\]]+)""")
+# ``Authorization: Bearer|Basic|token <x>`` and a bare ``Bearer <x>``, the
+# value a quoted string or a bare word ending at a blank or a quote — in
+# compact JSON (``{"Authorization":"Bearer t1","password":"a b"}``) it ends
+# with its own string rather than running into the next field, whose value
+# past the first blank would then stand outside any key; the userinfo of a
+# URL, ``user:pass@`` shown as ``user:***@`` and a bare ``token@`` as
+# ``***@``. The cut form takes the end of a clipped line for the ``@`` a
+# userinfo cut before its host no longer has.
 _BEARER_RE = re.compile(
     r"(?i)\b((?:authorization:\s*(?:bearer|basic|token)|bearer)\s+)"
-    r"""(?:"[^"]*(?:"|$)|'[^']*(?:'|$)|\S+)""")
+    r"""(?:"[^"]*(?:"|$)|'[^']*(?:'|$)|[^\s"']+)""")
 _URL_USERINFO_RE = re.compile(
     r"(?i)(?<![a-z0-9+.-])([a-z][a-z0-9+.-]*://)([^\s/@]+)(@)")
 _URL_USERINFO_CUT_RE = re.compile(
@@ -828,7 +840,8 @@ def _present(text: str, secrets=()) -> str:
     credential-named environment variables, longest first) are masked
     wherever they appear; the line is cut at :data:`_MAX_STREAM_LINE_CHARS`
     and then, cut, redacted (:func:`_redact`) — in that order, so the
-    redaction's cost is bounded by the cut. The cut cannot expose anything:
+    redaction's cost is bounded by the cut, as a ``Bash`` program name read
+    from the cut command is. The cut cannot expose anything:
     a bare value cut short is still the rest of its word, a quoted one cut
     short runs to the end of the line, and a userinfo cut before its ``@``
     is taken for one. A line the redaction lengthened is cut again."""
@@ -855,7 +868,12 @@ def _render_tool_call(text: str) -> str:
         return lead
     if tool in _FILE_TOOLS:
         return f"{lead} {tool}: {argument}" if argument else f"{lead} {tool}"
-    program = _program_name(argument) if tool == "Bash" and argument else None
+    # From the cut command: the first word of a command displayed whole is
+    # the same, and the shell scan — a per-character lexer, far slower than
+    # the regex paths — is bounded by the cut like the redaction. A word the
+    # cut splits is cut again below; one split inside a quote is no program.
+    program = (_program_name(argument[:_MAX_STREAM_LINE_CHARS])
+               if tool == "Bash" and argument else None)
     return f"{lead} {tool}: {program}" if program else f"{lead} {tool}"
 
 
@@ -882,7 +900,9 @@ def _secret_values(env) -> tuple:
     """The values to mask in a forwarded line: those of the variables of
     ``env`` (the environment fullsend runs with — the process environment
     with execution.env, runner.env and the hook env over it) whose name names
-    a credential (:data:`_SECRET_KEY_RE`) and whose value, each line of a
+    a credential (:func:`_sensitive_env_name`: the key rule, or
+    ``auth``/``oauth`` as a word of the name — DOCKER_AUTH_CONFIG's ``auth``
+    field is none of the key rule's words) and whose value, each line of a
     multi-line one on its own, is :data:`_MIN_MASKED_VALUE_CHARS` or longer;
     longest first, so a value another is a prefix of is masked whole. They
     live on the console filter and are never printed."""
@@ -890,7 +910,7 @@ def _secret_values(env) -> tuple:
     for name, value in (env or {}).items():
         if not isinstance(name, str) or not isinstance(value, str):
             continue
-        if not _sensitive_key(name):
+        if not _sensitive_env_name(name):
             continue
         for part in value.splitlines():
             part = part.strip()
@@ -901,6 +921,12 @@ def _secret_values(env) -> tuple:
 
 def _sensitive_key(name: str) -> bool:
     return _SECRET_KEY_RE.search(name.lower()) is not None
+
+
+def _sensitive_env_name(name: str) -> bool:
+    lowered = name.lower()
+    return (_SECRET_KEY_RE.search(lowered) is not None
+            or _ENV_AUTH_NAME_RE.search(lowered) is not None)
 
 
 def _redact(text: str, cut: bool = False) -> str:

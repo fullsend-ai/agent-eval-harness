@@ -416,9 +416,10 @@ sandbox that has not trusted the workspace). A `⚙` line is forwarded without i
 argument: a file tool (`Read`, `Write`, `Edit`, `MultiEdit`, `Glob`, `Grep`,
 `NotebookEdit`, `LS`) keeps its path or pattern (`⚙ Read: /sandbox/workspace/batch.yaml`),
 `Bash` shows the program name alone — the first shell word after any leading `NAME=value`
-assignments (`⚙ Bash: python3`, `⚙ Bash: curl`), or nothing when that word is not a
-plain program name or fullsend's 120-character cut of the command landed inside a quote
-— and every other tool (`Agent`, `Task`, `Skill`, `WebFetch`, `WebSearch`, an MCP tool,
+assignments (`⚙ Bash: python3`, `⚙ Bash: curl`), read from the first 200 characters of
+the command, or nothing when that word is not a plain program name or a cut of the
+command (fullsend's at 120 characters, the runner's at 200) landed inside a quote — and
+every other tool (`Agent`, `Task`, `Skill`, `WebFetch`, `WebSearch`, an MCP tool,
 an unknown name) shows its name alone, its argument being a command or a free-text
 prompt that can carry anything. The per-finding `! Sanitized […]` lines, the assistant's
 thinking (`🧠`, which the `claude-code` runner does not stream either) and multi-line
@@ -433,31 +434,43 @@ strings, single-character escapes), the other control characters except the tab,
 the Unicode bidi controls, line and paragraph separators and zero-width characters
 (U+061C, U+200B–U+200F, U+2028–U+202E, U+2060–U+2064, U+2066–U+2069, U+FEFF) are
 stripped, so a console line can neither drive the terminal showing the log nor reorder
-or hide text in a log viewer; ordinary non-ASCII text stays. The values of the
-credential-named variables of the environment fullsend runs with — the process
-environment with `execution.env`, `runner.env` and a hook's variables over it; a name
-that has `token`, `secret`, `password`/`passwd`, `api_key`, `access_key`, `private_key`
-as a word of its own or `credential` anywhere, or that ends in `key`, `token`, `secret`
-or `password` (`JIRA_TOKEN`, `ANTHROPIC_API_KEY`, `AWS_ACCESS_KEY_ID`); a value of eight
-characters or more, each line of a multi-line one — are masked wherever they appear,
-longest first; they are read once per run, kept on the console reader and never logged.
-The line is then cut at 200 characters and, cut, redacted by pattern — in that order, so
-the redaction's cost is bounded by the cut, and the cut cannot expose anything: a bare
-value cut short is still the rest of its word, a quoted one runs to the end of the line,
-a URL userinfo cut before its `@` is taken for one. The patterns, each found with one
-forward scan of the line: `KEY=value` whose key names a credential by the rule above
-(`JIRA_TOKEN=***`, `--api-key=***`, `AWS_ACCESS_KEY_ID=***`), the value being one shell
-word — quoted parts, backslash-escaped blanks and concatenations included
-(`TOKEN=ab"c d"`, `TOKEN=abc\ def`), an unterminated quote through the end of the line,
-an assignment opened inside a quoted word (`"api_key=ab cd"`) through that word; a
-`--flag value` or `-flag value` whose flag names a credential (`--password ***`,
-`--token ***`; `-p` is not one); a `key: value` field or header and a `"key": value`
-JSON field whose key names a credential (`password: ***`, `X-Api-Key: ***`,
-`"token": ***`; fullsend's `Tokens:` usage line is not one); `Authorization: Bearer`,
-`Basic` or `token <x>` and a bare `Bearer <x>` (`Authorization: Bearer ***`); and a
-URL's userinfo (`https://user:***@host`, `https://***@host` for a bare token). The
-key rule errs on the safe side: `--sort-key x` is redacted too, a false positive that
-hides a progress detail where a miss would show a credential. The full console (stdout,
+or hide text in a log viewer; ordinary non-ASCII text stays. The zero-width joiners are
+stripped with the rest — an emoji sequence or a joined script loses them — because the
+strip runs before the redaction and a joiner inside a credential name (`TO‍KEN=`) would
+otherwise hide the name from it. The values of the credential-named variables of the
+environment fullsend runs with — the process environment with `execution.env`,
+`runner.env` and a hook's variables over it; a name that has `token`, `secret`,
+`password`/`passwd`, `passphrase`, `api_key`, `access_key`, `private_key` or `signature`
+as a word of its own or `credential` anywhere, or that ends in `key`, `token`, `secret`,
+`password` or `passphrase` (`JIRA_TOKEN`, `ANTHROPIC_API_KEY`, `AWS_ACCESS_KEY_ID`), and
+for a variable also `auth`/`oauth` as a word of its own (`DOCKER_AUTH_CONFIG`, whose
+`auth` field none of the other words catch; masking can only hide, so the wider rule
+costs nothing); a value of eight characters or more, each line of a multi-line one — are
+masked wherever they appear, longest first; they are read once per run, kept on the
+console reader and never logged. The line is then cut at 200 characters and, cut,
+redacted by pattern — in that order, so the redaction's cost is bounded by the cut (as
+the shell scan behind a `Bash` program name is), and the cut cannot expose anything: a
+bare value cut short is still the rest of its word, a quoted one runs to the end of the
+line, a URL userinfo cut before its `@` is taken for one. The patterns, each found with
+one forward scan of the line: `KEY=value` whose key names a credential by the rule above
+(`JIRA_TOKEN=***`, `--api-key=***`, `AWS_ACCESS_KEY_ID=***`, `X-Amz-Signature=***`), the
+value being one shell word — quoted parts, backslash-escaped blanks and concatenations
+included (`TOKEN=ab"c d"`, `TOKEN=abc\ def`), an unterminated quote through the end of
+the line, an assignment opened inside a quoted word (`"api_key=ab cd"`) through that
+word; a `--flag value` or `-flag value` whose flag names a credential (`--password ***`,
+`--token ***`, `--passphrase ***`; `-p` is not one); a `key: value` field or header and
+a `"key": value` JSON field whose key names a credential (`password: ***`,
+`X-Api-Key: ***`, `"token": ***`; fullsend's `Tokens:` usage line is not one), a
+quoted value through its closing quote and a bare one through the next `,` `;` `}` `]`
+or the end of the line, blanks included (`password: correct horse battery staple` is
+hidden whole, and so is the rest of a line that merely reads `token: …`);
+`Authorization: Bearer`, `Basic` or `token <x>` and a bare `Bearer <x>`
+(`Authorization: Bearer ***`), the value ending at a blank or a quote so that a quoted
+header keeps its closing quote and a compact JSON `{"Authorization":"Bearer x","password":"…"}`
+keeps its fields apart; and a URL's userinfo (`https://user:***@host`, `https://***@host`
+for a bare token). The key rule errs on the safe side: `--sort-key x` and
+`signature: f(a, b)` are redacted too, false positives that hide a progress detail
+where a miss would show a credential. The full console (stdout,
 then stderr) is still the case's `stderr.log`, unfiltered, unredacted and with its
 control sequences, and the sandbox image is still read from it.
 
