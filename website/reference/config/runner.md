@@ -460,17 +460,34 @@ the line, an assignment opened inside a quoted word (`"api_key=ab cd"`) through 
 word; a `--flag value` or `-flag value` whose flag names a credential (`--password ***`,
 `--token ***`, `--passphrase ***`; `-p` is not one); a `key: value` field or header and
 a `"key": value` JSON field whose key names a credential (`password: ***`,
-`X-Api-Key: ***`, `"token": ***`; fullsend's `Tokens:` usage line is not one), a
+`X-Api-Key: ***`, `"token": ***`, a bytes key `b'password': ***` too; fullsend's `Tokens:`
+usage line is not one), a
 quoted value through its closing quote and a bare one through the next `,` `;` `}` `]`
 or the end of the line, blanks included (`password: correct horse battery staple` is
 hidden whole, and so is the rest of a line that merely reads `token: …`);
-`Authorization: Bearer`, `Basic` or `token <x>` and a bare `Bearer <x>`
-(`Authorization: Bearer ***`), the value ending at a blank or a quote so that a quoted
-header keeps its closing quote and a compact JSON `{"Authorization":"Bearer x","password":"…"}`
-keeps its fields apart; and a URL's userinfo (`https://user:***@host`, `https://***@host`
-for a bare token). The key rule errs on the safe side: `--sort-key x` and
-`signature: f(a, b)` are redacted too, false positives that hide a progress detail
-where a miss would show a credential. The full console (stdout,
+an `Authorization` value (`Proxy-Authorization` too), the header name bare (after a dot,
+a dash or the escaped line break of a logged raw request too), quoted as a JSON or dict
+key, or opening a quoted word, and followed by `:`, `=` or `=>`: a quoted
+value, or the value of a header that opened a quoted word, is hidden through the closing
+quote, its scheme kept when known (`"Authorization":"Basic ***"`,
+`-H 'Authorization: Digest ***'`, a compact JSON `{"Authorization":"Bearer x","password":"…"}`
+keeping its fields apart), and a string holding the scheme alone hides the operand
+concatenated after it, glued or after a `+`, a `$(…)` substitution included
+(`-H 'Authorization: Basic '***`, `'Authorization: ' + 'Basic ' + ***`); a bare value is
+hidden as one word
+after `Bearer`, `Basic`, `token`, `Negotiate` or `NTLM` (`Authorization: Bearer ***`, the
+word ending at a blank, a quote or a delimiter; a `name=value` list there, Rails'
+`Token token="…"`, as one), as its `name=value` list after `Digest`,
+`OAuth`, `AWS4-HMAC-SHA256`, `Hawk` or `SCRAM` (`Authorization: Digest ***`, a list that does
+not parse hidden whole), inside its brackets when it opens some (Go's
+`map[Authorization:[***]]`, a JSON list `"Authorization":[***]`), and whole, through the
+next delimiter or a quote glued to a word, otherwise (`Authorization: ***`: a scheme the
+rule does not know may carry a multi-word credential); a bare `Bearer <x>` anywhere counts
+too; and a URL's
+userinfo, whole (`https://***@host`: a username is a token as often as not, as in
+`https://<token>:x-oauth-basic@github.com`). The key rule errs on the safe side: `--sort-key x` and
+`signature: f(a, b)` are redacted too, and a prose `authorization:` loses the rest of its
+clause — false positives that hide a progress detail where a miss would show a credential. The full console (stdout,
 then stderr) is still the case's `stderr.log`, unfiltered, unredacted and with its
 control sequences, and the sandbox image is still read from it.
 

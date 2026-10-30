@@ -2655,8 +2655,9 @@ class TestConsoleFilter:
         # past the first blank would otherwise stand outside any key) —
         # JSON/YAML/header fields whose key names a credential (fullsend's
         # Tokens: line does not), a bare field value running to a delimiter
-        # or the end of the line, blanks included, URL userinfo (user:*** or
-        # a bare token). On the safe side: a key that merely ends in "key",
+        # or the end of the line, blanks included, URL userinfo whole (a
+        # username is a token as often as not). On the safe side: a key that
+        # merely ends in "key",
         # the word "bearer" in prose and the rest of a line after a
         # credential-named "key:" are redacted too.
         text = ("  💬 Ran curl --password <pw> -H 'Authorization: Bearer <jwt>' "
@@ -2672,12 +2673,13 @@ class TestConsoleFilter:
                 "  💬 Set {token: abc def, user: me} and api_key: k 1; next: x\n"
                 "  💬 The function signature: run(cfg, timeout)\n"
                 "  💬 Cloning https://<pat>@github.com/x and https://example.test:8443/y\n"
+                "  💬 Pushed to https://<pat>:x-oauth-basic@github.com/x\n"
                 "  ✓ Harness loaded (0.5s)\n"
                 "    Tokens: in=158 out=54740 reasoning=14976 cache_read=4674845\n"
                 "  💬 Basic usage of the bearer concept\n")
         assert self._select(text) == [
             "  💬 Ran curl --password *** -H 'Authorization: Bearer ***' "
-            "https://user:***@jira.example.test/x",
+            "https://***@jira.example.test/x",
             "  💬 Ran ./x --token *** --api-key *** -p tmp/x --access-key-id *** "
             "--sort-key *** --passphrase ***",
             "Error: Authorization: Basic *** rejected, Bearer *** too",
@@ -2689,9 +2691,148 @@ class TestConsoleFilter:
             "  💬 Set {token: ***, user: me} and api_key: ***; next: x",
             "  💬 The function signature: ***, timeout)",
             "  💬 Cloning https://***@github.com/x and https://example.test:8443/y",
+            "  💬 Pushed to https://***@github.com/x",
             "  ✓ Harness loaded (0.5s)",
             "    Tokens: in=158 out=54740 reasoning=14976 cache_read=4674845",
             "  💬 Basic usage of the bearer ***"]
+
+    def test_authorization_values_redacted_in_every_form(self):
+        # The header name bare (after a dot, a dash or an escaped line break,
+        # Markdown-decorated too; after a "/" it is a path), quoted as a JSON
+        # or dict key
+        # (Proxy-Authorization, X-Authorization, a bytes key too) or opening
+        # a quoted word, followed by ":", "=" or "=>". A quoted value, or the
+        # value of a header that opened a quoted word (curl -H '…'), is
+        # hidden through the closing quote, the scheme kept when known — so a
+        # Digest's last quoted parameter never shows past the shell quote —
+        # and a string holding the scheme alone hides the operand
+        # concatenated after it, glued or after a "+" (a word, a quoted
+        # string, a $(…) substitution, a quoted scheme alone chaining once
+        # more), failing which the scheme word (a grep pattern). A bare
+        # value: one word after a
+        # token68 scheme (or its name=value list, Rails' Token token="…";
+        # the word ending at a quote or a delimiter, so the next field
+        # stays apart; a "="-padded token in a quoted header never passes for
+        # a name=value parameter and swallows the next field's quote), the
+        # name=value list after a parameter scheme (Digest, AWS SigV4;
+        # comma-, semicolon- or blank-separated, blanks around "=" allowed, a
+        # list that does not parse hidden whole), the inside of a bracketed
+        # value (a Go header map, a JSON list), and the whole value through
+        # the next quote or delimiter otherwise — an unknown scheme (DPoP,
+        # SSWS, its token quoted or not), a prose "authorization:" losing the
+        # rest of its clause. After
+        # a quoted name a bare value is hidden only behind a known scheme or
+        # inside brackets: an f-string is left to the bare Bearer rule, which
+        # hides its placeholder as it did. "Authorization" is not a
+        # credential key, so the field rule never swallows a header's
+        # neighbours; a URL path or a comparison is no header.
+        text = ('  💬 Sent {"Authorization":"Basic <b64>","user":"me"}\n'
+                "  💬 Sent {'Authorization': 'token <t>', "
+                "'Proxy-Authorization': 'Bearer a b'}\n"
+                '  💬 Sent {"authorization":"<raw>"} and Authorization: <raw> then x\n'
+                "  💬 Sent {'Authorization': 'Digest username=\"me\", response=\"<h>\"'}\n"
+                '  💬 Sent Authorization: Digest username="me", realm="r", '
+                'response="<h>" ok\n'
+                "  💬 Sent Authorization: AWS4-HMAC-SHA256 Credential=<id>/20261030/eu/"
+                "s3/aws4_request, SignedHeaders=host, Signature=<sig>\n"
+                "  💬 Sent X-Authorization: Negotiate <t> and Authorization:Bearer <t>\n"
+                '  💬 Sent "Authorization": Bearer <t>, "X-Request-Id": 7\n'
+                '  💬 Sent {"Authorization":"Bearer "}\n'
+                "Error: Authorization: Bearer\n"
+                "  💬 Missing authorization: the request needs a token\n"
+                '  💬 Ran curl -H "Authorization: Basic <b64>=" -d \'{"password":"p w"}\' '
+                "https://x\n"
+                "  💬 Got map[Authorization:[Bearer <jwt>] Content-Type:[text/plain]]\n"
+                "  💬 Sent Authorization: DPoP <jwt> next\n"
+                "  💬 Ran curl -H 'Authorization: SSWS <t>' https://x\n"
+                '  💬 Sent Authorization: "Bearer <t>" and '
+                "{b'Authorization': b'Basic <b64>'}\n"
+                '  💬 Set headers = {"Authorization": f"Bearer {token}"}\n'
+                '  💬 Set {"authorization": {"type": "bearer", "token": "<t>"}}\n'
+                "  💬 Note (authorization: 'pending') on the ticket\n"
+                "  💬 Ran curl -H 'Authorization: Digest username=\"me\", "
+                "response=\"<h>\"' https://x\n"
+                '  💬 Ran curl -H "Authorization: Digest username=\\"me\\", '
+                'response=\\"<h>\\"" https://x\n'
+                '  💬 Got map[Authorization:[Digest username="me", response="<h>"] '
+                "Accept:[*/*]]\n"
+                '  💬 Sent Authorization: Digest username="me" response="<h>".\n'
+                "  💬 Saw Bearer [<t>] and Bearer {<t>} and the 'Authorization: Bearer' "
+                "header\n"
+                '  💬 Sent {"Authorization":["Basic <b64>"],"Accept":["*/*"]}\n'
+                "  💬 Ran curl -H 'Authorization: Basic '<b64> https://x\n"
+                "  💬 Set h = 'Authorization: Bearer ' + '<jwt>'\n"
+                '  💬 Sent Authorization: Digest username = "me", response = "<h>"\n'
+                "  💬 Saw **Authorization**: Basic <b64> and HTTP_AUTHORIZATION=Basic <b64>\n"
+                '  💬 Logged authorization="Basic <b64>" method=GET and '
+                '{"Authorization"=>"Basic <b64>"}\n'
+                "  💬 Sent {b'password': b'<t>', b'Authorization': [b'Basic <b64>']}\n"
+                'Error: Authorization: []string{"Basic <b64>"} rejected\n'
+                "  💬 See docs/authorization:latest and if authorization == granted\n"
+                "  💬 Saw headers.authorization: Basic <b64> and "
+                "X-Custom-Authorization: token <t>\n"
+                "  💬 Saw _Authorization_: Basic <b64>\n"
+                "  💬 Ran curl -H 'Authorization: Basic '$(echo -n me:<pw> | base64) https://h\n"
+                "  💬 Ran curl -H 'Authorization: Basic '<b64>' -H 'X-Api-Key: <k>'\n"
+                "  💬 Set h = 'Authorization: ' + 'Basic ' + '<b64>' and "
+                "g = 'Authorization: Basic '+ <b64>\n"
+                '  💬 Sent Authorization: SSWS "<t>" y\n'
+                '  💬 Sent Bearer " <jwt>" and Authorization: Digest response="<h>"x\n'
+                "  💬 send: b'GET / HTTP/1.1\\r\\nHost: x\\r\\nAuthorization: Basic <b64>"
+                "\\r\\n\\r\\n'\n"
+                '  💬 Sent Authorization: Token token="<t>" and \\tAuthorization: NTLM <t>\n'
+                "  💬 send: b'GET / HTTP/1.1\\r\\nAuthorization: Basic b64pad==\\r\\n"
+                "X-Api-Key: <k>\\r\\n\\r\\n'\n"
+                "  💬 Sent Authorization: Basic b64pad= --password <pw> and "
+                "Authorization: Bearer <jwt>\\r\\nX-Api-Key: <k>\n")
+        assert self._select(text) == [
+            '  💬 Sent {"Authorization":"Basic ***","user":"me"}',
+            "  💬 Sent {'Authorization': 'token ***', 'Proxy-Authorization': 'Bearer ***'}",
+            '  💬 Sent {"authorization":"***"} and Authorization: ***',
+            "  💬 Sent {'Authorization': 'Digest ***'}",
+            "  💬 Sent Authorization: Digest *** ok",
+            "  💬 Sent Authorization: AWS4-HMAC-SHA256 ***",
+            "  💬 Sent X-Authorization: Negotiate *** and Authorization:Bearer ***",
+            '  💬 Sent "Authorization": Bearer ***, "X-Request-Id": 7',
+            '  💬 Sent {"Authorization":"***"}',
+            "Error: Authorization: ***",
+            "  💬 Missing authorization: ***",
+            '  💬 Ran curl -H "Authorization: Basic ***" -d \'{"password":***}\' https://x',
+            "  💬 Got map[Authorization:[***] Content-Type:[text/plain]]",
+            "  💬 Sent Authorization: ***",
+            "  💬 Ran curl -H 'Authorization: ***' https://x",
+            '  💬 Sent Authorization: "Bearer ***" and {b\'Authorization\': b\'Basic ***\'}',
+            '  💬 Set headers = {"Authorization": f"Bearer ***"}',
+            '  💬 Set {"authorization": {***}}',
+            "  💬 Note (authorization: '***') on the ticket",
+            "  💬 Ran curl -H 'Authorization: Digest ***' https://x",
+            '  💬 Ran curl -H "Authorization: Digest ***" https://x',
+            "  💬 Got map[Authorization:[***] Accept:[*/*]]",
+            "  💬 Sent Authorization: Digest ***.",
+            "  💬 Saw Bearer *** and Bearer *** and the 'Authorization: ***' header",
+            '  💬 Sent {"Authorization":[***],"Accept":["*/*"]}',
+            "  💬 Ran curl -H 'Authorization: Basic '*** https://x",
+            "  💬 Set h = 'Authorization: Bearer ' + ***",
+            "  💬 Sent Authorization: Digest ***",
+            "  💬 Saw **Authorization**: Basic *** and HTTP_AUTHORIZATION=Basic ***",
+            '  💬 Logged authorization="Basic ***" method=GET and '
+            '{"Authorization"=>"Basic ***"}',
+            "  💬 Sent {b'password': ***, b'Authorization': [***]}",
+            "Error: Authorization: ***",
+            "  💬 See docs/authorization:latest and if authorization == granted",
+            "  💬 Saw headers.authorization: Basic *** and X-Custom-Authorization: token ***",
+            "  💬 Saw _Authorization_: Basic ***",
+            "  💬 Ran curl -H 'Authorization: Basic '*** https://h",
+            "  💬 Ran curl -H 'Authorization: Basic '***' -H 'X-Api-Key: ***",
+            "  💬 Set h = 'Authorization: ' + 'Basic ' + *** and g = 'Authorization: Basic '+ ***",
+            "  💬 Sent Authorization: ***",
+            "  💬 Sent Bearer *** and Authorization: Digest ***",
+            "  💬 send: b'GET / HTTP/1.1\\r\\nHost: x\\r\\nAuthorization: Basic ***"
+            "\\r\\n\\r\\n'",
+            "  💬 Sent Authorization: Token *** and \\tAuthorization: NTLM ***",
+            "  💬 send: b'GET / HTTP/1.1\\r\\nAuthorization: Basic ***\\r\\nX-Api-Key: ***",
+            "  💬 Sent Authorization: Basic *** --password *** and "
+            "Authorization: Bearer ***\\r\\nX-Api-Key: ***"]
 
     def test_environment_credential_values_masked(self):
         # The values of the credential-named variables of fullsend's
@@ -2725,13 +2866,15 @@ class TestConsoleFilter:
             "  💬 The key abcdefgh-ijkl is not abcdefgh; short and auto-fix-long-value stay",
             "  💬 MIIEpAIBAAKCAQEA /home/me/creds.json false-false-false",
             "  ⚙ Read: /home/me/creds.json",
-            "  ⚙ Bash: s3cr3t-value")]
+            "  ⚙ Bash: s3cr3t-value",
+            "  💬 Sent Bearer abcdefghijkl to the API")]
         assert shown == [
             "  ✓ Logged in with *** as ***",
             "  💬 The key *** is not ***; short and auto-fix-long-value stay",
             "  💬 *** *** false-false-false",
             "  ⚙ Read: ***",
-            "  ⚙ Bash: ***"]
+            "  ⚙ Bash: ***",
+            "  💬 Sent Bearer *** to the API"]  # a masked prefix: the Bearer rule takes the rest
         assert fullsend_mod._secret_values({}) == () == fullsend_mod._secret_values(None)
 
     def test_clip_then_redact_leaves_no_fragment_of_a_cut_credential(self):
@@ -2746,7 +2889,8 @@ class TestConsoleFilter:
                 (180, " TOKEN=abcdefghijklmnop", " TOKEN=***…"),
                 (180, ' TOKEN="abc defghijklm', " TOKEN=***…"),
                 (180, " --password abcdefghijklmno", " --password ***…"),
-                (170, " https://user:<longpassword>@h", " https://user:***…")):
+                (170, " https://user:<longpassword>@h", " https://***…"),
+                (165, ' "Authorization":"Bearer abcdefghij', ' "Authorization":"Bearer ***…')):
             lead = "  💬 " + "x" * padding
             assert len(lead + tail) > max_chars > len(lead) + 7
             (out,) = self._select(lead + tail + "\n")
@@ -2770,6 +2914,16 @@ class TestConsoleFilter:
         bodies = ("token" * 20_000, "a=b " * 25_000, "a-" * 50_000 + ":",
                   "--password x " * 8_000, 'TOKEN="' + "a b" * 34_000,
                   "https://" + "a:" * 50_000, "k:" * 50_000, "Bearer " * 15_000,
+                  '"Authorization":"' * 6_000, "Authorization: Digest " + "a=b, " * 20_000,
+                  "Authorization: Digest " + 'a="x b=' * 15_000, "Authorization: " * 7_000,
+                  "Authorization: " + "x " * 50_000, "Authorization:[" * 7_000,
+                  "Authorization: Digest a=b" + " " * 100_000 + "x", "'Authorization: " * 7_000,
+                  "Authorization: Digest " + 'a="x", ' * 15_000,
+                  "Authorization: Digest " + 'a="x" ' * 17_000 + "y", "Authorization: " + "[]" * 50_000,
+                  "'Authorization: Basic ' + '" + "x" * 100_000, "Authorization: x" + ',a="b"' * 17_000,
+                  "Authorization: X " + 'a="b"c' * 17_000, "Bearer " + '"' * 100_000,
+                  "'Authorization: Basic ' + " + "'Basic ' + " * 10_000,
+                  "Authorization: Basic b64pad=\\r\\nX: " * 4_000, "Authorization: Token " + "a=" * 50_000,
                   "password: " + "a " * 50_000, "\x1b]" * 50_000, "\\" * 100_000)
         lines = ["Error: " + body for body in bodies] + [
             '  ⚙ Bash: "' + "x" * 100_000, "  ⚙ Bash: " + "x" * 100_000,

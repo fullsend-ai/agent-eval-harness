@@ -159,11 +159,13 @@ _MIN_MASKED_VALUE_CHARS = 8
 # word starts only, so a long word is scanned once and the scan is linear in
 # the line: a KEY=value (blanks around the = allowed), a --flag or -flag
 # followed by a blank and its value, a key: value field (YAML, a header) or a
-# "key": value one (JSON). Whether the key names a credential is decided on
-# the capture (_SECRET_KEY_RE), never inside the scan.
+# "key": value one (JSON; a bytes key, b'key', too). Whether the key names a
+# credential is decided on the capture (_SECRET_KEY_RE), never inside the
+# scan.
 _ASSIGNMENT_KEY_RE = re.compile(r"\b(?P<key>\w+)\s*=\s*")
 _FLAG_KEY_RE = re.compile(r"(?<!\S)-{1,2}(?P<key>[A-Za-z][\w-]*)\s+")
-_FIELD_KEY_RE = re.compile(r"""(?<![\w-])(?P<q>["']?)(?P<key>[\w-]+)(?P=q)\s*:\s*""")
+_FIELD_KEY_RE = re.compile(
+    r"""(?<![\w-])(?:[bBrRuU]{1,2}(?=["']))?(?P<q>["']?)(?P<key>[\w-]+)(?P=q)\s*:\s*""")
 # The value of an assignment or a flag is one shell word: unquoted runs,
 # backslash escapes (a blank included) and quoted parts in any order, up to
 # an unescaped blank outside quotes — TOKEN=ab"c d" and TOKEN=abc\ def are
@@ -185,21 +187,89 @@ _QUOTED_TAIL_RE = {
 # merely reads ``token: …`` (the safe side).
 _FIELD_VALUE_RE = re.compile(
     r"""(?:"(?:[^"\\]|\\.?)*(?:"|$)|'(?:[^'\\]|\\.?)*(?:'|$)|[^,;}\]]+)""")
-# ``Authorization: Bearer|Basic|token <x>`` and a bare ``Bearer <x>``, the
-# value a quoted string or a bare word ending at a blank or a quote — in
-# compact JSON (``{"Authorization":"Bearer t1","password":"a b"}``) it ends
-# with its own string rather than running into the next field, whose value
-# past the first blank would then stand outside any key; the userinfo of a
-# URL, ``user:pass@`` shown as ``user:***@`` and a bare ``token@`` as
-# ``***@``. The cut form takes the end of a clipped line for the ``@`` a
-# userinfo cut before its host no longer has.
+# An ``Authorization`` value (``Proxy-Authorization``, ``X-Authorization``,
+# ``HTTP_AUTHORIZATION`` too) has its credentials shown as ``***``
+# (_redact_authorization). The header name is found bare (after a dot or a
+# dash, ``headers.authorization:``, ``X-Custom-Authorization:``, a Markdown
+# ``**Authorization**:`` or ``_Authorization_:``, an escaped line break as a
+# logged raw request prints, ``\r\nAuthorization:``, included; after a ``/``
+# it is a path), quoted as a JSON or dict key (a bytes key too) or opening a
+# quoted word (``-H 'Authorization: …'``), followed by ``:``, ``=`` or ``=>``. A quoted value, or the value of a header that
+# opened a quoted word, is hidden through the closing quote, its scheme kept
+# when the rule knows it (``"Authorization":"Basic ***"``,
+# ``-H 'Authorization: Digest ***'``, ``'Authorization': '***'`` for a scheme
+# it does not); when the string holds one word, the scheme alone, the
+# credential is the operand concatenated after the closing quote, glued or
+# after a ``+`` — a shell word, a quoted string, a ``$(…)`` substitution — a
+# quoted scheme alone chaining once more (``-H 'Authorization: Basic '***``,
+# ``'Authorization: ' + 'Basic ' + ***``), and failing one the word itself is
+# hidden (``'Authorization: ***'``). A
+# bare value is hidden after a token68 scheme as one word (``Bearer ***``,
+# ``Basic ***``, ``token ***``; a ``name=value`` list there, Rails'
+# ``Token token="…"``, as one), after a parameter scheme as its
+# ``name=value`` list (``Digest ***``, ``AWS4-HMAC-SHA256 ***``; a quoted
+# parameter value ends at a quote not followed by a word character, so the
+# ``=``-padded token of a stray quoted header never passes for one and
+# swallows the quote of the next field; a list that does not parse to a
+# blank, a delimiter or the end of the line is hidden whole), when it opens a
+# bracket through the closing one, the brackets kept (Go's header dump
+# ``map[Authorization:[***]]``, a JSON list ``"Authorization":[***]``) and
+# otherwise whole, through the next delimiter or quote glued to a word at
+# bracket depth 0 — a quoted word, a bracketed part and a ``name="value"``
+# whose quote ends a word passed, a ``,`` another ``name=value`` follows too,
+# a ``name=`` whose quote does not end a word left to the assignment rule —
+# or the end of the line
+# (``Authorization: ***``: a scheme the rule does not know may carry a
+# multi-word credential, and a prose ``authorization:`` loses the rest of
+# its clause, the safe side). After a quoted name a bare value is hidden only
+# behind a known scheme or a bracket: an f-string or a nested object is left
+# to the other rules. A bare word ends at a blank, a quote, a delimiter or a
+# bracket, none of which a token holds: in compact JSON
+# (``{"Authorization":"Bearer t1","password":"a b"}``) the credentials end
+# with their own string rather than running into the next field, whose value
+# past the first blank would then stand outside any key. A bare ``Bearer <x>``
+# anywhere counts too (_BEARER_RE; a ``***`` already there is left with its
+# delimiter, and a quote a blank follows opens no credential). The userinfo
+# of a URL is shown whole as ``***@``: a username is
+# a token as often as not (``https://<token>:x-oauth-basic@github.com``). The
+# cut form takes the end of a clipped line for the ``@`` a userinfo cut
+# before its host no longer has.
+_AUTH_NAME = r"(?:proxy-|x-|http_)?authorization"
+_AUTH_LEAD_RE = re.compile(
+    r"(?i)(?:(?:[bru]{1,2})?(?P<nq>[\"'])" + _AUTH_NAME + r"(?P=nq)|(?P<eq>[\"'])"
+    + _AUTH_NAME + r"|(?:(?<![A-Za-z0-9/])|(?<=\\[nrt]))" + _AUTH_NAME + r"[*`_]*)"
+    r"\s*(?::|=(?:>|(?!=)))\s*")
+_AUTH_SCHEME_RE = re.compile(r"(?P<scheme>[A-Za-z][\w-]*)[ \t]+(?=\S)")
+_TOKEN68_SCHEMES = frozenset({"bearer", "basic", "token", "negotiate", "ntlm"})
+_PARAM_SCHEMES = frozenset({"digest", "oauth", "aws4-hmac-sha256", "hawk", "hoba",
+                            "mutual", "vapid", "scram-sha-1", "scram-sha-256"})
+_KNOWN_SCHEMES = _TOKEN68_SCHEMES | _PARAM_SCHEMES
+_AUTH_WORD_RE = re.compile(r"""[^\s"',;()\[\]{}\\]+""")
+_AUTH_PARAM_NAME_RE = re.compile(r"[\w-]+\s*=")
+_AUTH_TIGHT_NAME_RE = re.compile(r"[\w-]+=")
+# A parameter list: blanks around the "=" allowed after a parameter scheme
+# (RFC 7235's BWS), none after a token68 one, where a "="-padded token and a
+# blank must not take the next word for a value; a bare value holds no
+# backslash, so an escaped line break ends it.
+_AUTH_PARAMS_RE = re.compile(
+    r"""(?:[\w-]+\s*=\s*(?:"[^"]*(?:"(?!\w)|$)|'[^']*(?:'(?!\w)|$)|[^\s,;"'()}\]\\]*)"""
+    r"""(?:(?:[ \t]*[,;][ \t]*|[ \t]+)(?=[\w-]+\s*=))?)+""")
+_AUTH_TIGHT_PARAMS_RE = re.compile(
+    r"""(?:[\w-]+=(?:"[^"]*(?:"(?!\w)|$)|'[^']*(?:'(?!\w)|$)|[^\s,;"'()}\]\\]*)"""
+    r"""(?:(?:[ \t]*[,;][ \t]*|[ \t]+)(?=[\w-]+=))?)+""")
+_AUTH_OPENERS = {"[": "]", "(": ")", "{": "}"}
+_AUTH_CLOSERS = frozenset("])}")
+_QUOTED_BODY_RE = {
+    '"': re.compile(r'((?:[^"\\]|\\.?)*)(?:"|$)'),
+    "'": re.compile(r"((?:[^'\\]|\\.?)*)(?:'|$)"),
+}
 _BEARER_RE = re.compile(
-    r"(?i)\b((?:authorization:\s*(?:bearer|basic|token)|bearer)\s+)"
-    r"""(?:"[^"]*(?:"|$)|'[^']*(?:'|$)|[^\s"']+)""")
+    r"""(?i)\b(bearer\s+)(?!["']?\*\*\*(?:[\s"',;)}\]\\]|$))"""
+    r"""(?:"(?:[^"]*"|(?!\s)[^"]*$)|'(?:[^']*'|(?!\s)[^']*$)|[^\s"']+)""")
 _URL_USERINFO_RE = re.compile(
-    r"(?i)(?<![a-z0-9+.-])([a-z][a-z0-9+.-]*://)([^\s/@]+)(@)")
+    r"(?i)(?<![a-z0-9+.-])([a-z][a-z0-9+.-]*://)[^\s/@]+(@)")
 _URL_USERINFO_CUT_RE = re.compile(
-    r"(?i)(?<![a-z0-9+.-])([a-z][a-z0-9+.-]*://)([^\s/@]+)(@|$)")
+    r"(?i)(?<![a-z0-9+.-])([a-z][a-z0-9+.-]*://)[^\s/@]+(@|$)")
 # A ``⚙`` tool-call line, ``  ⚙ <Tool>: <argument>`` or ``  ⚙ <Tool>``, is
 # forwarded without its raw argument (_render_tool_call): a file tool keeps
 # its path or pattern, the useful progress signal; ``Bash`` shows the program
@@ -938,11 +1008,220 @@ def _redact(text: str, cut: bool = False) -> str:
     (:data:`_SHELL_WORD_RE`, :data:`_FIELD_VALUE_RE`), the key kept and the
     value shown as ``***``."""
     userinfo_re = _URL_USERINFO_CUT_RE if cut else _URL_USERINFO_RE
-    text = userinfo_re.sub(_mask_userinfo, text)
+    text = userinfo_re.sub(r"\1***\2", text)
+    text = _redact_authorization(text)
     text = _BEARER_RE.sub(r"\1***", text)
     text = _redact_keyed(text, _ASSIGNMENT_KEY_RE, _assignment_value_end)
     text = _redact_keyed(text, _FLAG_KEY_RE, _shell_word_end)
     return _redact_keyed(text, _FIELD_KEY_RE, _field_value_end)
+
+
+def _redact_authorization(text: str) -> str:
+    """``text`` with the credentials of every ``Authorization`` value shown as
+    ``***`` (the forms: the comment above :data:`_AUTH_LEAD_RE`). One forward
+    scan: the search resumes after the credentials, or after the name when
+    the value has none."""
+    out, kept, pos = [], 0, 0
+    while (m := _AUTH_LEAD_RE.search(text, pos)) is not None:
+        pos = m.end()
+        span = _authorization_credentials(
+            text, m.end(), m.group("nq") is not None, m.group("eq"))
+        if span is None:
+            continue
+        out.append(text[kept:span[0]])
+        out.append("***")
+        kept = pos = span[1]
+    out.append(text[kept:])
+    return "".join(out)
+
+
+def _authorization_credentials(text: str, i: int, quoted_name: bool, quote):
+    """The ``(start, end)`` of the credentials of the ``Authorization`` value
+    that begins at ``i`` — ``quote`` the quote the header opened in, if any —
+    or ``None`` when there are none to hide."""
+    n = len(text)
+    if quote is None:
+        j = i
+        while j < n and j < i + 2 and text[j] in "bBrRuU":
+            j += 1  # a bytes, raw or unicode literal's prefix
+        if j < n and text[j] in "\"'":
+            quote, i = text[j], j + 1
+    if quote is not None:
+        # A quoted value, or the value of a header that opened a quoted
+        # word: through the closing quote, past a scheme the rule knows; a
+        # string holding the scheme alone is concatenated with its credential.
+        end = _QUOTED_BODY_RE[quote].match(text, i).end(1)
+        body = text[i:end].strip()
+        if not body or " " not in body and "\t" not in body:
+            # The scheme alone, or nothing: the credential is concatenated
+            # after the closing quote, failing which the word itself hides.
+            concatenated = _concatenated_credential(text, end)
+            if concatenated is not None:
+                return concatenated
+            return (i, end) if end > i else None
+        scheme = _AUTH_SCHEME_RE.match(text, i, end)
+        if scheme is not None and scheme.group("scheme").lower() in _KNOWN_SCHEMES:
+            i = scheme.end()
+        return (i, end) if end > i else None
+    scheme = _AUTH_SCHEME_RE.match(text, i)
+    name = scheme.group("scheme").lower() if scheme is not None else None
+    if name in _KNOWN_SCHEMES:
+        start = scheme.end()
+        if name in _PARAM_SCHEMES:
+            params = _AUTH_PARAMS_RE.match(text, start)
+        elif _AUTH_TIGHT_NAME_RE.match(text, start) is not None:
+            params = _AUTH_TIGHT_PARAMS_RE.match(text, start)
+        else:
+            params = None
+        if params is not None:
+            if params.end() > start:
+                end = params.end()
+                if end == n or text[end] in " \t,;)}].!?\\":
+                    return start, end
+                if name in _PARAM_SCHEMES:  # a list that does not parse: whole
+                    return _trimmed(text, start, _bare_value_end(text, start, loose=True))
+        if text[start] in "\"'":  # a quoted credential, hidden with its quotes
+            return start, _QUOTED_TAIL_RE[text[start]].match(text, start + 1).end()
+        if text[start] in _AUTH_OPENERS:
+            return _bracketed(text, start)
+        word = _AUTH_WORD_RE.match(text, start)
+        if word is None:
+            return None
+        end = word.end()
+        while end > start + 1 and text[end - 1] in ".!?":
+            end -= 1  # a sentence's punctuation, which no token ends with
+        return start, end
+    if i < n and text[i] in _AUTH_OPENERS:
+        return _bracketed(text, i)
+    if quoted_name:
+        return None  # "Authorization": f"…", a nested object: the other rules' business
+    return _trimmed(text, i, _bare_value_end(text, i))
+
+
+def _concatenated_credential(text: str, end: int):
+    """The operand concatenated after the quote closing at ``end`` — glued to
+    it, or after a ``+`` — the credential of a string that holds the scheme
+    alone; a quoted scheme alone as that operand chains once more
+    (``'Authorization: ' + 'Basic ' + ***``). ``None`` when the quote is not
+    closed or nothing is concatenated."""
+    n = len(text)
+    if end >= n:
+        return None
+    j = end + 1
+    for _ in range(3):
+        k = j
+        while k < n and text[k] in " \t":
+            k += 1
+        if k < n and text[k] == "+":
+            k += 1
+            while k < n and text[k] in " \t":
+                k += 1
+        elif k != j:
+            return None  # a blank and no "+": nothing concatenated
+        span = _operand(text, k)
+        if span is None:
+            return None
+        first, last = text[span[0]], text[span[1] - 1]
+        if first in "\"'" and last == first and span[1] - span[0] > 1 and (
+                text[span[0] + 1:span[1] - 1].strip().lower() in _KNOWN_SCHEMES):
+            j = span[1]
+            continue
+        return span
+    return None
+
+
+def _operand(text: str, i: int):
+    """The span of the operand at ``i``: a quoted string, a ``$(…)``, ``${…}``
+    or backquoted substitution, a bracketed group or one word; ``None`` at a
+    delimiter or the end of the line."""
+    n = len(text)
+    if i >= n:
+        return None
+    c = text[i]
+    if c in "\"'":
+        return i, _QUOTED_TAIL_RE[c].match(text, i + 1).end()
+    if c == "`":
+        close = text.find("`", i + 1)
+        return i, n if close < 0 else close + 1
+    if c == "$" and i + 1 < n and text[i + 1] in "({":
+        return i, min(n, _group_end(text, i + 1) + 1)
+    if c in _AUTH_OPENERS:
+        return i, min(n, _group_end(text, i) + 1)
+    word = _AUTH_WORD_RE.match(text, i)
+    return (i, word.end()) if word is not None else None
+
+
+def _group_end(text: str, i: int) -> int:
+    """The index of the bracket closing the one opened at ``i``, nesting
+    honoured; the end of the line when none does."""
+    depth = 0
+    for j in range(i, len(text)):
+        if text[j] in _AUTH_OPENERS:
+            depth += 1
+        elif text[j] in _AUTH_CLOSERS:
+            depth -= 1
+            if depth == 0:
+                return j
+    return len(text)
+
+
+def _bracketed(text: str, i: int):
+    """The inside of the bracketed value at ``i``, both brackets kept; an
+    empty pair opens a value that runs on (``[]string{…}``)."""
+    end = _group_end(text, i)
+    if end > i + 1:
+        return i + 1, end
+    return _trimmed(text, i, _bare_value_end(text, i))
+
+
+def _bare_value_end(text: str, i: int, loose: bool = False) -> int:
+    """Where a bare value of no known scheme ends: at a delimiter or a
+    closing bracket at depth 0, or at a quote glued to a word — a bracketed
+    part, a quoted word and a ``name="value"`` whose closing quote ends a
+    word (any, when ``loose``) are passed whole, a ``,`` or ``;`` that
+    another ``name=value`` follows too — or at the end of the line. A
+    ``name=`` whose quoted value ends the scan is left to the assignment
+    rule."""
+    j, n = i, len(text)
+    while j < n:
+        c = text[j]
+        if c in _AUTH_OPENERS:
+            j = _group_end(text, j) + 1
+        elif c in "\"'":
+            before = text[j - 1] if j > i else ""
+            closed = _QUOTED_TAIL_RE[c].match(text, j + 1).end()
+            if before in " \t":
+                j = closed
+            elif before == "=" and (loose or closed >= n or text[closed - 1] != c
+                                    or not (text[closed].isalnum() or text[closed] == "_")):
+                j = closed
+            elif before == "=":
+                k = j - 1
+                while k > i and (text[k - 1].isalnum() or text[k - 1] in "_-"):
+                    k -= 1
+                return k
+            else:
+                break
+        elif c in _AUTH_CLOSERS:
+            break
+        elif c in ",;":
+            k = j + 1
+            while k < n and text[k] in " \t":
+                k += 1
+            if _AUTH_PARAM_NAME_RE.match(text, k) is None:
+                break
+            j = k
+        else:
+            j += 1
+    return min(j, n)
+
+
+def _trimmed(text: str, start: int, end: int):
+    """``(start, end)`` less the trailing blanks, ``None`` when nothing is
+    left."""
+    while end > start and text[end - 1].isspace():
+        end -= 1
+    return (start, end) if end > start else None
 
 
 def _redact_keyed(text: str, key_re, value_end) -> str:
@@ -962,13 +1241,6 @@ def _redact_keyed(text: str, key_re, value_end) -> str:
         kept = pos = end
     out.append(text[kept:])
     return "".join(out)
-
-
-def _mask_userinfo(m) -> str:
-    scheme, userinfo, terminator = m.groups()
-    if ":" in userinfo:
-        return scheme + userinfo.split(":", 1)[0] + ":***" + terminator
-    return scheme + "***" + terminator
 
 
 def _assignment_value_end(text: str, m) -> Optional[int]:
