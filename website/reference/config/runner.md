@@ -412,23 +412,54 @@ that prefix, between its `Running: …` and `OK`/`FAIL` lines: the section and s
 after `Harness loaded`, the `→ Results` block), the agent activity lines (`💬` text,
 `⚙` tool call, `⏳` heartbeat), plain `Error`/`Warning`/`fatal` lines and Claude Code's
 `Ignoring N permissions.allow entries …` line (the one behind permission denials in a
-sandbox that has not trusted the workspace), each cut at 200 characters. A forwarded
-line has `KEY=value` assignments whose key names a credential (`…token=`, `…secret=`,
-`…password=`, `…api_key=`) shown as `KEY=***`, as a `⚙ Bash:` line may carry one: a
-quoted value is redacted through its closing quote (an escaped `\"` or `\'` inside does
-not end it) and, when fullsend's 120-character cut of the command left it without one,
-through the end of the line; a bare value is redacted up to the next blank. Terminal
-control sequences in a forwarded line (colours and cursor movement, OSC titles and
-hyperlinks, DCS/SOS/PM/APC strings, single-character escapes) and other control
-characters except the tab are stripped before it is printed, so a console line cannot
-drive the terminal showing the log. The per-finding `! Sanitized […]` lines, the
-assistant's thinking (`🧠`, which the `claude-code` runner does not stream either) and
-multi-line text, and the pre/post-script output are not forwarded. A two-case run
-forwards about 360 lines (30 KB), so a long batch stays well inside a CI job log's
-output limit. The full console (stdout, then stderr) is still the case's `stderr.log`,
-unfiltered, unredacted and with its control sequences, and the sandbox image is still
-read from it. There is no knob: streaming follows the harness's progress logging, as it
-does for the `claude-code` runner.
+sandbox that has not trusted the workspace). A `⚙` line is forwarded without its raw
+argument: a file tool (`Read`, `Write`, `Edit`, `MultiEdit`, `Glob`, `Grep`,
+`NotebookEdit`, `LS`) keeps its path or pattern (`⚙ Read: /sandbox/workspace/batch.yaml`),
+`Bash` shows the program name alone — the first shell word after any leading `NAME=value`
+assignments (`⚙ Bash: python3`, `⚙ Bash: curl`), or nothing when that word is not a
+plain program name or fullsend's 120-character cut of the command landed inside a quote
+— and every other tool (`Agent`, `Task`, `Skill`, `WebFetch`, `WebSearch`, an MCP tool,
+an unknown name) shows its name alone, its argument being a command or a free-text
+prompt that can carry anything. The per-finding `! Sanitized […]` lines, the assistant's
+thinking (`🧠`, which the `claude-code` runner does not stream either) and multi-line
+text, and the pre/post-script output are not forwarded. A two-case run forwards about
+360 lines (30 KB), so a long batch stays well inside a CI job log's output limit. There
+is no knob: streaming follows the harness's progress logging, as it does for the
+`claude-code` runner.
+
+Every forwarded line is redacted before it is printed, in this order. Terminal control
+sequences (colours and cursor movement, OSC titles and hyperlinks, DCS/SOS/PM/APC
+strings, single-character escapes), the other control characters except the tab, and
+the Unicode bidi controls, line and paragraph separators and zero-width characters
+(U+061C, U+200B–U+200F, U+2028–U+202E, U+2060–U+2064, U+2066–U+2069, U+FEFF) are
+stripped, so a console line can neither drive the terminal showing the log nor reorder
+or hide text in a log viewer; ordinary non-ASCII text stays. The values of the
+credential-named variables of the environment fullsend runs with — the process
+environment with `execution.env`, `runner.env` and a hook's variables over it; a name
+that has `token`, `secret`, `password`/`passwd`, `api_key`, `access_key`, `private_key`
+as a word of its own or `credential` anywhere, or that ends in `key`, `token`, `secret`
+or `password` (`JIRA_TOKEN`, `ANTHROPIC_API_KEY`, `AWS_ACCESS_KEY_ID`); a value of eight
+characters or more, each line of a multi-line one — are masked wherever they appear,
+longest first; they are read once per run, kept on the console reader and never logged.
+The line is then cut at 200 characters and, cut, redacted by pattern — in that order, so
+the redaction's cost is bounded by the cut, and the cut cannot expose anything: a bare
+value cut short is still the rest of its word, a quoted one runs to the end of the line,
+a URL userinfo cut before its `@` is taken for one. The patterns, each found with one
+forward scan of the line: `KEY=value` whose key names a credential by the rule above
+(`JIRA_TOKEN=***`, `--api-key=***`, `AWS_ACCESS_KEY_ID=***`), the value being one shell
+word — quoted parts, backslash-escaped blanks and concatenations included
+(`TOKEN=ab"c d"`, `TOKEN=abc\ def`), an unterminated quote through the end of the line,
+an assignment opened inside a quoted word (`"api_key=ab cd"`) through that word; a
+`--flag value` or `-flag value` whose flag names a credential (`--password ***`,
+`--token ***`; `-p` is not one); a `key: value` field or header and a `"key": value`
+JSON field whose key names a credential (`password: ***`, `X-Api-Key: ***`,
+`"token": ***`; fullsend's `Tokens:` usage line is not one); `Authorization: Bearer`,
+`Basic` or `token <x>` and a bare `Bearer <x>` (`Authorization: Bearer ***`); and a
+URL's userinfo (`https://user:***@host`, `https://***@host` for a bare token). The
+key rule errs on the safe side: `--sort-key x` is redacted too, a false positive that
+hides a progress detail where a miss would show a credential. The full console (stdout,
+then stderr) is still the case's `stderr.log`, unfiltered, unredacted and with its
+control sequences, and the sandbox image is still read from it.
 
 fullsend writes some `💬` lines without a trailing newline, so they reach the log only
 when its next write ends the line — usually the `⏳` heartbeat, up to 30 seconds later,

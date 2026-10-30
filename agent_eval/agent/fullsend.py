@@ -29,13 +29,20 @@ step lines (``→``, ``•``, ``✓``, ``✗``, ``!``) with the indented detail 
 attached to them (the plan block, the ``→ Results`` block), the agent activity
 lines (``💬`` text, ``⚙`` tool call, ``⏳`` heartbeat), plain
 ``Error``/``Warning``/``fatal`` lines and Claude Code's ``Ignoring N
-permissions.allow entries`` line, each with its terminal control sequences
-stripped, its ``…token=``/``…secret=``/``…password=``/``…api_key=``
-assignments redacted (a quoted value cut short by fullsend is redacted to the
-end of the line) and cut at :data:`_MAX_STREAM_LINE_CHARS`. The per-finding
-``! Sanitized […]`` lines, the assistant's thinking (``🧠``) and multi-line
-text and the pre/post-script output are not forwarded; the captured console
-keeps all of it, unstripped and unredacted. Forwarding ends with the case: a
+permissions.allow entries`` line. A ``⚙`` line is forwarded without its raw
+argument: a file tool keeps its path, ``Bash`` shows its program name alone
+and every other tool (``Agent``, ``Skill``, an MCP tool…) its name alone.
+Every forwarded line has its terminal control sequences and the Unicode bidi
+and zero-width characters stripped, the values of the credential-named
+variables of fullsend's environment masked, and is cut at
+:data:`_MAX_STREAM_LINE_CHARS` before the pattern redaction — ``KEY=value``,
+``--flag value`` and ``key: value`` whose key names a credential, the value
+of an ``Authorization`` header and URL userinfo, shown as ``***`` — so a
+line's cost is bounded by the cut and nothing of a credential gets through
+it. The per-finding ``! Sanitized […]`` lines, the assistant's thinking
+(``🧠``) and multi-line text and the pre/post-script output are not
+forwarded; the captured console keeps all of it, unstripped and unredacted.
+Forwarding ends with the case: a
 pipe a descendant outside fullsend's process group still holds after the
 bounded drain that follows a timeout or an interrupt is emptied on, but
 nothing more of it is kept or printed. See :class:`_ConsoleFilter` and
@@ -127,32 +134,92 @@ _SANITIZED_LINE_RE = re.compile(r"^ {2,}!\s+Sanitized\s*\[")
 # permissions.allow entries (the line behind the eval permission denials).
 _ALERT_LINE_RE = re.compile(
     r"^\s*(?:(?:error|warning|fatal)\b|ignoring \d+ permissions)", re.IGNORECASE)
-# A ``KEY=value`` whose key names a credential, as a ``⚙ Bash:`` line may carry
-# one: the value is replaced before the line is forwarded (fullsend caps the
-# command at 120 runes but does not redact it). A quoted value runs to its
-# closing quote, over escaped quotes (``\"``, ``\'``), and — when that cut left
-# it without one — to the end of the line, a trailing lone backslash included
-# (the cut can land right after one), so no fragment of it gets through; a
-# bare value is the run of non-blank characters. The quoted rule needs the
-# value to open with the quote: a quote further in (``TOKEN=ab"c d"``) or
-# around the whole assignment (``"api_key=ab cd"``) leaves it a bare value,
-# redacted to the first blank. The capture is left as is.
-_SECRET_ASSIGNMENT_RE = re.compile(
-    r"(?i)\b(\w*(?:token|secret|passw(?:or)?d|api[_-]?key)\w*=)"
-    r"(?:\"(?:[^\"\\]|\\.?)*(?:\"|$)|'(?:[^'\\]|\\.?)*(?:'|$)|\S+)")
+# Redaction of a forwarded line (the capture is left as is; see _present).
+# A key — of a KEY=value, a --flag value, a key: value field, an environment
+# variable — names a credential when a credential word stands on its own in
+# it, set off by the start, the end or a non-letter (JIRA_TOKEN, api-key,
+# apiKey, AWS_ACCESS_KEY_ID, X-Api-Key, TOKEN_FILE), when it ends in key,
+# token, secret or password (MYSECRET, --sort-key: a false positive hides a
+# progress detail, a miss shows a credential), or when it contains
+# "credential". fullsend's ``Tokens:`` usage line is none of these. Matched
+# against the lowercased name.
+_SECRET_KEY_RE = re.compile(
+    r"(?:^|[^a-z])(?:token|secret|passw(?:or)?d|api[_-]?key|private[_-]?key"
+    r"|access[_-]?key)(?:$|[^a-z])"
+    r"|credential|(?:token|secret|passw(?:or)?d|key)$")
+# Shortest value of a credential-named environment variable that is masked
+# wherever it appears in a forwarded line (_secret_values).
+_MIN_MASKED_VALUE_CHARS = 8
+# Candidate keys, each found with one forward scan whose start positions are
+# word starts only, so a long word is scanned once and the scan is linear in
+# the line: a KEY=value (blanks around the = allowed), a --flag or -flag
+# followed by a blank and its value, a key: value field (YAML, a header) or a
+# "key": value one (JSON). Whether the key names a credential is decided on
+# the capture (_SECRET_KEY_RE), never inside the scan.
+_ASSIGNMENT_KEY_RE = re.compile(r"\b(?P<key>\w+)\s*=\s*")
+_FLAG_KEY_RE = re.compile(r"(?<!\S)-{1,2}(?P<key>[A-Za-z][\w-]*)\s+")
+_FIELD_KEY_RE = re.compile(r"""(?<![\w-])(?P<q>["']?)(?P<key>[\w-]+)(?P=q)\s*:\s*""")
+# The value of an assignment or a flag is one shell word: unquoted runs,
+# backslash escapes (a blank included) and quoted parts in any order, up to
+# an unescaped blank outside quotes — TOKEN=ab"c d" and TOKEN=abc\ def are
+# one value each — and a quote never closed (the 120-rune cut fullsend
+# applies to a displayed command, or the forwarded line's own cut, landed
+# inside it) runs to the end of the line, a trailing lone backslash included,
+# so no fragment of the value gets through. An assignment that opens inside
+# a quoted word ("api_key=ab cd") runs to that word's closing quote first.
+_SHELL_WORD_RE = re.compile(
+    r"""(?:[^\s"'\\]+|\\.?|"(?:[^"\\]|\\.?)*(?:"|$)|'(?:[^'\\]|\\.?)*(?:'|$))+""")
+_QUOTED_TAIL_RE = {
+    '"': re.compile(r'(?:[^"\\]|\\.?)*(?:"|$)'),
+    "'": re.compile(r"(?:[^'\\]|\\.?)*(?:'|$)"),
+}
+# A field's value: a quoted string, or a bare scalar up to a blank or a
+# JSON/YAML delimiter.
+_FIELD_VALUE_RE = re.compile(
+    r"""(?:"(?:[^"\\]|\\.?)*(?:"|$)|'(?:[^'\\]|\\.?)*(?:'|$)|[^\s,;}\]]+)""")
+# ``Authorization: Bearer|Basic|token <x>`` and a bare ``Bearer <x>``; the
+# userinfo of a URL, ``user:pass@`` shown as ``user:***@`` and a bare
+# ``token@`` as ``***@``. The cut form takes the end of a clipped line for
+# the ``@`` a userinfo cut before its host no longer has.
+_BEARER_RE = re.compile(
+    r"(?i)\b((?:authorization:\s*(?:bearer|basic|token)|bearer)\s+)"
+    r"""(?:"[^"]*(?:"|$)|'[^']*(?:'|$)|\S+)""")
+_URL_USERINFO_RE = re.compile(
+    r"(?i)(?<![a-z0-9+.-])([a-z][a-z0-9+.-]*://)([^\s/@]+)(@)")
+_URL_USERINFO_CUT_RE = re.compile(
+    r"(?i)(?<![a-z0-9+.-])([a-z][a-z0-9+.-]*://)([^\s/@]+)(@|$)")
+# A ``⚙`` tool-call line, ``  ⚙ <Tool>: <argument>`` or ``  ⚙ <Tool>``, is
+# forwarded without its raw argument (_render_tool_call): a file tool keeps
+# its path or pattern, the useful progress signal; ``Bash`` shows the program
+# name alone — the first shell word after any leading NAME=value assignments,
+# when it is a plain program name; every other tool (Agent, Task, Skill,
+# WebFetch, WebSearch, an MCP tool, an unknown name) shows its name alone,
+# its argument being a command or a free-text prompt that can carry anything.
+_TOOL_MARKER_RE = re.compile(r"^ {2,}⚙\ufe0f?")
+_TOOL_LINE_RE = re.compile(r"^( {2,}⚙\ufe0f?)(?:\s+([\w.-]+)(?::\s*(.*))?)?$")
+_FILE_TOOLS = frozenset(
+    {"Read", "Write", "Edit", "MultiEdit", "Glob", "Grep", "NotebookEdit", "LS"})
+_PROGRAM_NAME_RE = re.compile(r"[\w.+~/-]+")
+_SHELL_ASSIGNMENT_RE = re.compile(r"[A-Za-z_]\w*=")
 # Terminal control in a forwarded line, dropped before it is printed (the
 # capture keeps it): CSI sequences (colour, cursor movement), OSC strings
 # (title, hyperlink, clipboard — ended by BEL or ST), DCS/SOS/PM/APC strings
 # (ended by ST), the nF and single-character escape sequences, then every
 # other C0/C1 control character but the tab. The 8-bit C1 introducers and ST
 # are taken as their 7-bit ``ESC`` forms are. A string with no terminator on
-# the line runs to its end, as a terminal would take it.
+# the line runs to its end, as a terminal would take it. Then the Unicode
+# format characters that reorder or hide text in a log viewer: the bidi
+# controls (U+061C, U+200E/F, U+202A–U+202E, U+2066–U+2069), the line and
+# paragraph separators (U+2028/9) and the zero-width characters (U+200B–D,
+# U+2060–U+2064, U+FEFF). Ordinary non-ASCII text, the markers' U+FE0F
+# included, stays.
 _CONTROL_RE = re.compile(
     r"(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]"                        # CSI
     r"|(?:\x1b\]|\x9d).*?(?:\x07|\x1b\\|\x9c|$)"               # OSC
     r"|(?:\x1b[PX^_]|[\x90\x98\x9e\x9f]).*?(?:\x1b\\|\x9c|$)"  # DCS SOS PM APC
     r"|\x1b[ -/]*[0-~]"                                        # nF, Fp, Fe, Fs
-    r"|[\x00-\x08\x0a-\x1f\x7f-\x9f]")                         # other C0/C1
+    r"|[\x00-\x08\x0a-\x1f\x7f-\x9f]"                          # other C0/C1
+    r"|[\u061c\u200b-\u200f\u2028-\u202e\u2060-\u2064\u2066-\u2069\ufeff]")
 _DETAIL_INDENT = " " * 4
 
 
@@ -475,9 +542,11 @@ class FullsendRunner(EvalRunner):
         except (OSError, subprocess.SubprocessError) as e:
             return -1, "", str(e), time.monotonic() - start
         # Both pipes are read as they fill (neither can block fullsend) and,
-        # with a log prefix, forwarded live; the readers own the pipes from
-        # here on, so the teardown below only reaps.
-        console = _ConsoleCapture(proc, self._log_prefix)
+        # with a log prefix, forwarded live — with the values of the
+        # credential-named variables of fullsend's environment masked; the
+        # readers own the pipes from here on, so the teardown below only reaps.
+        secrets = _secret_values(env) if self._log_prefix else ()
+        console = _ConsoleCapture(proc, self._log_prefix, secrets=secrets)
         try:
             try:
                 # The contract of communicate(timeout): both pipes at EOF and
@@ -617,7 +686,9 @@ class _ConsoleCapture:
     One daemon thread per pipe keeps every line — the text is what
     ``communicate`` would have returned: universal newlines, in order — and,
     given a log prefix, prints the lines :class:`_ConsoleFilter` selects under
-    ``  <prefix> | `` as they arrive. Reading both pipes at once is what keeps
+    ``  <prefix> | `` as they arrive, with ``secrets`` (the values of the
+    credential-named environment variables, see :func:`_secret_values`)
+    masked in them. Reading both pipes at once is what keeps
     fullsend from blocking on a full one; the threads are daemons so a
     descendant that inherited a pipe and outlives fullsend cannot hang the
     harness (:meth:`join` is bounded, and what was read by then is kept).
@@ -625,7 +696,8 @@ class _ConsoleCapture:
     a reader still blocked on such a pipe goes on emptying it (a blocked read
     cannot be interrupted) and closes it at EOF."""
 
-    def __init__(self, proc: subprocess.Popen, log_prefix: Optional[str] = None):
+    def __init__(self, proc: subprocess.Popen, log_prefix: Optional[str] = None,
+                 secrets=()):
         self._lines: dict = {"stdout": [], "stderr": []}
         self._threads: list = []
         # Written under _print_lock by detach(), read under it before a print.
@@ -634,14 +706,15 @@ class _ConsoleCapture:
             if stream is None:
                 continue
             thread = threading.Thread(
-                target=self._pump, args=(name, stream, log_prefix),
+                target=self._pump, args=(name, stream, log_prefix, secrets),
                 name=f"fullsend-{name}", daemon=True)
             thread.start()
             self._threads.append(thread)
 
-    def _pump(self, name: str, stream, log_prefix: Optional[str]) -> None:
+    def _pump(self, name: str, stream, log_prefix: Optional[str],
+              secrets=()) -> None:
         lines = self._lines[name]
-        select = _ConsoleFilter() if log_prefix else None
+        select = _ConsoleFilter(secrets) if log_prefix else None
         try:
             for line in stream:
                 if self._detached:
@@ -717,20 +790,22 @@ class _ConsoleFilter:
     permissions.allow entries`` line. Dropped: everything else — the
     assistant's thinking (``🧠``) and the multi-line text after a ``💬``/``🧠``
     line, the pre/post-script output, the sandbox's own chatter. A line is
-    matched, and forwarded, with its terminal control stripped
-    (:data:`_CONTROL_RE`), credential assignments redacted and clipped (see
-    :func:`_present`). One instance per pipe: the only state is whether a
-    detail block is open."""
+    matched, and forwarded, with its terminal control and the Unicode bidi
+    and zero-width characters stripped (:data:`_CONTROL_RE`); a forwarded
+    line is then rendered by :func:`_present` (a ``⚙`` line without its raw
+    argument, ``secrets`` masked, cut, credentials redacted). One instance
+    per pipe: the only state is whether a detail block is open."""
 
-    def __init__(self):
+    def __init__(self, secrets=()):
         self._in_block = False
+        self._secrets = tuple(secrets)
 
     def select(self, line: str) -> Optional[str]:
         text = _CONTROL_RE.sub("", line).rstrip()
         if not text.strip():
             self._in_block = False
             return None
-        return _present(text) if self._picks(text) else None
+        return _present(text, self._secrets) if self._picks(text) else None
 
     def _picks(self, text: str) -> bool:
         if _SECTION_LINE_RE.match(text) or (
@@ -747,14 +822,150 @@ class _ConsoleFilter:
         return bool(_ALERT_LINE_RE.match(text))
 
 
-def _present(text: str) -> str:
-    """A console line as forwarded: credential values redacted (a quoted one
-    left open by fullsend's 120-rune cut to the end of the line, see
-    :data:`_SECRET_ASSIGNMENT_RE`), then cut at :data:`_MAX_STREAM_LINE_CHARS`."""
-    text = _SECRET_ASSIGNMENT_RE.sub(r"\1***", text)
-    if len(text) <= _MAX_STREAM_LINE_CHARS:
-        return text
-    return text[:_MAX_STREAM_LINE_CHARS - 1] + "…"
+def _present(text: str, secrets=()) -> str:
+    """A console line as forwarded. A ``⚙`` line is rendered without its raw
+    argument first (:func:`_render_tool_call`); ``secrets`` (the values of the
+    credential-named environment variables, longest first) are masked
+    wherever they appear; the line is cut at :data:`_MAX_STREAM_LINE_CHARS`
+    and then, cut, redacted (:func:`_redact`) — in that order, so the
+    redaction's cost is bounded by the cut. The cut cannot expose anything:
+    a bare value cut short is still the rest of its word, a quoted one cut
+    short runs to the end of the line, and a userinfo cut before its ``@``
+    is taken for one. A line the redaction lengthened is cut again."""
+    if _TOOL_MARKER_RE.match(text):
+        text = _render_tool_call(text)
+    for value in secrets:
+        text = text.replace(value, "***")
+    cut = len(text) > _MAX_STREAM_LINE_CHARS
+    if cut:
+        text = text[:_MAX_STREAM_LINE_CHARS - 1]
+    text = _redact(text, cut=cut)
+    if cut or len(text) > _MAX_STREAM_LINE_CHARS:
+        text = text[:_MAX_STREAM_LINE_CHARS - 1] + "…"
+    return text
+
+
+def _render_tool_call(text: str) -> str:
+    """A ``⚙`` line without its raw argument (see :data:`_TOOL_LINE_RE`)."""
+    m = _TOOL_LINE_RE.match(text)
+    if m is None:  # a shape fullsend does not print: the marker alone
+        return _TOOL_MARKER_RE.match(text).group(0)
+    lead, tool, argument = m.groups()
+    if tool is None:
+        return lead
+    if tool in _FILE_TOOLS:
+        return f"{lead} {tool}: {argument}" if argument else f"{lead} {tool}"
+    program = _program_name(argument) if tool == "Bash" and argument else None
+    return f"{lead} {tool}: {program}" if program else f"{lead} {tool}"
+
+
+def _program_name(command: str) -> Optional[str]:
+    """The program a shell command line starts with: its first word after
+    any leading NAME=value assignments, when that word is a plain program
+    name (letters, digits, ``_ . + ~ / -``). ``None`` for an unterminated
+    quote before it (the command was cut) or a word that is not one (an
+    option, a subshell, a variable)."""
+    lex = shlex.shlex(command, posix=True)
+    lex.whitespace_split = True
+    lex.commenters = ""
+    try:
+        for word in lex:
+            if _SHELL_ASSIGNMENT_RE.match(word):
+                continue
+            return word if _PROGRAM_NAME_RE.fullmatch(word) else None
+    except ValueError:  # no closing quotation, no escaped character
+        return None
+    return None
+
+
+def _secret_values(env) -> tuple:
+    """The values to mask in a forwarded line: those of the variables of
+    ``env`` (the environment fullsend runs with — the process environment
+    with execution.env, runner.env and the hook env over it) whose name names
+    a credential (:data:`_SECRET_KEY_RE`) and whose value, each line of a
+    multi-line one on its own, is :data:`_MIN_MASKED_VALUE_CHARS` or longer;
+    longest first, so a value another is a prefix of is masked whole. They
+    live on the console filter and are never printed."""
+    values = set()
+    for name, value in (env or {}).items():
+        if not isinstance(name, str) or not isinstance(value, str):
+            continue
+        if not _sensitive_key(name):
+            continue
+        for part in value.splitlines():
+            part = part.strip()
+            if len(part) >= _MIN_MASKED_VALUE_CHARS:
+                values.add(part)
+    return tuple(sorted(values, key=lambda v: (-len(v), v)))
+
+
+def _sensitive_key(name: str) -> bool:
+    return _SECRET_KEY_RE.search(name.lower()) is not None
+
+
+def _redact(text: str, cut: bool = False) -> str:
+    """Pattern-based redaction of a forwarded line (``cut``: the line was
+    clipped, so its end may be a cut rather than a terminator): URL userinfo
+    and ``Authorization`` values, then the keyed forms — ``KEY=value``,
+    ``--flag value``, ``key: value`` — whose key names a credential. Each
+    keyed form is found with one forward scan; its value is consumed whole
+    (:data:`_SHELL_WORD_RE`, :data:`_FIELD_VALUE_RE`), the key kept and the
+    value shown as ``***``."""
+    userinfo_re = _URL_USERINFO_CUT_RE if cut else _URL_USERINFO_RE
+    text = userinfo_re.sub(_mask_userinfo, text)
+    text = _BEARER_RE.sub(r"\1***", text)
+    text = _redact_keyed(text, _ASSIGNMENT_KEY_RE, _assignment_value_end)
+    text = _redact_keyed(text, _FLAG_KEY_RE, _shell_word_end)
+    return _redact_keyed(text, _FIELD_KEY_RE, _field_value_end)
+
+
+def _redact_keyed(text: str, key_re, value_end) -> str:
+    """``text`` with the value after every credential-named ``key_re`` match
+    replaced by ``***``; ``value_end(text, match)`` is where that value ends
+    (``None`` when there is none). The scan resumes after a redacted value,
+    and right after the key of any other match, so an assignment inside a
+    non-credential value is still found."""
+    out, kept, pos = [], 0, 0
+    while (m := key_re.search(text, pos)) is not None:
+        end = value_end(text, m) if _sensitive_key(m.group("key")) else None
+        if end is None or end <= m.end():
+            pos = m.end()
+            continue
+        out.append(text[kept:m.end()])
+        out.append("***")
+        kept = pos = end
+    out.append(text[kept:])
+    return "".join(out)
+
+
+def _mask_userinfo(m) -> str:
+    scheme, userinfo, terminator = m.groups()
+    if ":" in userinfo:
+        return scheme + userinfo.split(":", 1)[0] + ":***" + terminator
+    return scheme + "***" + terminator
+
+
+def _assignment_value_end(text: str, m) -> Optional[int]:
+    start = m.end()
+    opener = text[m.start("key") - 1] if m.start("key") else ""
+    if opener in _QUOTED_TAIL_RE:
+        # ``"api_key=ab cd"``: the quoted word the assignment opened inside
+        # ends the value, with any concatenated part after it.
+        start = _QUOTED_TAIL_RE[opener].match(text, start).end()
+        word = _SHELL_WORD_RE.match(text, start)
+        return word.end() if word else start
+    word = _SHELL_WORD_RE.match(text, start)
+    return word.end() if word else None
+
+
+def _shell_word_end(text: str, m) -> Optional[int]:
+    word = _SHELL_WORD_RE.match(text, m.end())
+    return word.end() if word else None
+
+
+def _field_value_end(text: str, m) -> Optional[int]:
+    value = _FIELD_VALUE_RE.match(text, m.end())
+    return value.end() if value else None
 
 
 # ── Helpers ──────────────────────────────────────────────────────────
