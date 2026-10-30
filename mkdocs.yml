@@ -178,7 +178,8 @@ nav:
     - "Compare models/runs (/eval-compare)": guides/eval-compare.md
     - "Analyze variance (/eval-anova)": guides/eval-anova.md
     - "Review results (/eval-review)": guides/eval-review.md
-    - "Optimize a skill (/eval-optimize)": guides/eval-optimize.md
+    - "Optimize with cap-evolve (/eval-optimize, default)": guides/optimize-capevolve.md
+    - "Optimize a skill, interactive loop (/eval-optimize --engine claude)": guides/eval-optimize.md
     - "Log to MLflow (/eval-mlflow)": guides/eval-mlflow.md
     - "Health-check the harness (/eval-check)": guides/eval-check.md
     - "Running headless (tool interception)": guides/headless.md

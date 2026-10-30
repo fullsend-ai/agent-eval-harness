@@ -39,7 +39,10 @@ Same config on your laptop, Harbor containers, or EvalHub.
   (including agentic documentation checks).
 - **Robust scoring.** LLM + code judges, pairwise A/B, thresholds, and HTML reports.
 - **MLflow-native traces.** Opt-in experiments, datasets, and hierarchical GenAI traces.
-- **Close the loop.** `/eval-optimize` proposes skill fixes from failures and re-runs.
+- **Close the loop.** `/eval-optimize` proposes skill fixes from failures and re-runs,
+  or, with `--engine capevolve` (`/eval-setup --optimize`), runs a statistically
+  validated search instead: train/val/test splits, a significance gate, a sealed
+  test score.
 
 ## Execution Model
 
@@ -730,6 +733,20 @@ Automated refinement loop: run eval, identify failures, read traces + judge rati
 
 ```
 /eval-optimize --model opus --max-iterations 3
+```
+
+With `--engine capevolve` (one-time setup: `/eval-setup --optimize`), runs a
+statistically validated search instead: train/val/test splits, a significance gate
+on validation (`Δ > k·SE`), and a sealed test split scored exactly once. See the
+[cap-evolve guide](https://skillberry-ai.github.io/cap-evolve/) /
+`website/guides/optimize-capevolve.md` for the full walkthrough, including the live
+dashboard.
+
+```bash
+/eval-optimize --engine capevolve --max-usd 25   # launch, $25 hard cap
+/eval-optimize --engine capevolve --status       # from any later session
+/eval-optimize --engine capevolve --stop         # stop the whole campaign, not just its launcher
+/eval-optimize --engine capevolve --apply        # winner onto a new git branch
 ```
 
 ### /eval-check

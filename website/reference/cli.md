@@ -7,11 +7,12 @@ containerized and platform backends. This page is the map of all of them.
 
 !!! warning "`agent-eval run` is not a real command"
     The deployment docs and some diagrams show `agent-eval run --config eval.yaml` as
-    a local entry point. **No such console script is registered.** The only
-    `[project.scripts]` entry in
+    a local entry point. **No such console script is registered.** The
+    `[project.scripts]` entries in
     [`pyproject.toml`](https://github.com/opendatahub-io/agent-eval-harness/blob/main/pyproject.toml)
-    is `claude-trace`. Run evals locally with the **`/eval-run`** slash command; use
-    the `python -m` modules below for the Harbor and EvalHub backends.
+    are `claude-trace` and `agent-eval-capevolve` (below). Run evals locally with the
+    **`/eval-run`** slash command; use the `python -m` modules below for the Harbor
+    and EvalHub backends.
 
 ## The surface at a glance
 
@@ -23,8 +24,9 @@ flowchart TD
         C2["/eval-compare"]
         C3["/eval-anova → /eval-run per cell → /eval-compare"]
     end
-    subgraph CS["Console script (pip-installed)"]
+    subgraph CS["Console scripts (pip-installed)"]
         T["claude-trace"]
+        CV["agent-eval-capevolve"]
     end
     subgraph PM["python -m entry points"]
         H["agent_eval.harbor.run"]
@@ -49,7 +51,7 @@ order for a first eval, or invoke individually.
 | `/eval-compare` | Compare results across models/runs into one HTML report | [eval-compare](../guides/eval-compare.md) |
 | `/eval-anova` | Fan a `matrix:` of configurations out over `/eval-run`, then ANOVA + Pareto into `anova.json` and the comparison report | [eval-anova](../guides/eval-anova.md) |
 | `/eval-review` | Interactive human review of a run; propose config changes | [eval-review](../guides/eval-review.md) |
-| `/eval-optimize` | Automated refinement loop (composes with `/eval-run`) | [eval-optimize](../guides/eval-optimize.md) |
+| `/eval-optimize` | Automated refinement loop (composes with `/eval-run`); `--engine capevolve` for statistically validated optimization (train/val/test, gated accept, sealed test) | [eval-optimize](../guides/eval-optimize.md) / [optimize-capevolve](../guides/optimize-capevolve.md) |
 | `/eval-mlflow` | Dataset sync, result logging, trace feedback | [eval-mlflow](../guides/eval-mlflow.md) |
 | `/eval-check` | Full-harness config health check across all skills | [eval-check](../guides/eval-check.md) |
 
@@ -161,6 +163,21 @@ Each run writes `stdout.log`, `stderr.log`, and `run_result.json` into the trace
     push is skipped with a warning — artifacts are still saved. See
     [tracing](../concepts/tracing.md) and
     [environment variables](environment-variables.md).
+
+## `agent-eval-capevolve` (console script)
+
+The other registered console script — `/eval-optimize`'s cap-evolve path
+(`skills/eval-optimize/scripts/capevolve.py`) is a thin shim around it. Run directly
+from any benchmark checkout for scripting or CI; see
+[Optimize with cap-evolve](../guides/optimize-capevolve.md) for the full walkthrough.
+
+```bash
+agent-eval-capevolve --dry-run
+agent-eval-capevolve --max-usd 25
+agent-eval-capevolve --status
+agent-eval-capevolve --stop
+agent-eval-capevolve --apply
+```
 
 ## `python -m` module entry points
 

@@ -1,5 +1,13 @@
 # Optimize a skill (/eval-optimize)
 
+!!! tip "Looking for statistically validated optimization?"
+    Pass `--engine capevolve` (one-time setup: `/eval-setup --optimize`) for
+    [cap-evolve](optimize-capevolve.md) instead of the loop on this page: a
+    train/val/test split, a significance gate, and a sealed test score. This page
+    covers the default interactive loop: quick, single-pass, with no statistical
+    validation — good for a fast iteration, but prefer cap-evolve for anything
+    you'd act on.
+
 `/eval-optimize` is an autonomous refinement loop. It runs your eval, reads which
 judges failed and why, forms evidence-grounded root-cause hypotheses, makes surgical
 edits to the skill's `SKILL.md`, re-runs against a baseline to catch regressions, and

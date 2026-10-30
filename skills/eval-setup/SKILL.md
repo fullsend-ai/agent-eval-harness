@@ -21,6 +21,7 @@ Parse `$ARGUMENTS` for:
 | `--skip-mlflow` | no | false | Skip MLflow setup entirely |
 | `--runs-dir <path>` | no | `eval/runs` | Directory where eval runs are stored |
 | `--harbor` | no | false | Install Harbor + Kubernetes for containerized execution (~650 MB) |
+| `--optimize` | no | false | Install cap-evolve-core and fetch its pinned skills tree for `/eval-optimize --engine capevolve` |
 
 ## Step 1: Install Dependencies (if needed)
 
@@ -64,6 +65,50 @@ else
   "$VENV_DIR/bin/pip" install harbor 'litellm<1.107' 'kubernetes>=29.0,<37.0'
 fi
 ```
+
+If `--optimize` was passed, also install cap-evolve for `/eval-optimize
+--engine capevolve`. This needs nothing from the user — no cap-evolve
+checkout, no path to provide. cap-evolve-core requires Python 3.11+, so check
+the venv first:
+
+```bash
+VENV_DIR="${CLAUDE_SKILL_DIR}/../../.eval-venv"
+"$VENV_DIR/bin/python3" -c 'import sys; sys.exit(sys.version_info < (3, 11))' \
+  && echo "venv python: OK" || echo "venv python: TOO_OLD"
+```
+
+On `TOO_OLD`, the venv was built by an older default `python3`. It holds only
+installed packages, so rebuild it with a 3.11+ interpreter (find one with
+`ls /opt/homebrew/bin/python3.1* /usr/local/bin/python3.1* /usr/bin/python3.1* 2>/dev/null`;
+if none exists, ask the user to install one, e.g. `brew install python@3.12`):
+
+```bash
+VENV_DIR="${CLAUDE_SKILL_DIR}/../../.eval-venv"
+rm -rf "$VENV_DIR"
+<python3.11+> "${CLAUDE_SKILL_DIR}/../../scripts/ensure_deps.py" "${CLAUDE_PLUGIN_DATA:-${XDG_STATE_HOME:-$HOME/.local/state}/agent-eval-data}"
+```
+
+Then install the pinned engine package and fetch its matching skills tree:
+
+```bash
+VENV_DIR="${CLAUDE_SKILL_DIR}/../../.eval-venv"
+if command -v uv &>/dev/null; then
+  uv pip install --python "$VENV_DIR/bin/python3" -e "${CLAUDE_SKILL_DIR}/../..[optimize]"
+else
+  "$VENV_DIR/bin/pip" install -e "${CLAUDE_SKILL_DIR}/../..[optimize]"
+fi
+python3 ${CLAUDE_SKILL_DIR}/../eval-optimize/scripts/capevolve.py --setup
+```
+
+`--setup` verifies cap-evolve-core and fetches cap-evolve's skills tree
+(phases, algorithms, templates — not on PyPI) at exactly the commit
+`pyproject.toml` pins, into the plugin data dir. Report its `skills_dir` and
+`pinned_sha`. A pin bump fetches a fresh copy, so the package and the tree
+never drift; `/eval-optimize --engine capevolve` also fetches it on first use,
+so this step only warms it. An `{"error": "setup_required", ...}` result means
+the install above failed — show its `reason`. A user who keeps their own
+cap-evolve checkout can set `CAPEVOLVE_SKILLS_DIR`; it is used only when it is
+at the pinned commit.
 
 ## Step 2: Run Preflight Checks
 

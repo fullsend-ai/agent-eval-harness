@@ -29,9 +29,11 @@ ALLOWED_YAML_READERS = {
     "agent_eval/agent/fullsend.py": {
         "_read_yaml_mapping": "fullsend <fullsend_dir>/config.yaml (agent registry) and the harness file's image:"},
     "agent_eval/evalhub/adapter.py": {"_run_cases": "case input.yaml"},
+    "agent_eval/engines/capevolve.py": {"_read_agent_input": "case input.yaml"},
     "agent_eval/examples.py": {"harvest_review_examples": "review.yaml"},
     "agent_eval/harbor/tasks.py": {"generate_tasks": "case input.yaml"},
     "agent_eval/hooks.py": {"_read_hook_output_file": "hook output YAML"},
+    "agent_eval/optimize/rollout.py": {"run_case": "summary.yaml"},
     "agent_eval/state.py": {"main": "tmp/ state files"},
     "agent_eval/tools/interception.py": {"generate_interception": "tool_handlers.yaml"},
     "scripts/ensure_deps.py": {"_read": "stdlib fallback when agent_eval cannot import (follows extends itself)"},
