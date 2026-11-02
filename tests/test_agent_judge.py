@@ -3061,3 +3061,32 @@ def test_a_symlinked_case_directory_is_recorded_and_blocks(tmp_path,
     assert agg["scored_cases"] == 9
     assert "incomplete_staging" in [r.metric for r in score.detect_regressions(
         res["aggregated"], {"shape": {"min_pass_rate": 0.9}})]
+
+
+def test_an_output_named_like_the_loss_key_is_rejected(tmp_path):
+    """`collection.json` keeps a case's per-output counts and its lost paths
+    in one mapping, so an output by that name would put an int where the loss
+    list goes and fail validation for a case that lost nothing."""
+    from agent_eval.config import COLLECTION_LOSS_KEY
+    cfg = tmp_path / "eval.yaml"
+    cfg.write_text(textwrap.dedent(f"""\
+        name: t
+        execution:
+          skill: s
+        outputs:
+          - path: {COLLECTION_LOSS_KEY}
+    """))
+    with pytest.raises(ValueError, match="reserved"):
+        EvalConfig.from_yaml(cfg)
+
+
+def test_an_ordinary_output_path_is_still_accepted(tmp_path):
+    cfg = tmp_path / "eval.yaml"
+    cfg.write_text(textwrap.dedent("""\
+        name: t
+        execution:
+          skill: s
+        outputs:
+          - path: out
+    """))
+    assert EvalConfig.from_yaml(cfg).outputs[0].path == "out"

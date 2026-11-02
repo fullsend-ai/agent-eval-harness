@@ -354,6 +354,11 @@ def _validate_path_segment(value: str, name: str) -> str:
 # config load can use it without an import cycle. This is the single place for
 # the guard: when you add a runner or a collect step that writes at the
 # workspace or case root, add its names to the matching group below.
+# The key `collect.py` records unlistable paths under in
+# `collection.json`, and `score.py` reads them from. Reserved as an
+# `outputs[].path` so the two cannot share a name in that mapping.
+COLLECTION_LOSS_KEY = "_unlistable"
+
 RESERVED_WORKSPACE_NAMES = frozenset(
     {
         # Written by workspace.py staging (workspace and case directories).
@@ -2565,11 +2570,22 @@ class EvalConfig:
 
         # Outputs (path or tool)
         for i, o in enumerate(raw.get("outputs", [])):
+            out_path = _validate_relative_path(
+                o.get("path", ""), f"outputs[{i}].path", reject_root=True
+            )
+            # `collection.json` records a case's per-output counts and its
+            # unlistable paths in one mapping, so an output by this name would
+            # put an int where the loss list goes and fail validation for a
+            # case that lost nothing. Rejected here rather than reshaped: the
+            # manifest is internal, and a reserved output name is the idiom
+            # this file already uses (`RESERVED_WORKSPACE_NAMES`).
+            if out_path == COLLECTION_LOSS_KEY:
+                raise ValueError(
+                    f"outputs[{i}].path: {COLLECTION_LOSS_KEY!r} is reserved — "
+                    "collection records lost paths under that name")
             config.outputs.append(
                 OutputConfig(
-                    path=_validate_relative_path(
-                        o.get("path", ""), f"outputs[{i}].path", reject_root=True
-                    ),
+                    path=out_path,
                     tool=o.get("tool", ""),
                     schema=o.get("schema", ""),
                     batch_pattern=o.get("batch_pattern", ""),

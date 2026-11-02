@@ -40,7 +40,8 @@ from typing import Optional
 import yaml
 
 from agent_eval.config import (
-    EvalConfig, RunnerConfig, _is_valid_eval_name, _validate_path_segment,
+    COLLECTION_LOSS_KEY, EvalConfig, RunnerConfig, _is_valid_eval_name,
+    _validate_path_segment,
 )
 from agent_eval.prompt_backends import (
     extract_runner_text,
@@ -4457,10 +4458,9 @@ def _copy_tree_dereferenced(src, dest, confine_root, ancestors, skip=None,
     return errors
 
 
-# The key `collect.py` records unlistable paths under, and this module
-# reads them from. One definition, because a two-sided contract spelled
-# twice is how producer and consumer drift apart.
-UNLISTABLE_KEY = "_unlistable"
+# One definition of the key, in config.py, which also reserves it as an
+# `outputs[].path` so a configured output cannot collide with it.
+UNLISTABLE_KEY = COLLECTION_LOSS_KEY
 
 
 def escape_log_text(text):
