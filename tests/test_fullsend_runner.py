@@ -2674,6 +2674,8 @@ class TestConsoleFilter:
                 "  💬 The function signature: run(cfg, timeout)\n"
                 "  💬 Cloning https://<pat>@github.com/x and https://example.test:8443/y\n"
                 "  💬 Pushed to https://<pat>:x-oauth-basic@github.com/x\n"
+                '  💬 Set {"password": f"{username}:<pw>"} and {"token": rb"ab,cd"} and '
+                'password: f"a b", next, token: fb12345678 next\n'
                 "  ✓ Harness loaded (0.5s)\n"
                 "    Tokens: in=158 out=54740 reasoning=14976 cache_read=4674845\n"
                 "  💬 Basic usage of the bearer concept\n")
@@ -2692,6 +2694,8 @@ class TestConsoleFilter:
             "  💬 The function signature: ***, timeout)",
             "  💬 Cloning https://***@github.com/x and https://example.test:8443/y",
             "  💬 Pushed to https://***@github.com/x",
+            '  💬 Set {"password": ***} and {"token": ***} and password: ***, next, '
+            "token: ***",
             "  ✓ Harness loaded (0.5s)",
             "    Tokens: in=158 out=54740 reasoning=14976 cache_read=4674845",
             "  💬 Basic usage of the bearer ***"]
