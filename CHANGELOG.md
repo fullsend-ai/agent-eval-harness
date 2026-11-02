@@ -1,3 +1,10 @@
+## [1.61.4](https://github.com/fullsend-ai/agent-eval-harness/compare/v1.61.3...v1.61.4) (2026-11-02)
+
+
+### Bug Fixes
+
+* **score:** learn a json_schema refusal before the tool request ([#290](https://github.com/fullsend-ai/agent-eval-harness/issues/290)) ([4619d36](https://github.com/fullsend-ai/agent-eval-harness/commit/4619d36fbf847ddfa5f82f9619652aab68390ac1)), closes [#289](https://github.com/fullsend-ai/agent-eval-harness/issues/289)
+
 ## [1.61.3](https://github.com/fullsend-ai/agent-eval-harness/compare/v1.61.2...v1.61.3) (2026-10-29)
 
 
