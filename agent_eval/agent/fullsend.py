@@ -214,7 +214,9 @@ _LITERAL_START_RE = re.compile(r"""[bBrRuUfF]{0,2}["']""")
 # after a ``+`` — a shell word, a quoted string, a ``$(…)`` substitution — a
 # quoted scheme alone chaining once more (``-H 'Authorization: Basic '***``,
 # ``'Authorization: ' + 'Basic ' + ***``), and failing one the word itself is
-# hidden (``'Authorization: ***'``). A
+# hidden (``'Authorization: ***'``); a string holding the scheme and a first
+# part of the credential is taken with the literals concatenated after it
+# (``'Basic firsthalf' + 'secondhalf'``). A
 # bare value is hidden after a token68 scheme as one word (``Bearer ***``,
 # ``Basic ***``, ``token ***``; a ``name=value`` list there, Rails'
 # ``Token token="…"``, as one), after a parameter scheme as its
@@ -1073,6 +1075,14 @@ def _authorization_credentials(text: str, i: int, quoted_name: bool, quote):
         scheme = _AUTH_SCHEME_RE.match(text, i, end)
         if scheme is not None and scheme.group("scheme").lower() in _KNOWN_SCHEMES:
             i = scheme.end()
+        # A string continued by another literal, adjacent or after a "+"
+        # ('Basic firsthalf' + 'secondhalf'): the credential is the whole.
+        if end < len(text) and text[end] == quote:
+            j = end + 1
+            while (more := _FIELD_CONTINUATION_RE.match(text, j)) is not None:
+                j = more.end()
+            if j > end + 1:
+                end = j
         return (i, end) if end > i else None
     scheme = _AUTH_SCHEME_RE.match(text, i)
     name = scheme.group("scheme").lower() if scheme is not None else None

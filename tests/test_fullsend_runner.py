@@ -2796,6 +2796,8 @@ class TestConsoleFilter:
                 "  💬 send: b'GET / HTTP/1.1\\r\\nHost: x\\r\\nAuthorization: Basic <b64>"
                 "\\r\\n\\r\\n'\n"
                 '  💬 Sent Authorization: Token token="<t>" and \\tAuthorization: NTLM <t>\n'
+                "  💬 Set h = 'Authorization: Basic <b64a>' + '<b64b>' and "
+                '{"Authorization": "Bearer <t1>" "<t2>", "x": 1}\n'
                 "  💬 send: b'GET / HTTP/1.1\\r\\nAuthorization: Basic b64pad==\\r\\n"
                 "X-Api-Key: <k>\\r\\n\\r\\n'\n"
                 "  💬 Sent Authorization: Basic b64pad= --password <pw> and "
@@ -2846,6 +2848,8 @@ class TestConsoleFilter:
             "  💬 send: b'GET / HTTP/1.1\\r\\nHost: x\\r\\nAuthorization: Basic ***"
             "\\r\\n\\r\\n'",
             "  💬 Sent Authorization: Token *** and \\tAuthorization: NTLM ***",
+            "  💬 Set h = 'Authorization: Basic *** and "
+            '{"Authorization": "Bearer ***, "x": 1}',
             "  💬 send: b'GET / HTTP/1.1\\r\\nAuthorization: Basic ***\\r\\nX-Api-Key: ***",
             "  💬 Sent Authorization: Basic *** --password *** and "
             "Authorization: Bearer ***\\r\\nX-Api-Key: ***"]
