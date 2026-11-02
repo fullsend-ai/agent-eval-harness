@@ -291,9 +291,16 @@ def _collect_per_case(workspace, output_dir, config):
         # itself has to be checked against the workspace — the same ordering
         # mistake one level up.
         if not _confined(workspace, case_dir):
-            print(f"  WARNING: skipping case directory "
-                  f"{escape_log_text(case_dir)} — it resolves outside "
-                  f"the workspace", file=sys.stderr)
+            # Record it like every other unconfined path in this file, and
+            # keep the case in the run. Warning and moving on would hand the
+            # agent the suppression this whole change exists to stop: replace
+            # your case directory with a symlink and the unfavourable
+            # artifacts are simply never collected. Worse, with nothing
+            # copied there is no `cases/<id>` for `_get_case_dirs` to find,
+            # so the case would leave the denominator entirely rather than
+            # being marked incomplete.
+            _note_lost(results, case_id, case_dir.name)
+            (output_dir / "cases" / case_id).mkdir(parents=True, exist_ok=True)
             continue
 
         for output_cfg in config.outputs:

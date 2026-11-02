@@ -2963,18 +2963,30 @@ class TestCollectionLossHardening:
         assert agg["incomplete_cases"] == 0
 
 
-def test_a_symlinked_case_directory_is_not_collected(tmp_path, monkeypatch):
+def test_a_symlinked_case_directory_is_recorded_and_blocks(tmp_path,
+                                                           monkeypatch):
     """`is_dir()` follows symlinks, so `cases/<id> -> /outside` reached the
-    collection loop and everything under it then resolved "under" that root.
-    The confinement check is relative to the case dir, so the root itself has
-    to be checked against the workspace."""
+    collection loop and everything under it resolved "under" that root.
+
+    Refusing it is only half the requirement. An earlier version of this test
+    asserted nothing was copied and stopped there — which is the suppression
+    this PR exists to stop, one step along: with nothing copied there is no
+    `cases/<id>` for `_get_case_dirs` to find, so the case leaves the
+    denominator instead of being marked incomplete.
+    """
     import collect
+    import score
     outside = tmp_path / "outside" / "out"
     outside.mkdir(parents=True)
     (outside / "secret.md").write_text("NOT THE AGENT'S")
     ws = tmp_path / "ws"
     (ws / "cases").mkdir(parents=True)
     os.symlink(tmp_path / "outside", ws / "cases" / "c0")
+    for i in range(1, 10):
+        c = ws / "cases" / f"c{i}" / "out"
+        c.mkdir(parents=True)
+        (c / "ok.md").write_text("fine")
+
     cfg = tmp_path / "eval.yaml"
     cfg.write_text(textwrap.dedent("""\
         name: t
@@ -2983,10 +2995,29 @@ def test_a_symlinked_case_directory_is_not_collected(tmp_path, monkeypatch):
         outputs:
           - path: out
     """))
-    out = tmp_path / "out"
+    runs = tmp_path / "runs"
+    out = runs / "t" / "r1"
+    monkeypatch.setenv("AGENT_EVAL_RUNS_DIR", str(runs))
     monkeypatch.setattr(sys, "argv", [
         "collect", "--config", str(cfg), "--workspace", str(ws),
         "--output", str(out)])
     collect.main()
-    assert not (out / "cases" / "c0").exists()
+
+    # nothing from outside the workspace was copied
     assert not any(p.name == "secret.md" for p in out.rglob("*"))
+    # the loss is recorded, and the case is still part of the run
+    recorded = json.loads((out / "collection.json").read_text())
+    assert recorded["c0"][collect.UNLISTABLE_KEY] == ["c0"]
+    assert (out / "cases" / "c0").is_dir()
+
+    # and it reaches the gate
+    config = _config(JudgeConfig(name="shape", check="return True, 'ok'"),
+                     outputs=["out"])
+    res = score.score_cases(load_judges(config, project_root=str(tmp_path)),
+                            sorted((out / "cases").iterdir()), config,
+                            run_id="r1")
+    agg = res["aggregated"]["shape"]
+    assert agg["incomplete_cases"] == 1
+    assert agg["scored_cases"] == 9
+    assert "incomplete_staging" in [r.metric for r in score.detect_regressions(
+        res["aggregated"], {"shape": {"min_pass_rate": 0.9}})]
