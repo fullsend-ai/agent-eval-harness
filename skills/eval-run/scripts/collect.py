@@ -29,7 +29,7 @@ from agent_eval.config import EvalConfig
 from agent_eval.events import (
     DEFAULT_RESULT_CAP, parse_stream_events, merge_subagent_transcripts,
 )
-from score import _escape_staging_text
+from score import UNLISTABLE_KEY, escape_log_text
 
 # Files/dirs created by the harness infrastructure, not by the skill
 _HARNESS_PATHS = {
@@ -39,7 +39,6 @@ _HARNESS_PATHS = {
 }
 
 
-UNLISTABLE_KEY = "_unlistable"
 
 
 def _confined(root: Path, path: Path) -> bool:
@@ -68,15 +67,15 @@ def _note_lost(results, case_id, rel):
     `collection.json` is read by `score.py::load_case_record`, which raises on
     a recorded loss. Both the path and the case id come from the agent's
     workspace, so they are escaped before they reach the log
-    (`_escape_staging_text`): a newline or a leading ``::`` must not forge a
+    (`escape_log_text`): a newline or a leading ``::`` must not forge a
     log line or a workflow command.
     """
     lost = results.setdefault(case_id, {}).setdefault(UNLISTABLE_KEY, [])
     rel = str(rel)
     if rel not in lost:
         lost.append(rel)
-    print(f"  WARNING: {_escape_staging_text(case_id)}: cannot collect "
-          f"{_escape_staging_text(rel)} — its contents are not collected",
+    print(f"  WARNING: {escape_log_text(case_id)}: cannot collect "
+          f"{escape_log_text(rel)} — its contents are not collected",
           file=sys.stderr)
 
 
@@ -286,6 +285,16 @@ def _collect_per_case(workspace, output_dir, config):
 
     for case_dir in sorted(d for d in cases_dir.iterdir() if d.is_dir()):
         case_id = case_dir.name
+        # `is_dir()` follows symlinks, so `cases/<id> -> /outside` reaches
+        # here and every path under it then resolves "under" that root. The
+        # confinement check below is relative to the case dir, so the root
+        # itself has to be checked against the workspace — the same ordering
+        # mistake one level up.
+        if not _confined(workspace, case_dir):
+            print(f"  WARNING: skipping case directory "
+                  f"{escape_log_text(case_dir)} — it resolves outside "
+                  f"the workspace", file=sys.stderr)
+            continue
 
         for output_cfg in config.outputs:
             if not output_cfg.path:

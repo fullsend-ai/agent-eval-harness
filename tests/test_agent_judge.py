@@ -2830,7 +2830,7 @@ class TestCollectionLossHardening:
         hostile.mkdir(parents=True)
         (hostile / "evidence.md").write_text("FAILING EVIDENCE")
         with self._unreadable(hostile):
-            run = self._collect(tmp_path, monkeypatch, ws)
+            self._collect(tmp_path, monkeypatch, ws)
         err = capsys.readouterr().err
         assert "WARNING" in err
         assert all(not line.lstrip().startswith("::")
@@ -2961,3 +2961,32 @@ class TestCollectionLossHardening:
         agg = self._gate(tmp_path, monkeypatch, lambda p: p.write_text(
             json.dumps({"c0": {"out": 1, "_unlistable": []}, "c1": {}})))
         assert agg["incomplete_cases"] == 0
+
+
+def test_a_symlinked_case_directory_is_not_collected(tmp_path, monkeypatch):
+    """`is_dir()` follows symlinks, so `cases/<id> -> /outside` reached the
+    collection loop and everything under it then resolved "under" that root.
+    The confinement check is relative to the case dir, so the root itself has
+    to be checked against the workspace."""
+    import collect
+    outside = tmp_path / "outside" / "out"
+    outside.mkdir(parents=True)
+    (outside / "secret.md").write_text("NOT THE AGENT'S")
+    ws = tmp_path / "ws"
+    (ws / "cases").mkdir(parents=True)
+    os.symlink(tmp_path / "outside", ws / "cases" / "c0")
+    cfg = tmp_path / "eval.yaml"
+    cfg.write_text(textwrap.dedent("""\
+        name: t
+        execution:
+          skill: s
+        outputs:
+          - path: out
+    """))
+    out = tmp_path / "out"
+    monkeypatch.setattr(sys, "argv", [
+        "collect", "--config", str(cfg), "--workspace", str(ws),
+        "--output", str(out)])
+    collect.main()
+    assert not (out / "cases" / "c0").exists()
+    assert not any(p.name == "secret.md" for p in out.rglob("*"))

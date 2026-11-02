@@ -133,8 +133,8 @@ def _require_no_collection_loss(manifest_path: Path, case_id: str) -> None:
 
     def invalid(why):
         return ValueError(
-            f"collection manifest {_escape_staging_text(manifest_path)} "
-            f"cannot be validated: {_escape_staging_text(why)}")
+            f"collection manifest {escape_log_text(manifest_path)} "
+            f"cannot be validated: {escape_log_text(why)}")
 
     if manifest_path.is_symlink() or not manifest_path.is_file():
         raise invalid("not a regular file")
@@ -150,14 +150,14 @@ def _require_no_collection_loss(manifest_path: Path, case_id: str) -> None:
         return
     if not isinstance(entry, dict):
         raise invalid("a case entry is not an object")
-    lost = entry.get("_unlistable")
+    lost = entry.get(UNLISTABLE_KEY)
     if lost is None:
         return
     if not isinstance(lost, list) or not all(isinstance(p, str) for p in lost):
-        raise invalid("`_unlistable` is not a list of paths")
+        raise invalid(f"`{UNLISTABLE_KEY}` is not a list of paths")
     if lost:
         raise OSError("collection could not collect "
-                      + ", ".join(_escape_staging_text(p) for p in lost))
+                      + ", ".join(escape_log_text(p) for p in lost))
 
 
 # ---------------------------------------------------------------------------
@@ -2036,9 +2036,9 @@ def _note_verdict_stepdown(backend, model, exc, *, route=""):
         first = key not in _VERDICT_STEPDOWNS
         _VERDICT_STEPDOWNS.add(key)
     if first:
-        where = f" (routing {_escape_staging_text(route)})" if route else ""
-        print(f"  WARNING: {_escape_staging_text(backend)} rejected structured outputs for "
-              f"{_escape_staging_text(model)}{where}; judges fall back to the forced tool "
+        where = f" (routing {escape_log_text(route)})" if route else ""
+        print(f"  WARNING: {escape_log_text(backend)} rejected structured outputs for "
+              f"{escape_log_text(model)}{where}; judges fall back to the forced tool "
               f"call for the rest of the run ({_stepdown_diagnostic(exc)})",
               file=sys.stderr, flush=True)
 
@@ -2054,7 +2054,7 @@ def _stepdown_diagnostic(exc):
     parts = []
     status = getattr(exc, "status_code", None)
     if status is not None:
-        parts.append(f"HTTP {_escape_staging_text(status)}")
+        parts.append(f"HTTP {escape_log_text(status)}")
     text = _http_error_text(exc)
     marker = next((m for m in STRUCTURED_OUTPUT_400_MARKERS if m in text), None)
     if marker:
@@ -2069,7 +2069,7 @@ def _stepdown_diagnostic(exc):
         except AttributeError:
             request_id = None
     if request_id:
-        parts.append(f"request id {_escape_staging_text(str(request_id)[:80])}")
+        parts.append(f"request id {escape_log_text(str(request_id)[:80])}")
     return ", ".join(parts) or "provider refusal"
 
 
@@ -4457,7 +4457,13 @@ def _copy_tree_dereferenced(src, dest, confine_root, ancestors, skip=None,
     return errors
 
 
-def _escape_staging_text(text):
+# The key `collect.py` records unlistable paths under, and this module
+# reads them from. One definition, because a two-sided contract spelled
+# twice is how producer and consumer drift apart.
+UNLISTABLE_KEY = "_unlistable"
+
+
+def escape_log_text(text):
     """Make a path or reason safe to print on a log line.
 
     Paths come from skill-produced (untrusted) trees, so a name can carry a
@@ -4472,7 +4478,7 @@ def _escape_staging_text(text):
 
 def _format_staging_problems(problems, limit=10):
     detail = "; ".join(
-        f"{_escape_staging_text(p)}: {_escape_staging_text(why[:200])}"
+        f"{escape_log_text(p)}: {escape_log_text(why[:200])}"
         for p, why in problems[:limit])
     more = "" if len(problems) <= limit else f" (+{len(problems) - limit} more)"
     noun = "entry" if len(problems) == 1 else "entries"
