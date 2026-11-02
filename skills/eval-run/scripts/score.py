@@ -146,14 +146,16 @@ def _require_no_collection_loss(manifest_path: Path, case_id: str) -> None:
         raise invalid(f"{type(e).__name__}: {e}") from e
     if not isinstance(collected, dict):
         raise invalid("root is not an object")
-    entry = collected.get(case_id)
-    if entry is None:
+    # A missing key is "nothing recorded"; an explicit null is a value that
+    # cannot be validated, so it fails closed like every other bad shape.
+    if case_id not in collected:
         return
+    entry = collected[case_id]
     if not isinstance(entry, dict):
         raise invalid("a case entry is not an object")
-    lost = entry.get(UNLISTABLE_KEY)
-    if lost is None:
+    if UNLISTABLE_KEY not in entry:
         return
+    lost = entry[UNLISTABLE_KEY]
     if not isinstance(lost, list) or not all(isinstance(p, str) for p in lost):
         raise invalid(f"`{UNLISTABLE_KEY}` is not a list of paths")
     if lost:

@@ -2962,8 +2962,11 @@ class TestCollectionLossHardening:
         b'{"c0": []}',                                # entry not an object
         b'{"c0": {"_unlistable": "out/sub"}}',        # not a list
         b'{"c0": {"_unlistable": [1]}}',              # not a list of paths
+        b'{"c0": {"_unlistable": null}}',             # explicit null, not absent
+        b'{"c0": null}',                              # explicit null entry
     ], ids=["malformed", "empty", "binary", "list-root", "string-root",
-            "list-entry", "string-paths", "int-paths"])
+            "list-entry", "string-paths", "int-paths", "null-paths",
+            "null-entry"])
     def test_a_manifest_that_cannot_be_validated_blocks(
             self, tmp_path, monkeypatch, body):
         agg = self._gate(tmp_path, monkeypatch,
@@ -3078,6 +3081,40 @@ def test_an_output_named_like_the_loss_key_is_rejected(tmp_path):
     """))
     with pytest.raises(ValueError, match="reserved"):
         EvalConfig.from_yaml(cfg)
+
+
+@pytest.mark.parametrize("spelling", [
+    "./_unlistable", "_unlistable/", "./_unlistable/", "_unlistable//",
+    "_unlistable/.",
+])
+def test_every_spelling_of_the_loss_key_is_rejected(tmp_path, spelling):
+    """`collect.py` normalises an output path with `str(Path(...))` before
+    keying its manifest by it, so `./_unlistable` and `_unlistable/` land on
+    the reserved key exactly as the bare name does."""
+    cfg = tmp_path / "eval.yaml"
+    cfg.write_text(textwrap.dedent(f"""\
+        name: t
+        execution:
+          skill: s
+        outputs:
+          - path: "{spelling}"
+    """))
+    with pytest.raises(ValueError, match="reserved"):
+        EvalConfig.from_yaml(cfg)
+
+
+@pytest.mark.parametrize("spelling", ["./out", "out/", "./out/", "out//"])
+def test_an_output_path_is_normalised_at_load(tmp_path, spelling):
+    """Every reader of `outputs[].path` sees the spelling `collect.py` uses."""
+    cfg = tmp_path / "eval.yaml"
+    cfg.write_text(textwrap.dedent(f"""\
+        name: t
+        execution:
+          skill: s
+        outputs:
+          - path: "{spelling}"
+    """))
+    assert EvalConfig.from_yaml(cfg).outputs[0].path == "out"
 
 
 def test_an_ordinary_output_path_is_still_accepted(tmp_path):

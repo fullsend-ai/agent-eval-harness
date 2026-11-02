@@ -2573,6 +2573,14 @@ class EvalConfig:
             out_path = _validate_relative_path(
                 o.get("path", ""), f"outputs[{i}].path", reject_root=True
             )
+            # Normalise once, here, to the spelling `collect.py` keys its
+            # manifest by (`_safe_path_component`: `str(Path(...))`). `./out`
+            # and `out/` are the same directory, so every reader of
+            # `outputs[].path` — including the reserved-name check below —
+            # must see one spelling, and that check cannot drift from the
+            # consumer. An empty path (a tool output) stays empty.
+            if out_path:
+                out_path = str(Path(out_path))
             # `collection.json` records a case's per-output counts and its
             # unlistable paths in one mapping, so an output by this name would
             # put an int where the loss list goes and fail validation for a
