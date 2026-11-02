@@ -2672,3 +2672,292 @@ class TestCollectionLossReachesTheGate:
         assert res["aggregated"]["shape"]["incomplete_cases"] == 0
         assert detect_regressions(
             res["aggregated"], {"shape": {"min_pass_rate": 0.9}}) == []
+
+
+class TestCollectionLossHardening:
+    """Every test drives a real entry point (`collect.main()`,
+    `score.score_cases`, `score.load_case_record`, `score.compare_runs`) —
+    never the walker alone, which stayed green with the collection loop
+    reverted to the silent `rglob`."""
+
+    @contextmanager
+    def _unreadable(self, path):
+        mode = path.stat().st_mode & 0o777
+        path.chmod(0)
+        try:
+            yield
+        finally:
+            path.chmod(mode)
+
+    def _collect(self, tmp_path, monkeypatch, ws, *, mode="case",
+                 batch_pattern=None, out_path="out", case_order=None):
+        import collect
+        lines = ["name: t", "execution:", f"  mode: {mode}", "  skill: s",
+                 "outputs:", f"  - path: {out_path}"]
+        if batch_pattern:
+            lines.append(f"    batch_pattern: {batch_pattern}")
+        cfg = tmp_path / "eval.yaml"
+        cfg.write_text("\n".join(lines) + "\n")
+        if case_order is not None:
+            (ws / "case_order.yaml").write_text(json.dumps(case_order))
+        run = tmp_path / "run"
+        monkeypatch.setattr(sys, "argv", [
+            "collect", "--config", str(cfg), "--workspace", str(ws),
+            "--output", str(run)])
+        collect.main()
+        return run
+
+    def _score(self, run, monkeypatch, tmp_path):
+        import score
+        monkeypatch.setenv("AGENT_EVAL_RUNS_DIR", str(tmp_path / "runs"))
+        config = _config(JudgeConfig(name="shape", check="return True, 'ok'"),
+                         outputs=["out"])
+        cases = sorted((run / "cases").iterdir())
+        res = score.score_cases(load_judges(config, project_root=str(tmp_path)),
+                                cases, config, run_id="run")
+        return res["aggregated"]["shape"], res
+
+    # ── 1. batch mode ───────────────────────────────────────────────
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file modes")
+    def test_batch_collection_records_an_unlistable_dir_against_every_case(
+            self, tmp_path, monkeypatch):
+        from score import detect_regressions
+        ws = tmp_path / "ws"
+        (ws / "out" / "sub").mkdir(parents=True)
+        for n in (1, 2, 3):
+            (ws / "out" / f"R-{n}.md").write_text(f"visible {n}")
+        (ws / "out" / "sub" / "R-2-evidence.md").write_text("FAILING EVIDENCE")
+        order = [{"case_id": f"c{i}", "entry_count": 1} for i in range(3)]
+        with self._unreadable(ws / "out" / "sub"):
+            run = self._collect(tmp_path, monkeypatch, ws, mode="batch",
+                                batch_pattern='"R-{n}"', case_order=order)
+        recorded = json.loads((run / "collection.json").read_text())
+        # Which case the lost file belonged to is unknowable, so all of them.
+        for cid in ("c0", "c1", "c2"):
+            assert recorded[cid]["_unlistable"] == ["out/sub"]
+        agg, res = self._score(run, monkeypatch, tmp_path)
+        assert agg["incomplete_cases"] == 3
+        assert "incomplete_staging" in [r.metric for r in detect_regressions(
+            res["aggregated"], {"shape": {"min_pass_rate": 0.9}})]
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file modes")
+    def test_batch_loss_with_nothing_else_collected_still_blocks(
+            self, tmp_path, monkeypatch):
+        """No readable file → the `if not files: continue` path."""
+        ws = tmp_path / "ws"
+        (ws / "out" / "sub").mkdir(parents=True)
+        (ws / "out" / "sub" / "R-1.md").write_text("FAILING EVIDENCE")
+        order = [{"case_id": "c0", "entry_count": 1}]
+        with self._unreadable(ws / "out" / "sub"):
+            run = self._collect(tmp_path, monkeypatch, ws, mode="batch",
+                                batch_pattern='"R-{n}"', case_order=order)
+        recorded = json.loads((run / "collection.json").read_text())
+        assert recorded["c0"]["_unlistable"] == ["out/sub"]
+
+    # ── 2. symlinked output root / ancestor ─────────────────────────
+
+    def _outside(self, tmp_path):
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "secret.md").write_text("NOT THE AGENT'S TO SHOW")
+        return outside
+
+    def _no_secret(self, run):
+        return [p for p in run.rglob("*") if p.name == "secret.md"]
+
+    def test_a_symlinked_output_root_is_not_followed(self, tmp_path,
+                                                     monkeypatch):
+        outside = self._outside(tmp_path)
+        ws = tmp_path / "ws"
+        case_ws = ws / "cases" / "c0"
+        case_ws.mkdir(parents=True)
+        os.symlink(outside, case_ws / "out")
+        run = self._collect(tmp_path, monkeypatch, ws)
+        assert self._no_secret(run) == []
+        recorded = json.loads((run / "collection.json").read_text())
+        assert recorded["c0"]["_unlistable"] == ["out"]
+
+    def test_a_symlinked_ancestor_of_the_output_root_is_not_followed(
+            self, tmp_path, monkeypatch):
+        outside = self._outside(tmp_path)
+        (outside / "out").mkdir()
+        (outside / "out" / "secret.md").write_text("NOT THE AGENT'S TO SHOW")
+        ws = tmp_path / "ws"
+        case_ws = ws / "cases" / "c0"
+        case_ws.mkdir(parents=True)
+        os.symlink(outside, case_ws / "a")
+        run = self._collect(tmp_path, monkeypatch, ws, out_path="a/out")
+        assert self._no_secret(run) == []
+        recorded = json.loads((run / "collection.json").read_text())
+        assert recorded["c0"]["_unlistable"] == ["a/out"]
+
+    def test_a_symlinked_batch_output_root_is_not_followed(self, tmp_path,
+                                                           monkeypatch):
+        outside = self._outside(tmp_path)
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        os.symlink(outside, ws / "out")
+        run = self._collect(tmp_path, monkeypatch, ws, mode="batch",
+                            batch_pattern='"*"',
+                            case_order=[{"case_id": "c0", "entry_count": 1}])
+        assert self._no_secret(run) == []
+        recorded = json.loads((run / "collection.json").read_text())
+        assert recorded["c0"]["_unlistable"] == ["out"]
+
+    def test_a_symlinked_output_root_reaches_the_gate(self, tmp_path,
+                                                      monkeypatch):
+        outside = self._outside(tmp_path)
+        ws = tmp_path / "ws"
+        for cid in ("c0", "c1"):
+            (ws / "cases" / cid / "out").mkdir(parents=True)
+            (ws / "cases" / cid / "out" / "ok.md").write_text("fine")
+        (ws / "cases" / "c0" / "out").rename(ws / "cases" / "c0" / "gone")
+        os.symlink(outside, ws / "cases" / "c0" / "out")
+        run = self._collect(tmp_path, monkeypatch, ws)
+        agg, _ = self._score(run, monkeypatch, tmp_path)
+        assert agg["incomplete_cases"] == 1
+
+    # ── 3. agent-controlled paths are escaped ───────────────────────
+
+    HOSTILE = "bad\n::error::forged"
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file modes")
+    def test_a_hostile_directory_name_cannot_forge_a_log_line(
+            self, tmp_path, monkeypatch, capsys):
+        ws = tmp_path / "ws"
+        hostile = ws / "cases" / "c0" / "out" / self.HOSTILE
+        hostile.mkdir(parents=True)
+        (hostile / "evidence.md").write_text("FAILING EVIDENCE")
+        with self._unreadable(hostile):
+            run = self._collect(tmp_path, monkeypatch, ws)
+        err = capsys.readouterr().err
+        assert "WARNING" in err
+        assert all(not line.lstrip().startswith("::")
+                   for line in err.splitlines())
+        assert "\n::error::" not in err
+
+    def test_a_hostile_recorded_path_cannot_forge_the_raise(self, tmp_path):
+        import score
+        run = tmp_path / "run"
+        case = run / "cases" / "c0"
+        _make_case(case, {"out/ok.md": "fine"})
+        (run / "collection.json").write_text(json.dumps(
+            {"c0": {"_unlistable": [self.HOSTILE, "::error::lead"]}}))
+        config = _config(JudgeConfig(name="shape", check="return True, 'ok'"),
+                         outputs=["out"])
+        with pytest.raises(OSError) as exc:
+            score.load_case_record(case, config)
+        text = str(exc.value)
+        assert "\n" not in text
+        assert "\\n::error::forged" in text      # escaped, not raw
+        assert "\\:\\:error" in text             # a leading `::` is broken up
+
+    # ── 4. pairwise ─────────────────────────────────────────────────
+
+    def _runs(self, tmp_path):
+        for run in ("a", "b"):
+            for cid in ("c0", "c1"):
+                _make_case(tmp_path / run / "cases" / cid,
+                           {"out/r.md": f"{run} {cid}"})
+        return tmp_path / "a", tmp_path / "b"
+
+    def _compare(self, a, b):
+        import score
+        config = _config(_agent_judge(), outputs=["out"])
+        with patch("score._format_outputs_for_pairwise", return_value="output"), \
+                patch("score._call_judge",
+                      return_value=({"preferred": "A", "reasoning": "r"}, None)), \
+                patch("score._get_anthropic_client", return_value=object()):
+            return score.compare_runs(a, b, config, ["c0", "c1"],
+                                      model="claude-sonnet-4-6")
+
+    @pytest.mark.parametrize("side", ["a", "b"])
+    def test_pairwise_blocks_a_case_either_side_lost_in_collection(
+            self, tmp_path, side):
+        """Each side has its OWN collection.json; the baseline's losses
+        count exactly as the candidate's do."""
+        a, b = self._runs(tmp_path)
+        (tmp_path / side / "collection.json").write_text(json.dumps(
+            {"c0": {"out": 1, "_unlistable": ["out/sub"]}}))
+        res = self._compare(a, b)
+        assert res["incomplete_cases"] == 1
+        c0 = next(r for r in res["per_case"] if r["case_id"] == "c0")
+        assert c0["winner"] == "error"
+        assert "content not staged" in c0["error"]
+        assert next(r for r in res["per_case"]
+                    if r["case_id"] == "c1")["winner"] != "error"
+
+    def test_pairwise_blocks_on_an_unvalidatable_manifest(self, tmp_path):
+        a, b = self._runs(tmp_path)
+        (tmp_path / "b" / "collection.json").write_text("{not json")
+        res = self._compare(a, b)
+        assert res["incomplete_cases"] == 2
+
+    def test_pairwise_with_clean_manifests_is_unaffected(self, tmp_path):
+        a, b = self._runs(tmp_path)
+        for side in ("a", "b"):
+            (tmp_path / side / "collection.json").write_text(json.dumps(
+                {"c0": {"out": 1}, "c1": {"out": 1}}))
+        res = self._compare(a, b)
+        assert res["incomplete_cases"] == 0 and res["errors"] == 0
+
+    # ── 5. the gate fails closed on a manifest it cannot validate ───
+
+    def _gate(self, tmp_path, monkeypatch, write_manifest):
+        run = tmp_path / "run"
+        for i in range(4):
+            _make_case(run / "cases" / f"c{i}", {"out/ok.md": "fine"})
+        if write_manifest is not None:
+            write_manifest(run / "collection.json")
+        agg, _ = self._score(run, monkeypatch, tmp_path)
+        return agg
+
+    @pytest.mark.parametrize("body", [
+        b"{not json",                                 # malformed
+        b"",                                          # truncated
+        b"\xff\xfe\x00",                              # not UTF-8
+        b"[]",                                        # root not an object
+        b'"text"',
+        b'{"c0": []}',                                # entry not an object
+        b'{"c0": {"_unlistable": "out/sub"}}',        # not a list
+        b'{"c0": {"_unlistable": [1]}}',              # not a list of paths
+    ], ids=["malformed", "empty", "binary", "list-root", "string-root",
+            "list-entry", "string-paths", "int-paths"])
+    def test_a_manifest_that_cannot_be_validated_blocks(
+            self, tmp_path, monkeypatch, body):
+        agg = self._gate(tmp_path, monkeypatch,
+                         lambda p: p.write_bytes(body))
+        # Structurally bad entries only concern c0; a bad root concerns all.
+        assert agg["incomplete_cases"] >= 1
+
+    def test_a_manifest_that_is_not_a_regular_file_blocks(self, tmp_path,
+                                                          monkeypatch):
+        agg = self._gate(tmp_path, monkeypatch, lambda p: p.mkdir())
+        assert agg["incomplete_cases"] == 4
+
+    def test_a_symlinked_manifest_blocks(self, tmp_path, monkeypatch):
+        real = tmp_path / "real.json"
+        real.write_text("{}")
+        agg = self._gate(tmp_path, monkeypatch,
+                         lambda p: os.symlink(real, p))
+        assert agg["incomplete_cases"] == 4
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file modes")
+    def test_an_unreadable_manifest_blocks(self, tmp_path, monkeypatch):
+        def write(p):
+            p.write_text("{}")
+            p.chmod(0)
+        agg = self._gate(tmp_path, monkeypatch, write)
+        assert agg["incomplete_cases"] == 4
+
+    def test_no_manifest_is_a_legacy_run_and_does_not_block(self, tmp_path,
+                                                            monkeypatch):
+        agg = self._gate(tmp_path, monkeypatch, None)
+        assert agg["incomplete_cases"] == 0
+
+    def test_a_valid_manifest_with_no_loss_does_not_block(self, tmp_path,
+                                                          monkeypatch):
+        agg = self._gate(tmp_path, monkeypatch, lambda p: p.write_text(
+            json.dumps({"c0": {"out": 1, "_unlistable": []}, "c1": {}})))
+        assert agg["incomplete_cases"] == 0

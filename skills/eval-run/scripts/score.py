@@ -117,6 +117,49 @@ def _require_listable(directory: Path) -> None:
         pass
 
 
+def _require_no_collection_loss(manifest_path: Path, case_id: str) -> None:
+    """Raise if `collect.py` recorded that it lost *case_id*'s evidence.
+
+    "No manifest" (a run collected before this existed) is the one case that
+    stays silent. A manifest that EXISTS but cannot be read, parsed or
+    validated is not: the loss it would have recorded is unknowable, and
+    treating it as "nothing lost" would let a threshold pass over survivors.
+    Both raise, which `score_cases` routes through `CaseEvidenceUnavailable`.
+    The case id and every recorded path are agent-controlled, so they are
+    escaped before they reach the message.
+    """
+    if not os.path.lexists(manifest_path):
+        return
+
+    def invalid(why):
+        return ValueError(
+            f"collection manifest {_escape_staging_text(manifest_path)} "
+            f"cannot be validated: {_escape_staging_text(why)}")
+
+    if manifest_path.is_symlink() or not manifest_path.is_file():
+        raise invalid("not a regular file")
+    try:
+        with open(manifest_path, encoding="utf-8") as f:
+            collected = json.load(f)
+    except (OSError, ValueError) as e:  # JSONDecodeError, UnicodeDecodeError
+        raise invalid(f"{type(e).__name__}: {e}") from e
+    if not isinstance(collected, dict):
+        raise invalid("root is not an object")
+    entry = collected.get(case_id)
+    if entry is None:
+        return
+    if not isinstance(entry, dict):
+        raise invalid("a case entry is not an object")
+    lost = entry.get("_unlistable")
+    if lost is None:
+        return
+    if not isinstance(lost, list) or not all(isinstance(p, str) for p in lost):
+        raise invalid("`_unlistable` is not a list of paths")
+    if lost:
+        raise OSError("collection could not collect "
+                      + ", ".join(_escape_staging_text(p) for p in lost))
+
+
 # ---------------------------------------------------------------------------
 # Case record loading — reads all files, no schema interpretation
 # ---------------------------------------------------------------------------
@@ -616,20 +659,13 @@ def load_case_record(case_dir, config, run_id=None, runs_dir=None,
     # as every other way a case loses its material (#277).
     #
     # `collection.json` sits at the run root, outside every case directory,
-    # so artifact collection cannot plant one.
-    if run_id:
-        collection_path = runs_dir / run_id / "collection.json"
-        if collection_path.is_file() and not collection_path.is_symlink():
-            try:
-                with open(collection_path) as f:
-                    collected = json.load(f)
-                lost = ((collected.get(case_id) or {}).get("_unlistable")
-                        if isinstance(collected, dict) else None)
-            except (json.JSONDecodeError, OSError, AttributeError):
-                lost = None
-            if lost:
-                raise OSError(
-                    f"collection could not list {', '.join(map(str, lost))}")
+    # so artifact collection cannot plant one. It is located from the case
+    # directory's own place in the run (`<run>/cases/<case>`), NOT from
+    # `run_id`: `compare_runs` loads each side without one, and each side has
+    # its own manifest.
+    if case_dir.parent.name == "cases":
+        _require_no_collection_loss(
+            case_dir.parent.parent / "collection.json", case_id)
 
     # --- Per-case hook results (written by execute.py) ---
     # Exposed as outputs["hooks"] so a judge or an `if:` condition can gate on
