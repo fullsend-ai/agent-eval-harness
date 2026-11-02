@@ -2680,6 +2680,8 @@ class TestConsoleFilter:
                 'secret: """<cut\n'
                 '  💬 Set password: """ab\\"""<tail>""" then token: rb\'\'\'c\\\'\'\'<tail>\'\'\', '
                 'next, and secret: """ab\\"""<cut\n'
+                '  💬 Set password: "ab" "cd" and {"token": "ab" + rb"cd", "user": "me"} and '
+                'secret: f"a" \'b\' next\n'
                 "  ✓ Harness loaded (0.5s)\n"
                 "    Tokens: in=158 out=54740 reasoning=14976 cache_read=4674845\n"
                 "  💬 Basic usage of the bearer concept\n")
@@ -2702,6 +2704,7 @@ class TestConsoleFilter:
             "token: ***",
             "  💬 Set password: *** then token: ***, next, and secret: ***",
             "  💬 Set password: *** then token: ***, next, and secret: ***",
+            '  💬 Set password: *** and {"token": ***, "user": "me"} and secret: *** next',
             "  ✓ Harness loaded (0.5s)",
             "    Tokens: in=158 out=54740 reasoning=14976 cache_read=4674845",
             "  💬 Basic usage of the bearer ***"]
@@ -2937,6 +2940,7 @@ class TestConsoleFilter:
                   "Authorization: X " + 'a="b"c' * 17_000, "Bearer " + '"' * 100_000,
                   "'Authorization: Basic ' + " + "'Basic ' + " * 10_000,
                   "Authorization: Basic b64pad=\\r\\nX: " * 4_000, "Authorization: Token " + "a=" * 50_000,
+                  "password: " + '"a" ' * 25_000, "password: " + '"a" + ' * 17_000,
                   "password: " + "a " * 50_000, "\x1b]" * 50_000, "\\" * 100_000)
         lines = ["Error: " + body for body in bodies] + [
             '  ⚙ Bash: "' + "x" * 100_000, "  ⚙ Bash: " + "x" * 100_000,

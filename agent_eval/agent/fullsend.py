@@ -180,17 +180,23 @@ _QUOTED_TAIL_RE = {
     '"': re.compile(r'(?:[^"\\]|\\.?)*(?:"|$)'),
     "'": re.compile(r"(?:[^'\\]|\\.?)*(?:'|$)"),
 }
-# A field's value: a quoted string (a ``b``, ``r``, ``u`` or ``f`` prefixed
-# one too, so an f-string's literal tail never shows past a brace; a
-# triple-quoted one through its closing triple, an escaped quote inside it
-# passed), or a bare scalar up to a JSON/YAML delimiter (``,`` ``;`` ``}`` ``]``) or the
+# A field's value: a string literal (_QUOTED_LITERAL; one continued by
+# another literal, adjacent or after a ``+``, taken whole), or a bare scalar up to a JSON/YAML delimiter (``,`` ``;`` ``}`` ``]``) or the
 # end of the line, blanks included — a multi-word password in prose
 # (``password: correct horse battery staple``) is hidden whole, at the price
 # of the rest of a line that merely reads ``token: …`` (the safe side).
-_FIELD_VALUE_RE = re.compile(
+# A string literal as a field value: an optional b/r/u/f prefix, then a
+# triple-quoted, double-quoted or single-quoted string, an escaped quote
+# passed, an unterminated one running to the end of the line.
+_QUOTED_LITERAL = (
     r"""(?:[bBrRuUfF]{1,2}(?=["']))?"""
-    r"""(?:\"\"\"(?:\\.|(?!\"\"\").)*(?:\"\"\"|$)|'''(?:\\.|(?!''').)*(?:'''|$)"""
-    r"""|"(?:[^"\\]|\\.?)*(?:"|$)|'(?:[^'\\]|\\.?)*(?:'|$)|[^,;}\]]+)""")
+    r"""(?:\"\"\"(?:\\.|(?!\"\"\").)*(?:\"\"\"|$)|\'\'\'(?:\\.|(?!\'\'\').)*(?:\'\'\'|$)"""
+    r"""|"(?:[^"\\]|\\.?)*(?:"|$)|'(?:[^'\\]|\\.?)*(?:'|$))""")
+_FIELD_VALUE_RE = re.compile(r"(?:" + _QUOTED_LITERAL + r"|[^,;}\]]+)")
+# A quoted field value continued by another literal, adjacent or after a
+# ``+`` (``"ab" "cd"``, ``"ab" + "cd"``): the credential is the whole.
+_FIELD_CONTINUATION_RE = re.compile(r"[ \t]*(?:\+[ \t]*)?" + _QUOTED_LITERAL)
+_LITERAL_START_RE = re.compile(r"""[bBrRuUfF]{0,2}["']""")
 # An ``Authorization`` value (``Proxy-Authorization``, ``X-Authorization``,
 # ``HTTP_AUTHORIZATION`` too) has its credentials shown as ``***``
 # (_redact_authorization). The header name is found bare (after a dot or a
@@ -1268,7 +1274,13 @@ def _shell_word_end(text: str, m) -> Optional[int]:
 
 def _field_value_end(text: str, m) -> Optional[int]:
     value = _FIELD_VALUE_RE.match(text, m.end())
-    return value.end() if value else None
+    if value is None:
+        return None
+    end = value.end()
+    if _LITERAL_START_RE.match(text, m.end()) is not None:
+        while (more := _FIELD_CONTINUATION_RE.match(text, end)) is not None:
+            end = more.end()
+    return end
 
 
 # ── Helpers ──────────────────────────────────────────────────────────
