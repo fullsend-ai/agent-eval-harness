@@ -159,13 +159,13 @@ _MIN_MASKED_VALUE_CHARS = 8
 # word starts only, so a long word is scanned once and the scan is linear in
 # the line: a KEY=value (blanks around the = allowed), a --flag or -flag
 # followed by a blank and its value, a key: value field (YAML, a header) or a
-# "key": value one (JSON; a bytes key, b'key', too). Whether the key names a
+# "key": value one (JSON; a prefixed key, b'key' or f'key', too). Whether the key names a
 # credential is decided on the capture (_SECRET_KEY_RE), never inside the
 # scan.
 _ASSIGNMENT_KEY_RE = re.compile(r"\b(?P<key>\w+)\s*=\s*")
 _FLAG_KEY_RE = re.compile(r"(?<!\S)-{1,2}(?P<key>[A-Za-z][\w-]*)\s+")
 _FIELD_KEY_RE = re.compile(
-    r"""(?<![\w-])(?:[bBrRuU]{1,2}(?=["']))?(?P<q>["']?)(?P<key>[\w-]+)(?P=q)\s*:\s*""")
+    r"""(?<![\w-])(?:[bBrRuUfF]{1,2}(?=["']))?(?P<q>["']?)(?P<key>[\w-]+)(?P=q)\s*:\s*""")
 # The value of an assignment or a flag is one shell word: unquoted runs,
 # backslash escapes (a blank included) and quoted parts in any order, up to
 # an unescaped blank outside quotes — TOKEN=ab"c d" and TOKEN=abc\ def are
@@ -193,8 +193,9 @@ _FIELD_VALUE_RE = re.compile(
 # dash, ``headers.authorization:``, ``X-Custom-Authorization:``, a Markdown
 # ``**Authorization**:`` or ``_Authorization_:``, an escaped line break as a
 # logged raw request prints, ``\r\nAuthorization:``, included; after a ``/``
-# it is a path), quoted as a JSON or dict key (a bytes key too) or opening a
-# quoted word (``-H 'Authorization: …'``), followed by ``:``, ``=`` or ``=>``. A quoted value, or the value of a header that
+# it is a path), quoted as a JSON or dict key (a ``b``, ``r``, ``u`` or ``f``
+# prefixed one too) or opening a quoted word (``-H 'Authorization: …'``),
+# followed by ``:``, ``=`` or ``=>``. A quoted value, or the value of a header that
 # opened a quoted word, is hidden through the closing quote, its scheme kept
 # when the rule knows it (``"Authorization":"Basic ***"``,
 # ``-H 'Authorization: Digest ***'``, ``'Authorization': '***'`` for a scheme
@@ -236,7 +237,7 @@ _FIELD_VALUE_RE = re.compile(
 # before its host no longer has.
 _AUTH_NAME = r"(?:proxy-|x-|http_)?authorization"
 _AUTH_LEAD_RE = re.compile(
-    r"(?i)(?:(?:[bru]{1,2})?(?P<nq>[\"'])" + _AUTH_NAME + r"(?P=nq)|(?P<eq>[\"'])"
+    r"(?i)(?:(?:[bruf]{1,2})?(?P<nq>[\"'])" + _AUTH_NAME + r"(?P=nq)|(?P<eq>[\"'])"
     + _AUTH_NAME + r"|(?:(?<![A-Za-z0-9/])|(?<=\\[nrt]))" + _AUTH_NAME + r"[*`_]*)"
     r"\s*(?::|=(?:>|(?!=)))\s*")
 _AUTH_SCHEME_RE = re.compile(r"(?P<scheme>[A-Za-z][\w-]*)[ \t]+(?=\S)")
@@ -1042,8 +1043,8 @@ def _authorization_credentials(text: str, i: int, quoted_name: bool, quote):
     n = len(text)
     if quote is None:
         j = i
-        while j < n and j < i + 2 and text[j] in "bBrRuU":
-            j += 1  # a bytes, raw or unicode literal's prefix
+        while j < n and j < i + 2 and text[j] in "bBrRuUfF":
+            j += 1  # a bytes, raw, unicode or f-string literal's prefix
         if j < n and text[j] in "\"'":
             quote, i = text[j], j + 1
     if quote is not None:

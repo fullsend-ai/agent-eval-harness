@@ -2722,8 +2722,9 @@ class TestConsoleFilter:
         # SSWS, its token quoted or not), a prose "authorization:" losing the
         # rest of its clause. After
         # a quoted name a bare value is hidden only behind a known scheme or
-        # inside brackets: an f-string is left to the bare Bearer rule, which
-        # hides its placeholder as it did. "Authorization" is not a
+        # inside brackets: an f-string's placeholder is left to the bare
+        # Bearer rule, which hides it as it did, and a literal in one is
+        # read like any prefixed string. "Authorization" is not a
         # credential key, so the field rule never swallows a header's
         # neighbours; a URL path or a comparison is no header.
         text = ('  💬 Sent {"Authorization":"Basic <b64>","user":"me"}\n'
@@ -2748,6 +2749,7 @@ class TestConsoleFilter:
                 '  💬 Sent Authorization: "Bearer <t>" and '
                 "{b'Authorization': b'Basic <b64>'}\n"
                 '  💬 Set headers = {"Authorization": f"Bearer {token}"}\n'
+                '  💬 Set h = {"Authorization": f"Basic <b64>", f"X-Api-Key": f"<k>"}\n'
                 '  💬 Set {"authorization": {"type": "bearer", "token": "<t>"}}\n'
                 "  💬 Note (authorization: 'pending') on the ticket\n"
                 "  💬 Ran curl -H 'Authorization: Digest username=\"me\", "
@@ -2803,6 +2805,7 @@ class TestConsoleFilter:
             "  💬 Ran curl -H 'Authorization: ***' https://x",
             '  💬 Sent Authorization: "Bearer ***" and {b\'Authorization\': b\'Basic ***\'}',
             '  💬 Set headers = {"Authorization": f"Bearer ***"}',
+            '  💬 Set h = {"Authorization": f"Basic ***", f"X-Api-Key": ***}',
             '  💬 Set {"authorization": {***}}',
             "  💬 Note (authorization: '***') on the ticket",
             "  💬 Ran curl -H 'Authorization: Digest ***' https://x",
