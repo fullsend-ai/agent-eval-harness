@@ -2678,6 +2678,8 @@ class TestConsoleFilter:
                 'password: f"a b", next, token: fb12345678 next\n'
                 '  💬 Set password: """<p w>""" then token: \'\'\'<t>\'\'\', next, and '
                 'secret: """<cut\n'
+                '  💬 Set password: """ab\\"""<tail>""" then token: rb\'\'\'c\\\'\'\'<tail>\'\'\', '
+                'next, and secret: """ab\\"""<cut\n'
                 "  ✓ Harness loaded (0.5s)\n"
                 "    Tokens: in=158 out=54740 reasoning=14976 cache_read=4674845\n"
                 "  💬 Basic usage of the bearer concept\n")
@@ -2698,6 +2700,7 @@ class TestConsoleFilter:
             "  💬 Pushed to https://***@github.com/x",
             '  💬 Set {"password": ***} and {"token": ***} and password: ***, next, '
             "token: ***",
+            "  💬 Set password: *** then token: ***, next, and secret: ***",
             "  💬 Set password: *** then token: ***, next, and secret: ***",
             "  ✓ Harness loaded (0.5s)",
             "    Tokens: in=158 out=54740 reasoning=14976 cache_read=4674845",

@@ -182,13 +182,14 @@ _QUOTED_TAIL_RE = {
 }
 # A field's value: a quoted string (a ``b``, ``r``, ``u`` or ``f`` prefixed
 # one too, so an f-string's literal tail never shows past a brace; a
-# triple-quoted one through its closing triple), or a bare scalar up to a JSON/YAML delimiter (``,`` ``;`` ``}`` ``]``) or the
+# triple-quoted one through its closing triple, an escaped quote inside it
+# passed), or a bare scalar up to a JSON/YAML delimiter (``,`` ``;`` ``}`` ``]``) or the
 # end of the line, blanks included — a multi-word password in prose
 # (``password: correct horse battery staple``) is hidden whole, at the price
 # of the rest of a line that merely reads ``token: …`` (the safe side).
 _FIELD_VALUE_RE = re.compile(
     r"""(?:[bBrRuUfF]{1,2}(?=["']))?"""
-    r"""(?:\"\"\"(?:(?!\"\"\").)*(?:\"\"\"|$)|'''(?:(?!''').)*(?:'''|$)"""
+    r"""(?:\"\"\"(?:\\.|(?!\"\"\").)*(?:\"\"\"|$)|'''(?:\\.|(?!''').)*(?:'''|$)"""
     r"""|"(?:[^"\\]|\\.?)*(?:"|$)|'(?:[^'\\]|\\.?)*(?:'|$)|[^,;}\]]+)""")
 # An ``Authorization`` value (``Proxy-Authorization``, ``X-Authorization``,
 # ``HTTP_AUTHORIZATION`` too) has its credentials shown as ``***``
