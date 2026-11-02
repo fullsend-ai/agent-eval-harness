@@ -61,8 +61,14 @@ def _confined(root: Path, path: Path) -> bool:
         return False
 
 
-def _note_lost(results, case_id, rel):
+def _note_lost(results, output_dir, case_id, rel):
     """Record that *rel* could not be collected for *case_id*.
+
+    A loss has two halves, and this is the only place either happens:
+    the manifest entry, and a `cases/<case_id>` directory under *output_dir*.
+    `score.py::_get_case_dirs` enumerates directories, not `collection.json`,
+    so a case whose artifacts were all lost would otherwise have no directory
+    and leave the denominator instead of counting as incomplete.
 
     `collection.json` is read by `score.py::load_case_record`, which raises on
     a recorded loss. Both the path and the case id come from the agent's
@@ -70,6 +76,7 @@ def _note_lost(results, case_id, rel):
     (`escape_log_text`): a newline or a leading ``::`` must not forge a
     log line or a workflow command.
     """
+    (output_dir / "cases" / case_id).mkdir(parents=True, exist_ok=True)
     lost = results.setdefault(case_id, {}).setdefault(UNLISTABLE_KEY, [])
     rel = str(rel)
     if rel not in lost:
@@ -193,7 +200,7 @@ def main():
         for d in unlistable:
             for entry in case_order:
                 cid = entry["case_id"] if isinstance(entry, dict) else entry
-                _note_lost(results, cid, d.relative_to(workspace))
+                _note_lost(results, output_dir, cid, d.relative_to(workspace))
 
         if not files:
             continue
@@ -220,7 +227,7 @@ def main():
 
             for src_file in matched_files:
                 if not _confined(workspace, src_file):
-                    _note_lost(results, case_id,
+                    _note_lost(results, output_dir, case_id,
                                src_file.relative_to(workspace))
                     continue
                 # Preserve subdirectory structure relative to src_dir
@@ -299,8 +306,7 @@ def _collect_per_case(workspace, output_dir, config):
             # copied there is no `cases/<id>` for `_get_case_dirs` to find,
             # so the case would leave the denominator entirely rather than
             # being marked incomplete.
-            _note_lost(results, case_id, case_dir.name)
-            (output_dir / "cases" / case_id).mkdir(parents=True, exist_ok=True)
+            _note_lost(results, output_dir, case_id, case_dir.name)
             continue
 
         for output_cfg in config.outputs:
@@ -322,7 +328,8 @@ def _collect_per_case(workspace, output_dir, config):
                 files, unlistable = _walk_output_files(src, case_dir)
                 src_base = src
             for d in unlistable:
-                _note_lost(results, case_id, d.relative_to(case_dir))
+                _note_lost(results, output_dir, case_id,
+                           d.relative_to(case_dir))
 
             if not files:
                 continue
@@ -336,7 +343,8 @@ def _collect_per_case(workspace, output_dir, config):
                 if f.is_symlink():
                     continue
                 if not _confined(case_dir, f):
-                    _note_lost(results, case_id, f.relative_to(case_dir))
+                    _note_lost(results, output_dir, case_id,
+                               f.relative_to(case_dir))
                     continue
                 rel = f.relative_to(src_base)
                 dest = case_output / rel

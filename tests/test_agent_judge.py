@@ -2690,12 +2690,15 @@ class TestCollectionLossHardening:
             path.chmod(mode)
 
     def _collect(self, tmp_path, monkeypatch, ws, *, mode="case",
-                 batch_pattern=None, out_path="out", case_order=None):
+                 batch_pattern=None, out_path="out", case_order=None,
+                 events=True):
         import collect
         lines = ["name: t", "execution:", f"  mode: {mode}", "  skill: s",
                  "outputs:", f"  - path: {out_path}"]
         if batch_pattern:
             lines.append(f"    batch_pattern: {batch_pattern}")
+        if not events:
+            lines += ["traces:", "  events: false"]
         cfg = tmp_path / "eval.yaml"
         cfg.write_text("\n".join(lines) + "\n")
         if case_order is not None:
@@ -2744,16 +2747,53 @@ class TestCollectionLossHardening:
     @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file modes")
     def test_batch_loss_with_nothing_else_collected_still_blocks(
             self, tmp_path, monkeypatch):
-        """No readable file → the `if not files: continue` path."""
+        """No readable file → the `if not files: continue` path.
+
+        Nothing is copied here, so the only thing that keeps each case in the
+        run is the `cases/<id>` directory the loss record leaves behind:
+        `score.py::_get_case_dirs` enumerates directories, not the manifest.
+        Without it the cases are absent from the denominator (or scoring exits
+        with "No cases directory") instead of counting as incomplete.
+        """
+        from score import detect_regressions
         ws = tmp_path / "ws"
         (ws / "out" / "sub").mkdir(parents=True)
         (ws / "out" / "sub" / "R-1.md").write_text("FAILING EVIDENCE")
-        order = [{"case_id": "c0", "entry_count": 1}]
+        order = [{"case_id": f"c{i}", "entry_count": 1} for i in range(3)]
         with self._unreadable(ws / "out" / "sub"):
             run = self._collect(tmp_path, monkeypatch, ws, mode="batch",
                                 batch_pattern='"R-{n}"', case_order=order)
         recorded = json.loads((run / "collection.json").read_text())
-        assert recorded["c0"]["_unlistable"] == ["out/sub"]
+        for cid in ("c0", "c1", "c2"):
+            assert recorded[cid]["_unlistable"] == ["out/sub"]
+            assert (run / "cases" / cid).is_dir()
+        agg, res = self._score(run, monkeypatch, tmp_path)
+        assert agg["incomplete_cases"] == 3
+        assert "incomplete_staging" in [r.metric for r in detect_regressions(
+            res["aggregated"], {"shape": {"min_pass_rate": 0.9}})]
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file modes")
+    def test_per_case_loss_with_nothing_else_collected_keeps_the_case(
+            self, tmp_path, monkeypatch):
+        """Same condition as the batch test, per-case branch: every artifact
+        of c0 sits inside the unlistable subtree, so `if not files: continue`
+        skips the copy and the case has no directory unless the loss record
+        makes one. `events: false` because events.json generation creates
+        the case directory as a side effect and would mask the omission."""
+        from score import detect_regressions
+        ws = tmp_path / "ws"
+        for cid in ("c0", "c1"):
+            (ws / "cases" / cid / "out").mkdir(parents=True)
+        (ws / "cases" / "c0" / "out" / "sub").mkdir()
+        (ws / "cases" / "c0" / "out" / "sub" / "e.md").write_text("EVIDENCE")
+        (ws / "cases" / "c1" / "out" / "ok.md").write_text("fine")
+        with self._unreadable(ws / "cases" / "c0" / "out" / "sub"):
+            run = self._collect(tmp_path, monkeypatch, ws, events=False)
+        assert (run / "cases" / "c0").is_dir()
+        agg, res = self._score(run, monkeypatch, tmp_path)
+        assert agg["incomplete_cases"] == 1
+        assert "incomplete_staging" in [r.metric for r in detect_regressions(
+            res["aggregated"], {"shape": {"min_pass_rate": 0.9}})]
 
     # ── 2. symlinked output root / ancestor ─────────────────────────
 
