@@ -61,39 +61,24 @@ nothing in the current data model can tell them apart.
 One case-level list. Presence is the signal; cause is detail inside it.
 
 Entries are written by the stage that discovers them, into that stage's own
-artifact, and read as the union of the two:
+artifact:
 
-| Phase | Artifact | Written by |
-| --- | --- | --- |
-| `provision`, `before_each`, `agent`, `after_each`, `collect` | `run_result.json`, under `per_case.<id>.unmeasured` | `execute.py` / `collect.py` |
-| `score` | `summary.yaml`, under a **top-level** `unmeasured: {case_id: [...]}` | `score.py` |
-
-Splitting the WRITERS is forced, not chosen: `score.py` never writes
-`run_result.json`, and the execution stages are finished before scoring starts.
-Splitting the READERS is not. `score.py` already reads `run_result.json` and
-produces `summary.yaml`, so it folds the execution-phase entries in as it goes and
-`summary.yaml` is the single canonical list. Downstream consumers — report,
-thresholds, reward, eval-anova — read one place; `unmeasured_cases` counts a case
-once however many entries it has.
-
-**`summary.yaml` is canonical for things that read a summary — the Harbor
-verifier is not one.** It composes the reward **in-container**, where no
-`summary.yaml` exists: `harbor/reward.py::_score_case_counted` keeps only
-`result["per_case"][case]` from `score_cases` and discards the rest, and the
-host writes `summary.yaml` in `harbor/run.py::build_summary` *after* the
-rewards are already written. So `score_cases` is the single canonical
-**producer**, and there are two readers of it:
-
-| path | how `compose_reward` gets the entries |
+| Phase | Artifact |
 | --- | --- |
-| local | `score.py` folds them into `summary.yaml`; consumers read that |
-| Harbor verifier | `score_cases` returns them beside `per_case`; `_score_case_counted` passes them to `compose_reward` explicitly |
+| `provision`, `before_each`, `agent`, `after_each`, `collect` | `run_result.json`, under `per_case.<id>.unmeasured` |
+| `score` | `summary.yaml`, under a **top-level** `unmeasured: {case_id: [...]}` |
 
-Migration steps 4 and 5 are incomplete without that: step 5 cannot drop a
-`harness`-attributed sample in the container if nothing carries the attribution
-there. Returning the entries from `score_cases` is the smaller change — the
-verifier already destructures that return value — — the host side is covered by step 4's transport table, which is longer than
-`build_summary` alone.
+Splitting the writers is forced: `score.py` never writes `run_result.json`, and the
+execution stages finish before scoring starts. Readers should not have to know that —
+`score.py` already reads `run_result.json` and produces `summary.yaml`, so it folds the
+execution-phase entries in and `summary.yaml` is the one list a reader consults.
+`unmeasured_cases` counts a case once however many entries it has.
+
+Two things that complicate the "one list" story and are **implementation scope**, not
+decisions — see #277: the Harbor verifier composes its reward in-container where no
+`summary.yaml` exists, and `compare_runs` discovers evidence loss of its own, after
+scoring and on the baseline side. Both need a transport; neither changes the rules
+below.
 
 **A sibling mapping, NOT a key inside `per_case.<case>`.** That is a pure
 judge-name → record map today, and every consumer iterates its members
@@ -176,9 +161,12 @@ which is today's behaviour. Not blanket, though, and an earlier draft said it wa
 `score_cases` catches arbitrary scorer exceptions, so an inline `check:` judge that
 raises on malformed agent output is an agent-induced failure wearing a judge error's
 clothes. Dropping that sample is the reward escape again. The judge-error contributor
-classifies the cause — provider 5xx, timeout or transport fault is `harness`; a scorer
+classifies the cause — a provider 5xx or a transport fault is `harness`; a scorer
 raising while reading agent content is `agent`; anything it cannot tell apart is
-`agent`, per the default in Open Question 2. Acceptance case: malformed agent output
+`agent`, per the default in Open Question 2. **A timeout is not automatically
+`harness`**: agent-controlled output can make a scorer hang or exhaust its budget, so
+a timeout is `harness` only when positively shown to be independent of agent content
+and agent resource use — a provider or transport timeout. A scorer timeout is `agent`. Acceptance case: malformed agent output
 makes a scorer raise, and the sample scores `0.0` rather than being dropped.
 
 **Mixed attribution resolves to `agent`.** A case can carry entries of both
@@ -198,10 +186,6 @@ condition is not a property of any judge — it is a property of the case. At ca
 the stamping loop disappears and per-judge counts derive by counting.
 
 ### What changes for each consumer
-
-The table above is the authoritative list of *who must see the entries and what carries
-them there* — check new rules against that one. This is the narrower question of what
-each consumer does differently once it has them.
 
 | Consumer | Today | With `unmeasured` |
 | --- | --- | --- |
@@ -235,41 +219,6 @@ author pricing how much of the dataset may go unscored, and auto-failing it woul
 a tolerant error budget impossible. What changes is only what it counts — see the
 coverage-gate note above.
 
-### Who reads it, and what carries it there
-
-Five of the six review rounds on this spec found the same thing: a rule stated for one
-consumer, with another consumer or another transport hop left without it. So the
-inventory goes in the document, and the rules are written against it rather than from
-memory.
-
-**Readers.** Every one of these must see the same list for a case:
-
-| Reader | Needs | Local | Harbor | EvalHub |
-| --- | --- | --- | --- | --- |
-| judges (`outputs["unmeasured"]`) | the case's entries | `score_cases` record | same, in-container | same, in-pod |
-| aggregates (`mean`, `pass_rate`) | exclude unmeasured observations | `score_cases` | `build_summary` | `_metrics_to_summary` |
-| thresholds + coverage (`detect_regressions`) | per-case count | `summary.yaml` | `summary.yaml` (host) | `runner.py` gate |
-| reward (`compose_reward`) | `attribution` | n/a — local does not compose | in-container | in-pod |
-| report, eval-anova | per-case detail | `summary.yaml` | `summary.yaml` | n/a |
-
-**Transports.** `score_cases` is the only producer. Each hop below has to carry the
-entries, and today none of the containerised ones do:
-
-| Path | Hops | State |
-| --- | --- | --- |
-| local | `score_cases` → `summary.yaml` | one process; nothing to add |
-| Harbor | `score_cases` → `judges.json` → `parse_trial` → `build_summary` → `summary.yaml` | `build_summary` copies only per-judge record fields (`value`, `rationale`, `judge_type`, `usage`, `tool_choice_mode`, `verdict_transport`) — no case-level channel exists |
-| Harbor reward | `score_cases` → `_score_case_counted` → `compose_reward` | keeps only `result["per_case"][case]`; in-container, before any `summary.yaml` |
-| EvalHub | `score_cases` → `adapter` → `results_mapper` → `JobResults` | `_metrics_to_summary` returns `per_case: {}` literally |
-
-`judges.json` is the Harbor channel to extend: the verifier already writes it, the host
-already reads it back, and it already carries per-case judge detail. `reward.json` is
-the wrong place — it is a flat metric map Harbor itself consumes. EvalHub needs the
-entries through `results_mapper` before the summary is rebuilt.
-
-A disposition scalar is not enough on any of these hops: `phase`, `kind` and mixed
-attribution are all needed downstream, so the entries travel whole.
-
 ### What stays
 
 `hooks` (#264) stays exactly as it is. It is per-hook diagnostic detail — exit code,
@@ -280,6 +229,16 @@ measurable", and conflating them is how we got here.
 What goes is the *derived verdict* each layer publishes next to its detail:
 `hook_failures` (never shipped — #264 drops it on this spec's account) and
 `incomplete_cases` (shipped in 1.58; needs a deprecation window).
+
+**`incomplete_cases` has two producers, not one.** Besides the judge aggregate,
+`compare_runs` publishes a `pairwise.incomplete_cases` of its own (#276), which
+`_pairwise_regressions` turns into the `incomplete_staging` that blocks
+`min_win_rate` (#282). Deprecating the name and replacing that rule must not quietly
+drop a protection shipped three releases ago. Pairwise is in scope: its losses become
+`unmeasured` entries like any other, and `min_win_rate` keeps refusing to pass over
+them. It also discovers losses the scoring pass cannot — after `score_cases` has
+finished, and on the **baseline** side, which is not the run being scored at all. How
+those reach the canonical list is implementation scope (#277).
 
 ## Migration
 
@@ -301,40 +260,27 @@ What goes is the *derived verdict* each layer publishes next to its detail:
    numerator to "cases that produced no valid measurement" — `errored_cases` union
    **every** `unmeasured` case, counted once per case, whatever its attribution — so
    every lost case lands in a gate and not only the ones with a score threshold.
-4. Carry the entries along every hop in the transport table above, not just into the
-   two summary builders — `build_summary` and `_metrics_to_summary` are destinations
-   with no source reaching them today. For Harbor that means the verifier writing them
-   into `judges.json` and `parse_trial` reading them back; for EvalHub, through
-   `results_mapper` before the summary is rebuilt. Acceptance cases on both backends
-   for a `harness`-only case and for a mixed-attribution one.
-5. Teach `compose_reward` to drop a `harness`-attributed sample, and give the Harbor
-   verifier a source for the entries (see "canonical producer" above — it has no
-   `summary.yaml` at reward time). `compose_reward`
-   currently returns a `float` that is written to the Harbor reward file and
-   formatted `:.4f`, and `skills/eval-anova/scripts/analyze.py` calls
-   `float(composite)` on it — so `None` is not available as a sentinel. Proposal:
-   keep the return type a float and carry the disposition beside it, in the
-   metrics dict `compose_reward` already returns as its second element
-   (`{"reward_disposition": "scored" | "dropped"}`), with the float left at `0.0`
-   when dropped. Reports keep showing the case; the training consumer filters on
-   the disposition.
+4. Make the gate substrate-independent. Harbor and EvalHub rebuild their summaries
+   from scratch and carry none of this today, so the same `eval.yaml` would fail
+   locally and pass in a container — the split #277 already complains about. The
+   hops each backend needs are implementation scope (#277); the requirement here is
+   that a case unmeasured on one substrate is unmeasured on all three. Acceptance
+   cases on both backends for a `harness`-only case and a mixed-attribution one.
+5. Teach `compose_reward` to drop a `harness`-attributed sample. Two constraints that
+   are decisions rather than mechanics:
 
-   **It has to reach every channel, not just the one that carries metrics.**
-   `harbor/reward.py::write_reward` writes three, and only one of them would
-   see it as drafted:
+   - **Not a `None` sentinel.** `compose_reward` returns a float that is written to
+     the Harbor reward file and `float()`-ed by eval-anova, so `None` is not
+     available. Carry the disposition beside the float —
+     `{"reward_disposition": "scored" | "dropped"}` — with the value left at `0.0`
+     when dropped. Reports keep showing the case; the training consumer filters.
+   - **Every channel, or fail loudly.** A consumer that reads only the scalar sees
+     `0.0` and cannot tell a dropped sample from a real zero, which is exactly the
+     silent training-on-a-harness-fault this section exists to prevent. The
+     disposition reaches every channel a reward is published on, and a consumer that
+     cannot honour a drop must fail rather than treat it as a zero. A disposition
+     that is merely *available* is not a contract.
 
-   | channel | contents today | needs |
-   | --- | --- | --- |
-   | `reward.json` | `{reward, **metrics}` | nothing — the disposition rides in `metrics` |
-   | `reward.txt` | the bare scalar, Harbor's fallback | a sibling marker, or Harbor must be required not to use the fallback for dropped samples |
-   | `judges.json` | `{reward, per_judge}`, no metrics | add the disposition to the sidecar |
-
-   A consumer reading `reward.txt` sees `0.0` and cannot tell a dropped sample
-   from a real zero, which is the failure this whole section exists to prevent
-   — silently training on a harness fault. So: name the supported training
-   consumers, carry the disposition through all three channels, and require a
-   consumer that cannot honour a drop to **fail loudly** rather than treat it
-   as a zero. A disposition that is merely available is not a contract.
 6. Deprecate `incomplete_cases` one minor release later.
 
 ### Release impact, step by step
@@ -351,8 +297,9 @@ contributor would, under a naive "any `unmeasured` entry blocks", turn a run tha
 passes today — nine scored cases and one provider 500, inside a declared
 `max_error_rate` — into a failing one. That is why the gate keys on
 `attribution`, not on the mere presence of an entry: a judge error is
-`harness`-attributed, so it drops the reward sample and leaves the score
-thresholds alone. It is not quite "as today", because **step 3** widens the
+`harness`-attributed when it is an infrastructure failure — a provider 5xx — so it
+drops the reward sample and leaves the score thresholds alone. A scorer exception
+caused by agent output is `agent`-attributed and blocks, per the classification above. It is not quite "as today", because **step 3** widens the
 `max_error_rate` numerator to count unmeasured cases whose judges still returned
 values — without that, such a case is exempt from every gate. For a
 judge error the two coincide (`errored_cases` already counts it), so the nine-plus-one
