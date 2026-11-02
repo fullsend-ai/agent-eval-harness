@@ -1070,6 +1070,8 @@ def _authorization_credentials(text: str, i: int, quoted_name: bool, quote):
             # after the closing quote, failing which the word itself hides.
             concatenated = _concatenated_credential(text, end)
             if concatenated is not None:
+                if body and body.lower() not in _KNOWN_SCHEMES:
+                    return i, concatenated[1]  # a raw token split in two: both halves
                 return concatenated
             return (i, end) if end > i else None
         scheme = _AUTH_SCHEME_RE.match(text, i, end)
@@ -1102,7 +1104,10 @@ def _authorization_credentials(text: str, i: int, quoted_name: bool, quote):
                 if name in _PARAM_SCHEMES:  # a list that does not parse: whole
                     return _trimmed(text, start, _bare_value_end(text, start, loose=True))
         if text[start] in "\"'":  # a quoted credential, hidden with its quotes
-            return start, _QUOTED_TAIL_RE[text[start]].match(text, start + 1).end()
+            end = _QUOTED_TAIL_RE[text[start]].match(text, start + 1).end()
+            while (more := _FIELD_CONTINUATION_RE.match(text, end)) is not None:
+                end = more.end()  # and the literals concatenated after it
+            return start, end
         if text[start] in _AUTH_OPENERS:
             return _bracketed(text, start)
         word = _AUTH_WORD_RE.match(text, start)
