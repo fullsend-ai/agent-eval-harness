@@ -607,6 +607,30 @@ def load_case_record(case_dir, config, run_id=None, runs_dir=None,
         except (yaml.YAMLError, OSError):
             record["hook_outputs"] = {}
 
+    # --- Collection losses (written by collect.py) ---
+    # Collection walks the agent's WORKSPACE, which `_require_listable` below
+    # never sees: a directory the agent made unlistable there simply never
+    # reaches the case directory, so by the time scoring probes it there is
+    # nothing missing to find. `collect.py` records what it could not list;
+    # raising here routes it through the same `CaseEvidenceUnavailable` path
+    # as every other way a case loses its material (#277).
+    #
+    # `collection.json` sits at the run root, outside every case directory,
+    # so artifact collection cannot plant one.
+    if run_id:
+        collection_path = runs_dir / run_id / "collection.json"
+        if collection_path.is_file() and not collection_path.is_symlink():
+            try:
+                with open(collection_path) as f:
+                    collected = json.load(f)
+                lost = ((collected.get(case_id) or {}).get("_unlistable")
+                        if isinstance(collected, dict) else None)
+            except (json.JSONDecodeError, OSError, AttributeError):
+                lost = None
+            if lost:
+                raise OSError(
+                    f"collection could not list {', '.join(map(str, lost))}")
+
     # --- Per-case hook results (written by execute.py) ---
     # Exposed as outputs["hooks"] so a judge or an `if:` condition can gate on
     # a before_each/after_each hook that failed.

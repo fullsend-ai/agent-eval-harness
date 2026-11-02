@@ -13,6 +13,7 @@ returns the parsed ``(value, rationale)``.
 import json
 import os
 import sys
+import textwrap
 from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
@@ -2557,3 +2558,117 @@ class TestEntryClassificationIsVersionIndependent:
         # lstat, not stat: a link is classified as itself, and the callers
         # skip links before asking.
         assert _entry_kind(tmp_path / "link") == "other"
+
+
+class TestCollectionLossReachesTheGate:
+    """`collect.py` walks the agent's WORKSPACE. A directory the agent made
+    unlistable there never reaches the case directory at all, so scoring's own
+    probe finds nothing missing — the loss was already complete one phase
+    earlier. #277 producer 7."""
+
+    @contextmanager
+    def _unreadable(self, path):
+        mode = path.stat().st_mode & 0o777
+        path.chmod(0)
+        try:
+            yield
+        finally:
+            path.chmod(mode)
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file modes")
+    def test_collect_records_a_directory_it_cannot_list(self, tmp_path):
+        import collect
+        src = tmp_path / "out"
+        (src / "sub").mkdir(parents=True)
+        (src / "ok.md").write_text("visible")
+        (src / "sub" / "evidence.md").write_text("FAILING EVIDENCE")
+        with self._unreadable(src / "sub"):
+            files, unlistable = collect._walk_output_files(src)
+        assert [f.name for f in files] == ["ok.md"]
+        assert [d.name for d in unlistable] == ["sub"]
+
+    def test_a_clean_tree_reports_nothing_unlistable(self, tmp_path):
+        import collect
+        src = tmp_path / "out"
+        (src / "sub").mkdir(parents=True)
+        (src / "sub" / "a.md").write_text("a")
+        (src / "b.md").write_text("b")
+        files, unlistable = collect._walk_output_files(src)
+        assert sorted(f.name for f in files) == ["a.md", "b.md"]
+        assert unlistable == []
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file modes")
+    def test_collect_writes_the_loss_into_collection_json(self, tmp_path,
+                                                          monkeypatch):
+        """Drives `collect.main()`, not the helper: a test that calls
+        `_walk_output_files` directly still passes when the collection loop
+        goes back to the silent `rglob`."""
+        import collect
+        ws = tmp_path / "ws"
+        case_ws = ws / "cases" / "c0"
+        (case_ws / "out" / "sub").mkdir(parents=True)
+        (case_ws / "out" / "ok.md").write_text("visible")
+        (case_ws / "out" / "sub" / "evidence.md").write_text("FAILING EVIDENCE")
+        cfg = tmp_path / "eval.yaml"
+        cfg.write_text(textwrap.dedent("""\
+            name: t
+            execution:
+              skill: s
+            outputs:
+              - path: out
+        """))
+        out = tmp_path / "out"
+        monkeypatch.setattr(sys, "argv", [
+            "collect", "--config", str(cfg), "--workspace", str(ws),
+            "--output", str(out)])
+        with self._unreadable(case_ws / "out" / "sub"):
+            collect.main()
+        recorded = json.loads((out / "collection.json").read_text())
+        assert recorded["c0"]["_unlistable"] == ["out/sub"]
+        # the readable sibling is still collected
+        assert (out / "cases" / "c0" / "out" / "ok.md").exists()
+        assert not (out / "cases" / "c0" / "out" / "sub").exists()
+
+    def test_the_recorded_loss_blocks_a_score_threshold(self, tmp_path,
+                                                        monkeypatch):
+        """What collect.py recorded has to reach the gate, not just the log."""
+        import score
+        from score import detect_regressions
+        monkeypatch.setenv("AGENT_EVAL_RUNS_DIR", str(tmp_path / "runs"))
+        run_id = "r1"
+        run_dir = tmp_path / "runs" / "test" / run_id
+        for i in range(10):
+            _make_case(run_dir / "cases" / f"c{i}", {"out/ok.md": "fine"})
+        # c0's `out/sub` existed in the workspace and never arrived here.
+        (run_dir / "collection.json").write_text(json.dumps(
+            {"c0": {"out": 1, "_unlistable": ["out/sub"]}}))
+
+        config = _config(JudgeConfig(name="shape", check="return True, 'ok'"),
+                         outputs=["out"])
+        cases = sorted((run_dir / "cases").iterdir())
+        res = score.score_cases(load_judges(config, project_root=str(tmp_path)),
+                                cases, config, run_id=run_id)
+        agg = res["aggregated"]["shape"]
+        assert agg["incomplete_cases"] == 1
+        assert agg["scored_cases"] == 9
+        assert "incomplete_staging" in [r.metric for r in detect_regressions(
+            res["aggregated"], {"shape": {"min_pass_rate": 0.9}})]
+
+    def test_a_clean_collection_does_not_block(self, tmp_path, monkeypatch):
+        import score
+        from score import detect_regressions
+        monkeypatch.setenv("AGENT_EVAL_RUNS_DIR", str(tmp_path / "runs"))
+        run_id = "r1"
+        run_dir = tmp_path / "runs" / "test" / run_id
+        for i in range(10):
+            _make_case(run_dir / "cases" / f"c{i}", {"out/ok.md": "fine"})
+        (run_dir / "collection.json").write_text(json.dumps(
+            {f"c{i}": {"out": 1} for i in range(10)}))
+        config = _config(JudgeConfig(name="shape", check="return True, 'ok'"),
+                         outputs=["out"])
+        res = score.score_cases(load_judges(config, project_root=str(tmp_path)),
+                                sorted((run_dir / "cases").iterdir()), config,
+                                run_id=run_id)
+        assert res["aggregated"]["shape"]["incomplete_cases"] == 0
+        assert detect_regressions(
+            res["aggregated"], {"shape": {"min_pass_rate": 0.9}}) == []

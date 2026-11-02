@@ -38,6 +38,42 @@ _HARNESS_PATHS = {
 }
 
 
+UNLISTABLE_KEY = "_unlistable"
+
+
+def _walk_output_files(src: Path):
+    """``(files, unlistable)`` under *src*.
+
+    `Path.rglob` does **not** raise on a directory it cannot open: it yields
+    the entry and nothing beneath it. The workspace is agent-written, so a
+    `chmod 000` on an output sub-directory silently kept its contents out of
+    the case directory — where the scoring pass's own listability probe
+    (`score.py::_require_listable`, #276) would have caught them. Collection
+    runs earlier, so it has to notice.
+
+    Symlinked directories are not descended into, matching what `rglob` did.
+    """
+    files, unlistable = [], []
+    stack = [src]
+    while stack:
+        directory = stack.pop()
+        try:
+            with os.scandir(directory) as entries:
+                children = sorted(entries, key=lambda e: e.name)
+        except OSError:
+            unlistable.append(directory)
+            continue
+        for entry in children:
+            path = Path(entry.path)
+            if entry.is_symlink():
+                continue
+            if entry.is_dir(follow_symlinks=False):
+                stack.append(path)
+            elif entry.is_file(follow_symlinks=False):
+                files.append(path)
+    return sorted(files), sorted(unlistable)
+
+
 def _safe_path_component(value, field):
     """Reject path components that escape the parent directory."""
     p = Path(str(value))
@@ -198,8 +234,14 @@ def _collect_per_case(workspace, output_dir, config):
                 files = [src]
                 src_base = src.parent
             else:
-                files = sorted(f for f in src.rglob("*") if f.is_file())
+                files, unlistable = _walk_output_files(src)
                 src_base = src
+                for d in unlistable:
+                    rel = str(d.relative_to(case_dir))
+                    results.setdefault(case_id, {}).setdefault(
+                        UNLISTABLE_KEY, []).append(rel)
+                    print(f"  WARNING: {case_id}: cannot list {rel} — its "
+                          f"contents are not collected", file=sys.stderr)
 
             if not files:
                 continue
