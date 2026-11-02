@@ -243,8 +243,19 @@ those reach the canonical list is implementation scope (#277).
 ## Migration
 
 1. Write `unmeasured` from the staging and record-build paths, alongside
-   `incomplete_cases`. Derive `incomplete_cases` from it so the existing threshold rule
-   and docs keep working unchanged.
+   `incomplete_cases`. Derive `incomplete_cases` from the **`agent`-attributed**
+   entries only, so the existing threshold rule and docs keep working unchanged.
+
+   The filter matters from step 2 onwards and is the reason it is stated here rather
+   than added later. Today's `incomplete_cases` comes from staging and record-build,
+   which are all `agent`-attributed under these rules, so the filter is a no-op at this
+   step — but the legacy gate blocks a score threshold on *any* non-zero
+   `incomplete_cases` with no notion of attribution (`score.py:5717`). Deriving it
+   unfiltered would mean that the moment step 2 adds the judge-error contributor, a
+   harness-attributed provider 500 sitting inside a declared `max_error_rate` starts
+   failing `min_pass_rate` — in the release *before* step 3 teaches the gate to tell
+   the two apart. Filtering from the start makes every step below behave as its
+   release-impact note says, instead of only the end state being right.
 2. Add the hook contributor (#264, merged) and the `collect.py` contributor (#277).
    Add the **judge-error** contributor at the same time: a judge that fails
    terminally after its retries emits a `phase: score` entry. Without it the
@@ -285,31 +296,34 @@ those reach the canonical list is implementation scope (#277).
 
 ### Release impact, step by step
 
-Step 1 is behaviour-preserving: it moves where the same facts are stored and read, and
-`incomplete_cases` is derived so existing gates and docs keep working.
+In step order, which three drafts of this section failed to keep. Each note is written
+against the step list above rather than from memory.
 
-**Step 3 is not**, and an earlier draft said it was. It widens the `max_error_rate`
-numerator and excludes unmeasured observations from the aggregates, either of which can
-newly fail a local run. The release note belongs here, not only on step 4.
+| Step | Behaviour change | Release note |
+| --- | --- | --- |
+| 1 — write `unmeasured`, derive `incomplete_cases` from `agent` entries | none | no |
+| 2 — add the hook, `collect.py` and judge-error contributors | none **because** step 1 filters the derivation | no |
+| 3 — gate reads `unmeasured`; widen `max_error_rate`; exclude unmeasured observations | **yes** | yes |
+| 4 — carry it on Harbor and EvalHub | **yes** | yes |
+| 5 — reward disposition | **yes**, training data | yes, and land alone |
+| 6 — deprecate `incomplete_cases` | none | deprecation notice |
 
-**Step 2 is not**, and an earlier draft wrongly said it was. Adding the judge-error
-contributor would, under a naive "any `unmeasured` entry blocks", turn a run that
-passes today — nine scored cases and one provider 500, inside a declared
-`max_error_rate` — into a failing one. That is why the gate keys on
-`attribution`, not on the mere presence of an entry: a judge error is
-`harness`-attributed when it is an infrastructure failure — a provider 5xx — so it
-drops the reward sample and leaves the score thresholds alone. A scorer exception
-caused by agent output is `agent`-attributed and blocks, per the classification above. It is not quite "as today", because **step 3** widens the
-`max_error_rate` numerator to count unmeasured cases whose judges still returned
-values — without that, such a case is exempt from every gate. For a
-judge error the two coincide (`errored_cases` already counts it), so the nine-plus-one
-run above is unaffected; a hook failure that previously counted toward nothing now
-counts toward the author's declared error budget. Release-note that, and set it out
-with step 2 rather than attributing all new failures to step 4.
+**Step 2 is behaviour-preserving only because of step 1's filter.** The legacy gate
+blocks a score threshold on any non-zero `incomplete_cases` and knows nothing about
+attribution (`score.py:5717`). Deriving `incomplete_cases` unfiltered would mean that
+the moment step 2 adds the judge-error contributor, a harness-attributed provider 500
+inside a declared `max_error_rate` starts failing `min_pass_rate` — in the release
+*before* step 3 teaches the gate to tell the two apart. With the filter, nine scored
+cases plus one provider 500 behaves exactly as it does today.
 
-Step 4 makes containerised runs *start* failing where they silently passed, which is
-the point, and wants a release note. Step 5 changes RL training data and should land
-on its own.
+**Step 3 is where the local behaviour changes.** It widens the `max_error_rate`
+numerator to count unmeasured cases whose judges still returned values — a hook failure
+that previously counted toward nothing now counts toward the author's declared error
+budget — and it excludes unmeasured observations from `mean`/`pass_rate`. For a judge
+error the numerator change is a no-op, since `errored_cases` already counted it.
+
+**Step 4 makes containerised runs start failing where they silently passed**, which is
+the point. **Step 5** changes RL training data and should land on its own.
 
 ## Open questions
 
