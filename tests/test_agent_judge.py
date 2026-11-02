@@ -3127,3 +3127,46 @@ def test_an_ordinary_output_path_is_still_accepted(tmp_path):
           - path: out
     """))
     assert EvalConfig.from_yaml(cfg).outputs[0].path == "out"
+
+
+def test_batch_tool_only_output_does_not_record_unrelated_losses(tmp_path,
+                                                                 monkeypatch):
+    """A tool-only output has no filesystem path. Defaulting it to "." walked
+    the whole workspace, so an unreadable directory with nothing to do with
+    any declared output was recorded as lost against every case and blocked
+    the run — the gate firing on a run that lost nothing. The per-case branch
+    has always skipped tool-only outputs; the batch branch did not."""
+    import collect
+    ws = tmp_path / "ws"
+    (ws / "out").mkdir(parents=True)
+    (ws / "out" / "RFE-001.md").write_text("one")
+    (ws / "scratch").mkdir()                      # unrelated to any output
+    (ws / "scratch" / "x").write_text("private")
+    (ws / "case_order.yaml").write_text("- RFE-001\n")
+    ds = tmp_path / "ds"
+    (ds / "RFE-001").mkdir(parents=True)
+    (ds / "RFE-001" / "input.yaml").write_text("x: 1\n")
+    cfg = tmp_path / "eval.yaml"
+    cfg.write_text(textwrap.dedent(f"""\
+        name: t
+        execution:
+          mode: batch
+          skill: s
+        dataset:
+          path: {ds}
+        outputs:
+          - tool: Bash
+    """))
+    out = tmp_path / "run"
+    monkeypatch.setattr(sys, "argv", [
+        "collect", "--config", str(cfg), "--workspace", str(ws),
+        "--output", str(out)])
+    (ws / "scratch").chmod(0)
+    try:
+        collect.main()
+    finally:
+        (ws / "scratch").chmod(0o755)
+    manifest = (json.loads((out / "collection.json").read_text())
+                if (out / "collection.json").exists() else {})
+    assert not any(collect.UNLISTABLE_KEY in v
+                   for v in manifest.values() if isinstance(v, dict)), manifest

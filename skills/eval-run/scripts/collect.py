@@ -172,7 +172,15 @@ def main():
 
     # Collect from each output path defined in config (directory or file)
     for output_cfg in config.outputs:
-        out_path = _safe_path_component(output_cfg.path or ".", "output path")
+        if not output_cfg.path:
+            # Tool-only output: no filesystem path, same as the per-case
+            # branch. Defaulting it to "." walked the whole workspace, so an
+            # unreadable directory with nothing to do with any declared
+            # output — a private scratch dir — was recorded as lost evidence
+            # against every case and blocked the run. `rglob` ignored such
+            # directories silently, so that false block would be new here.
+            continue
+        out_path = _safe_path_component(output_cfg.path, "output path")
         src = workspace / out_path
         if not src.exists():
             continue
