@@ -2682,6 +2682,7 @@ class TestConsoleFilter:
                 'next, and secret: """ab\\"""<cut\n'
                 '  💬 Set password: "ab" "cd" and {"token": "ab" + rb"cd", "user": "me"} and '
                 'secret: f"a" \'b\' next\n'
+                "  💬 Set password: $'a,b' next and {\"token\": `a,b`, \"x\": 1}\n"
                 "  ✓ Harness loaded (0.5s)\n"
                 "    Tokens: in=158 out=54740 reasoning=14976 cache_read=4674845\n"
                 "  💬 Basic usage of the bearer concept\n")
@@ -2705,6 +2706,7 @@ class TestConsoleFilter:
             "  💬 Set password: *** then token: ***, next, and secret: ***",
             "  💬 Set password: *** then token: ***, next, and secret: ***",
             '  💬 Set password: *** and {"token": ***, "user": "me"} and secret: *** next',
+            '  💬 Set password: *** next and {"token": ***, "x": 1}',
             "  ✓ Harness loaded (0.5s)",
             "    Tokens: in=158 out=54740 reasoning=14976 cache_read=4674845",
             "  💬 Basic usage of the bearer ***"]
@@ -2803,7 +2805,11 @@ class TestConsoleFilter:
                 "  💬 send: b'GET / HTTP/1.1\\r\\nAuthorization: Basic b64pad==\\r\\n"
                 "X-Api-Key: <k>\\r\\n\\r\\n'\n"
                 "  💬 Sent Authorization: Basic b64pad= --password <pw> and "
-                "Authorization: Bearer <jwt>\\r\\nX-Api-Key: <k>\n")
+                "Authorization: Bearer <jwt>\\r\\nX-Api-Key: <k>\n"
+                "  💬 Set h = 'Authorization: ' + 'Basic ' + '<ab>' + '<cd>'\n"
+                "  💬 Set h = 'Authorization: ' + 'Basic ' + '<ab>' + '<cd>' + '<ef>'\n"
+                "  💬 Sent Authorization: Basic $'<b64>' next\n"
+                "  💬 Set h = 'Authorization: Basic ' + $'<b64>'\n")
         assert self._select(text) == [
             '  💬 Sent {"Authorization":"Basic ***","user":"me"}',
             "  💬 Sent {'Authorization': 'token ***', 'Proxy-Authorization': 'Bearer ***'}",
@@ -2855,7 +2861,11 @@ class TestConsoleFilter:
             "  💬 Sent Authorization: Basic *** next and {'Authorization': '***}",
             "  💬 send: b'GET / HTTP/1.1\\r\\nAuthorization: Basic ***\\r\\nX-Api-Key: ***",
             "  💬 Sent Authorization: Basic *** --password *** and "
-            "Authorization: Bearer ***\\r\\nX-Api-Key: ***"]
+            "Authorization: Bearer ***\\r\\nX-Api-Key: ***",
+            "  💬 Set h = 'Authorization: ' + 'Basic ' + ***",
+            "  💬 Set h = 'Authorization: ' + 'Basic ' + ***",
+            "  💬 Sent Authorization: Basic *** next",
+            "  💬 Set h = 'Authorization: Basic ' + ***"]
 
     def test_environment_credential_values_masked(self):
         # The values of the credential-named variables of fullsend's
@@ -2948,7 +2958,8 @@ class TestConsoleFilter:
                   "'Authorization: Basic ' + " + "'Basic ' + " * 10_000,
                   "Authorization: Basic b64pad=\\r\\nX: " * 4_000, "Authorization: Token " + "a=" * 50_000,
                   "password: " + '"a" ' * 25_000, "password: " + '"a" + ' * 17_000,
-                  "password: " + "a " * 50_000, "\x1b]" * 50_000, "\\" * 100_000)
+                  "password: " + "a " * 50_000, "\x1b]" * 50_000, "\\" * 100_000,
+                  "password: " + "$'a' + " * 17_000, '{"token": `' + "a," * 50_000)
         lines = ["Error: " + body for body in bodies] + [
             '  ⚙ Bash: "' + "x" * 100_000, "  ⚙ Bash: " + "x" * 100_000,
             "  ⚙ Bash: " + "\\x" * 50_000, "  ⚙ Bash: " + "TOKEN=a " * 12_500 + "x",

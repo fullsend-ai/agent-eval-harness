@@ -189,14 +189,15 @@ _QUOTED_TAIL_RE = {
 # triple-quoted, double-quoted or single-quoted string, an escaped quote
 # passed, an unterminated one running to the end of the line.
 _QUOTED_LITERAL = (
-    r"""(?:[bBrRuUfF]{1,2}(?=["']))?"""
+    r"""(?:(?:[bBrRuUfF]{1,2}|\$)(?=["']))?"""
     r"""(?:\"\"\"(?:\\.|(?!\"\"\").)*(?:\"\"\"|$)|\'\'\'(?:\\.|(?!\'\'\').)*(?:\'\'\'|$)"""
-    r"""|"(?:[^"\\]|\\.?)*(?:"|$)|'(?:[^'\\]|\\.?)*(?:'|$))""")
+    r"""|"(?:[^"\\]|\\.?)*(?:"|$)|'(?:[^'\\]|\\.?)*(?:'|$)"""
+    r"""|\x60(?:\\.|[^\x60])*(?:\x60|$))""")
 _FIELD_VALUE_RE = re.compile(r"(?:" + _QUOTED_LITERAL + r"|[^,;}\]]+)")
 # A quoted field value continued by another literal, adjacent or after a
 # ``+`` (``"ab" "cd"``, ``"ab" + "cd"``): the credential is the whole.
 _FIELD_CONTINUATION_RE = re.compile(r"[ \t]*(?:\+[ \t]*)?" + _QUOTED_LITERAL)
-_LITERAL_START_RE = re.compile(r"""[bBrRuUfF]{0,2}["']""")
+_LITERAL_START_RE = re.compile(r"""(?:[bBrRuUfF]{0,2}|\$)["'\x60]""")
 # An ``Authorization`` value (``Proxy-Authorization``, ``X-Authorization``,
 # ``HTTP_AUTHORIZATION`` too) has its credentials shown as ``***``
 # (_redact_authorization). The header name is found bare (after a dot or a
@@ -1103,8 +1104,10 @@ def _authorization_credentials(text: str, i: int, quoted_name: bool, quote):
                     return start, end
                 if name in _PARAM_SCHEMES:  # a list that does not parse: whole
                     return _trimmed(text, start, _bare_value_end(text, start, loose=True))
-        if text[start] in "\"'":  # a quoted credential, hidden with its quotes
-            end = _QUOTED_TAIL_RE[text[start]].match(text, start + 1).end()
+        dollar = text[start] == "$" and start + 1 < n and text[start + 1] in "\"'"
+        if dollar or text[start] in "\"'":  # a quoted credential, hidden with its quotes
+            q = start + 1 if dollar else start
+            end = _QUOTED_TAIL_RE[text[q]].match(text, q + 1).end()
             while (more := _FIELD_CONTINUATION_RE.match(text, end)) is not None:
                 end = more.end()  # and the literals concatenated after it
             return start, end
@@ -1152,7 +1155,13 @@ def _concatenated_credential(text: str, end: int):
                 text[span[0] + 1:span[1] - 1].strip().lower() in _KNOWN_SCHEMES):
             j = span[1]
             continue
-        return span
+        end = span[1]
+        if first in "\"'" or first == "$" and span[1] - span[0] > 1 and text[span[0] + 1] in "\"'":
+            # A quoted operand is continued by the literals concatenated
+            # after it; a bare word is not (curl -H '…Basic '<b64>' -H '…').
+            while (more := _FIELD_CONTINUATION_RE.match(text, end)) is not None:
+                end = more.end()
+        return span[0], end
     return None
 
 
@@ -1166,6 +1175,8 @@ def _operand(text: str, i: int):
     c = text[i]
     if c in "\"'":
         return i, _QUOTED_TAIL_RE[c].match(text, i + 1).end()
+    if c == "$" and i + 1 < n and text[i + 1] in "\"'":
+        return i, _QUOTED_TAIL_RE[text[i + 1]].match(text, i + 2).end()
     if c == "`":
         close = text.find("`", i + 1)
         return i, n if close < 0 else close + 1
