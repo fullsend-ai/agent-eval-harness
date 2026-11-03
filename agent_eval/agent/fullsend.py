@@ -195,8 +195,12 @@ _QUOTED_LITERAL = (
     r"""|\x60(?:\\.|[^\x60])*(?:\x60|$))""")
 _FIELD_VALUE_RE = re.compile(r"(?:" + _QUOTED_LITERAL + r"|[^,;}\]]+)")
 # A quoted field value continued by another literal, adjacent or after a
-# ``+`` (``"ab" "cd"``, ``"ab" + "cd"``): the credential is the whole.
-_FIELD_CONTINUATION_RE = re.compile(r"[ \t]*(?:\+[ \t]*)?" + _QUOTED_LITERAL)
+# ``+`` (``"ab" "cd"``, ``"ab" + "cd"``): the credential is the whole. A bare
+# run glued to the previous literal with no blank (``$'ab'cd``) is the rest of
+# the same shell word; the ``+`` is left out of it, so `` + 'x'`` keeps going
+# through the literal alternative.
+_FIELD_CONTINUATION_RE = re.compile(
+    r"(?:[ \t]*(?:\+[ \t]*)?" + _QUOTED_LITERAL + r"|[^\s,;}\]\"'\x60+]+)")
 _LITERAL_START_RE = re.compile(r"""(?:[bBrRuUfF]{0,2}|\$)["'\x60]""")
 # An ``Authorization`` value (``Proxy-Authorization``, ``X-Authorization``,
 # ``HTTP_AUTHORIZATION`` too) has its credentials shown as ``***``
@@ -235,9 +239,9 @@ _LITERAL_START_RE = re.compile(r"""(?:[bBrRuUfF]{0,2}|\$)["'\x60]""")
 # or the end of the line
 # (``Authorization: ***``: a scheme the rule does not know may carry a
 # multi-word credential, and a prose ``authorization:`` loses the rest of
-# its clause, the safe side). After a quoted name a bare value is hidden only
-# behind a known scheme or a bracket: an f-string or a nested object is left
-# to the other rules. A bare word ends at a blank, a quote, a delimiter or a
+# its clause, the safe side). After a quoted name a bare value is hidden the
+# same way as after a bare one (``"Authorization": SSWS ***``); an f-string's
+# prefix makes it a literal. A bare word ends at a blank, a quote, a delimiter or a
 # bracket, none of which a token holds: in compact JSON
 # (``{"Authorization":"Bearer t1","password":"a b"}``) the credentials end
 # with their own string rather than running into the next field, whose value
@@ -1111,6 +1115,14 @@ def _authorization_credentials(text: str, i: int, quoted_name: bool, quote):
             while (more := _FIELD_CONTINUATION_RE.match(text, end)) is not None:
                 end = more.end()  # and the literals concatenated after it
             return start, end
+        if text[start] == "\x60" or text.startswith(("$(", "${"), start):
+            # A substitution is one operand, blanks inside it included, and
+            # the literals concatenated after it go with it.
+            span = _operand(text, start)
+            end = span[1]
+            while (more := _FIELD_CONTINUATION_RE.match(text, end)) is not None:
+                end = more.end()
+            return start, end
         if text[start] in _AUTH_OPENERS:
             return _bracketed(text, start)
         word = _AUTH_WORD_RE.match(text, start)
@@ -1122,8 +1134,6 @@ def _authorization_credentials(text: str, i: int, quoted_name: bool, quote):
         return start, end
     if i < n and text[i] in _AUTH_OPENERS:
         return _bracketed(text, i)
-    if quoted_name:
-        return None  # "Authorization": f"…", a nested object: the other rules' business
     return _trimmed(text, i, _bare_value_end(text, i))
 
 
@@ -1185,7 +1195,12 @@ def _operand(text: str, i: int):
     if c in _AUTH_OPENERS:
         return i, min(n, _group_end(text, i) + 1)
     word = _AUTH_WORD_RE.match(text, i)
-    return (i, word.end()) if word is not None else None
+    if word is None:
+        return None
+    if word.end() < n and text[word.end()] == "(":
+        # A call expression (``btoa('…')``): the word and its arguments.
+        return i, min(n, _group_end(text, word.end()) + 1)
+    return i, word.end()
 
 
 def _group_end(text: str, i: int) -> int:
@@ -1299,6 +1314,9 @@ def _shell_word_end(text: str, m) -> Optional[int]:
 
 
 def _field_value_end(text: str, m) -> Optional[int]:
+    if m.end() < len(text) and text[m.end()] in "[({":
+        # A collection value: through the closing bracket, nesting honoured.
+        return min(len(text), _group_end(text, m.end()) + 1)
     value = _FIELD_VALUE_RE.match(text, m.end())
     if value is None:
         return None

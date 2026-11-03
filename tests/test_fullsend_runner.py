@@ -2683,6 +2683,10 @@ class TestConsoleFilter:
                 '  💬 Set password: "ab" "cd" and {"token": "ab" + rb"cd", "user": "me"} and '
                 'secret: f"a" \'b\' next\n'
                 "  💬 Set password: $'a,b' next and {\"token\": `a,b`, \"x\": 1}\n"
+                "  💬 Set password: $'<a>'<b> next\n"
+                '  💬 Set password: "<a>"<b>, x: 1\n'
+                '  💬 Set {"password": ["<a>", "<b>"]}\n'
+                "  💬 Set token: {a: 1, b: 2} next\n"
                 "  ✓ Harness loaded (0.5s)\n"
                 "    Tokens: in=158 out=54740 reasoning=14976 cache_read=4674845\n"
                 "  💬 Basic usage of the bearer concept\n")
@@ -2707,6 +2711,10 @@ class TestConsoleFilter:
             "  💬 Set password: *** then token: ***, next, and secret: ***",
             '  💬 Set password: *** and {"token": ***, "user": "me"} and secret: *** next',
             '  💬 Set password: *** next and {"token": ***, "x": 1}',
+            "  💬 Set password: *** next",
+            "  💬 Set password: ***, x: 1",
+            '  💬 Set {"password": ***}',
+            "  💬 Set token: *** next",
             "  ✓ Harness loaded (0.5s)",
             "    Tokens: in=158 out=54740 reasoning=14976 cache_read=4674845",
             "  💬 Basic usage of the bearer ***"]
@@ -2736,10 +2744,9 @@ class TestConsoleFilter:
         # the next quote or delimiter otherwise — an unknown scheme (DPoP,
         # SSWS, its token quoted or not), a prose "authorization:" losing the
         # rest of its clause. After
-        # a quoted name a bare value is hidden only behind a known scheme or
-        # inside brackets: an f-string's placeholder is left to the bare
-        # Bearer rule, which hides it as it did, and a literal in one is
-        # read like any prefixed string. "Authorization" is not a
+        # a quoted name a bare value is hidden like one after a bare name
+        # (an unknown scheme included): an f-string is a literal by its
+        # prefix, read like any prefixed string. "Authorization" is not a
         # credential key, so the field rule never swallows a header's
         # neighbours; a URL path or a comparison is no header.
         text = ('  💬 Sent {"Authorization":"Basic <b64>","user":"me"}\n'
@@ -2809,7 +2816,13 @@ class TestConsoleFilter:
                 "  💬 Set h = 'Authorization: ' + 'Basic ' + '<ab>' + '<cd>'\n"
                 "  💬 Set h = 'Authorization: ' + 'Basic ' + '<ab>' + '<cd>' + '<ef>'\n"
                 "  💬 Sent Authorization: Basic $'<b64>' next\n"
-                "  💬 Set h = 'Authorization: Basic ' + $'<b64>'\n")
+                "  💬 Set h = 'Authorization: Basic ' + $'<b64>'\n"
+                "  💬 Set h = 'Authorization: Basic ' + $'<a>'<b>\n"
+                "  💬 Sent Authorization: Basic `<cmd> <a> <b>` next\n"
+                "  💬 Sent Authorization: Bearer $(<cmd> <a> <b>) next\n"
+                'Error: "Authorization": SSWS <a>, "x": 1\n'
+                "Error: Authorization: 'Basic ' + f('<a>')\n"
+                "  💬 Set h = Authorization: 'Bearer ' + g(k='<a>') next\n")
         assert self._select(text) == [
             '  💬 Sent {"Authorization":"Basic ***","user":"me"}',
             "  💬 Sent {'Authorization': 'token ***', 'Proxy-Authorization': 'Bearer ***'}",
@@ -2865,7 +2878,13 @@ class TestConsoleFilter:
             "  💬 Set h = 'Authorization: ' + 'Basic ' + ***",
             "  💬 Set h = 'Authorization: ' + 'Basic ' + ***",
             "  💬 Sent Authorization: Basic *** next",
-            "  💬 Set h = 'Authorization: Basic ' + ***"]
+            "  💬 Set h = 'Authorization: Basic ' + ***",
+            "  💬 Set h = 'Authorization: Basic ' + ***",
+            "  💬 Sent Authorization: Basic *** next",
+            "  💬 Sent Authorization: Bearer *** next",
+            'Error: "Authorization": ***, "x": 1',
+            "Error: Authorization: 'Basic ' + ***",
+            "  💬 Set h = Authorization: 'Bearer ' + *** next"]
 
     def test_environment_credential_values_masked(self):
         # The values of the credential-named variables of fullsend's
@@ -2959,7 +2978,9 @@ class TestConsoleFilter:
                   "Authorization: Basic b64pad=\\r\\nX: " * 4_000, "Authorization: Token " + "a=" * 50_000,
                   "password: " + '"a" ' * 25_000, "password: " + '"a" + ' * 17_000,
                   "password: " + "a " * 50_000, "\x1b]" * 50_000, "\\" * 100_000,
-                  "password: " + "$'a' + " * 17_000, '{"token": `' + "a," * 50_000)
+                  "password: " + "$'a' + " * 17_000, '{"token": `' + "a," * 50_000,
+                  "password: " + "$'a'b " * 17_000, '{"password": [' + '"a", ' * 20_000,
+                  "Authorization: 'Basic ' + f(" + "(" * 100_000)
         lines = ["Error: " + body for body in bodies] + [
             '  ⚙ Bash: "' + "x" * 100_000, "  ⚙ Bash: " + "x" * 100_000,
             "  ⚙ Bash: " + "\\x" * 50_000, "  ⚙ Bash: " + "TOKEN=a " * 12_500 + "x",
