@@ -110,8 +110,14 @@ than one thing can go wrong in a case and #276 already had to record two at once
 | `phase` | `provision` \| `before_each` \| `agent` \| `after_each` \| `collect` \| `score` |
 | `kind` | stable slug for the cause; the set grows, consumers must tolerate unknown values |
 | `attribution` | `harness` \| `agent` — decides BOTH the reward treatment and whether the case blocks a score threshold, below |
+| `judge` | optional judge name — the **scope** of the entry. Absent ⇒ the entry is about the case and applies to every judge. Set only by the judge-error contributor, to the judge that produced no verdict. |
 | `detail` | one line for a human |
 | `log` | optional pointer, relative to the run directory |
+
+**Scope is an explicit field, not derived from `phase`.** `phase: score` also covers
+evidence loss found while scoring (the example above: content not staged), which is a
+property of the case and charges every judge. Absent means unscoped, so a writer that
+forgets the field errs toward over-counting a case, never toward hiding one.
 
 ### `attribution` drives both consumers, in opposite directions
 
@@ -127,11 +133,25 @@ where the judges still returned values never reaches it — so a
 `harness`-attributed case would be exempt from the score gate AND absent from
 the coverage gate, i.e. gated by nothing, even with `max_error_rate: 0`.
 
-The coverage gate therefore counts **cases that produced no valid
-measurement**: the union of `errored_cases` and **every** `unmeasured` case,
-counted once per case, over a denominator that includes them. The same
-accounting is required locally, in Harbor and in EvalHub — otherwise this
-repeats the split #277 already complains about.
+The coverage gate therefore counts, **per judge**, the **cases that produced no
+valid measurement for that judge**: the union of that judge's `errored_cases` and
+every `unmeasured` case that has an entry applying to it — an unscoped entry
+(evidence loss) applies to every judge; a judge-scoped entry (a judge error)
+applies only to the judge it names. Counted once per case, over a denominator
+that includes them. The same accounting is required locally, in Harbor and in
+EvalHub — otherwise this repeats the split #277 already complains about.
+
+**Why a judge error is scoped.** The two causes differ in whom they leave without a
+measurement. Evidence loss (staging, record-build, collect, hooks) means the case has
+no valid material, so no judge measured it and every judge is charged — as #276
+established when a case record that cannot be built marks every judge. A judge error
+means judge A produced no verdict while judge B measured the same case on complete
+material; charging B would make B's coverage gate fail because of A's error, and says
+the run covered less of the dataset than it did. The entry stays in the case's list,
+so reward and the report still see it; only the per-judge coverage numerator (and the
+other per-judge consumers in the table below) honour the scope. When *every* scoring
+judge errored, every judge has its own scoped entry, so each is charged — the
+spec's motivating example needs no special case.
 
 **Attribution-independent, deliberately.** An earlier draft counted only
 `harness`-attributed cases here, which left the `agent`-attributed ones in no
@@ -169,6 +189,10 @@ a timeout is `harness` only when positively shown to be independent of agent con
 and agent resource use — a provider or transport timeout. A scorer timeout is `agent`. Acceptance case: malformed agent output
 makes a scorer raise, and the sample scores `0.0` rather than being dropped.
 
+An `agent`-attributed judge-error entry blocks only the thresholds and baseline
+comparison of the judge it names, for the same reason coverage is scoped: the other
+judges' verdicts were reached over complete material.
+
 **Mixed attribution resolves to `agent`.** A case can carry entries of both
 kinds — the example above does. The rule is order-independent and deliberately
 asymmetric: if ANY entry is attributed to the agent, the case scores `0.0`
@@ -183,17 +207,24 @@ scores `0.0` and blocks.
 `incomplete_cases` is per judge today, and that is already strained: in #276, when the
 case record could not be built, the fix had to stamp **every** judge, because the
 condition is not a property of any judge — it is a property of the case. At case level
-the stamping loop disappears and per-judge counts derive by counting.
+the stamping loop disappears and per-judge counts derive by counting — an unscoped
+entry counts for every judge, a judge-scoped one for the judge it names.
+
+The case-level list is therefore the home for both causes, but it is not uniformly
+"the case is void for everyone": a judge-error entry says only that one judge has no
+verdict. What *is* case-level is `unmeasured_cases` and the reward disposition (below); the
+reward considers a judge-scoped entry only when the named judge contributes to the
+composed reward, and always considers an unscoped one.
 
 ### What changes for each consumer
 
 | Consumer | Today | With `unmeasured` |
 | --- | --- | --- |
-| judges | `outputs["hook_failures"]`, a marker file, `staging_skips` | `outputs["unmeasured"]` |
-| thresholds | the `incomplete_staging` special case in `detect_regressions` | **every** unmeasured case enters the widened `max_error_rate` numerator; an **`agent`-attributed** one additionally blocks score thresholds and baselines |
-| `summary.yaml` | `incomplete_cases` stamped by each layer | `unmeasured_cases`, derived by counting |
-| **aggregates** | every non-None judge value joins `mean`/`pass_rate` | an unmeasured case's observations are **excluded** |
-| reward | errored ⇒ `0.0` | `attribution: harness` ⇒ drop the sample; `agent` ⇒ `0.0` |
+| judges | `outputs["hook_failures"]`, a marker file, `staging_skips` | `outputs["unmeasured"]` (evidence-loss entries; judge-error entries are written after the judges ran) |
+| thresholds | the `incomplete_staging` special case in `detect_regressions` | per judge: every unmeasured case with an **applicable** entry (unscoped, or scoped to that judge) enters the widened `max_error_rate` numerator; an applicable **`agent`-attributed** entry additionally blocks that judge's score thresholds and baselines |
+| `summary.yaml` | `incomplete_cases` stamped by each layer | `unmeasured_cases`, derived by counting (case-level: one per case whatever the scope) |
+| **aggregates** | every non-None judge value joins `mean`/`pass_rate` | per judge: an observation is **excluded** when an applicable entry exists for its case |
+| reward | errored ⇒ `0.0` | over the entries applicable to the judges the reward composes: `attribution: harness` ⇒ drop the sample; `agent` ⇒ `0.0` |
 | Harbor / EvalHub | counters dropped | one field to carry |
 
 **An unmeasured case's judge values are not measurements either.** A case can be
@@ -209,7 +240,9 @@ to the sample, so without this rule:
 
 So: exclude an unmeasured case's observations from `mean`, `pass_rate` and the baseline
 comparison, whatever the attribution — the verdict is not evidence about the agent
-either way. Keep the case in the coverage denominator (it was attempted) and keep its
+either way. The exclusion follows the entry's scope: evidence loss removes every
+judge's observation for the case; a judge-error entry removes only the named judge's,
+which has no value to remove, so judge B's verdict over complete material stays. Keep the case in the coverage denominator (it was attempted) and keep its
 raw verdict in `per_case` for diagnostics. Counting a case as unscored while still
 scoring it is the inconsistency this whole document exists to remove.
 
@@ -267,22 +300,26 @@ those reach the canonical list is implementation scope (#277).
    release-impact note says, instead of only the end state being right.
 2. Add the hook contributor (#264, merged) and the `collect.py` contributor (#277).
    Add the **judge-error** contributor at the same time: a judge that fails
-   terminally after its retries emits a `phase: score` entry. Without it the
+   terminally after its retries emits a `phase: score` entry, scoped to that judge
+   (`judge: <name>`). Without it the
    example this spec opens with — every scoring judge errored, reward `0.0` —
    stays unfixed, because the case's `unmeasured` list would be empty and the
    spec defines that as a valid measurement. `errored_cases` still records
    "the judge itself failed"; the two are not redundant, because a judge can
    error on one case out of ten and the run is still a measurement of the
-   agent on the other nine. The `unmeasured` entry is for the case, the
-   `errored_cases` count is for the judge.
+   agent on the other nine. The `unmeasured` entry is for the case — so reward and
+   the report see it — and carries the judge it came from; the `errored_cases` count
+   is for the judge.
 3. Switch `detect_regressions` to read `unmeasured`; keep `incomplete_staging` as the
    regression metric name so CI output does not churn. Widen the `max_error_rate`
-   numerator to "cases that produced no valid measurement" — `errored_cases` union
-   **every** `unmeasured` case, counted once per case, whatever its attribution — so
-   every lost case lands in a gate and not only the ones with a score threshold. An
-   `agent`-attributed case additionally blocks score thresholds and baselines, whichever
-   contributor wrote it. And exclude an unmeasured case's observations from `mean`,
-   `pass_rate` and the baseline comparison, per the rule above.
+   numerator, per judge, to "cases that produced no valid measurement for that judge" —
+   its `errored_cases` union every `unmeasured` case with an entry **applicable** to it
+   (unscoped, or scoped to that judge), counted once per case, whatever its attribution —
+   so every lost case lands in a gate and not only the ones with a score threshold. An
+   applicable `agent`-attributed entry additionally blocks that judge's score thresholds
+   and baselines, whichever contributor wrote it. And exclude the observations of a
+   case with an applicable entry from `mean`, `pass_rate` and the baseline comparison,
+   per the rule above.
 4. Make the gate substrate-independent. Harbor and EvalHub rebuild their summaries
    from scratch and carry none of this today, so the same `eval.yaml` would fail
    locally and pass in a container — the split #277 already complains about. The
@@ -336,8 +373,11 @@ counted toward nothing now counts toward the author's declared error budget. And
 `agent`-attributed case now blocks score thresholds whichever contributor wrote it, so
 an agent-induced hook failure or scorer error, which never blocked before, starts to.
 Unmeasured observations also leave `mean`/`pass_rate`. For a judge error the numerator
-change alone is a no-op, since `errored_cases` already counted it; the blocking and the
-exclusion are what change for it.
+change is a no-op **because the entry is scoped to the judge that errored**, and
+`errored_cases` already counted it for that judge; another judge that scored the same
+case is not charged. What changes for a judge error is the blocking — an
+`agent`-attributed one blocks the named judge's thresholds — and the reward, which now
+sees the entry.
 
 **Step 4 makes containerised runs start failing where they silently passed**, which is
 the point. **Step 5** changes RL training data and should land on its own.
