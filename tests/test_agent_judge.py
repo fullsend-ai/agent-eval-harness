@@ -3170,3 +3170,128 @@ def test_batch_tool_only_output_does_not_record_unrelated_losses(tmp_path,
                 if (out / "collection.json").exists() else {})
     assert not any(collect.UNLISTABLE_KEY in v
                    for v in manifest.values() if isinstance(v, dict)), manifest
+
+
+class TestUnmeasuredField:
+    """spec 016 step 1 (#277): the `unmeasured` list, with producers 1-3
+    behind it and `incomplete_cases` derived from it rather than counted
+    beside it — so the field the gate already reads and the entries that will
+    replace it cannot disagree."""
+
+    @contextmanager
+    def _unreadable(self, path):
+        mode = path.stat().st_mode & 0o777
+        path.chmod(0)
+        try:
+            yield
+        finally:
+            path.chmod(mode)
+
+    def _runner(self):
+        class R:
+            @classmethod
+            def from_config(cls, config, *, log_prefix=None, **overrides):
+                return cls()
+
+            @property
+            def name(self):
+                return "stg"
+
+            def execute(self, target=None, args="", workspace=None,
+                        model=None, **kwargs):
+                out = Path(workspace) / "output"
+                out.mkdir(parents=True, exist_ok=True)
+                (out / "score.json").write_text(
+                    json.dumps({"passed": True, "rationale": "x"}))
+                return RunResult(exit_code=0, stdout="", stderr="",
+                                 duration_s=0.01)
+        return R
+
+    def _case(self, tmp_path, name, *, suppress=False):
+        case_dir = tmp_path / name
+        _make_case(case_dir, {"out/ok.md": "fine"})
+        if suppress:
+            outside = tmp_path / f"{name}-outside.txt"
+            outside.write_text("the failing artifact")
+            os.link(outside, case_dir / "out" / "linked.txt")
+        return case_dir
+
+    def _run(self, tmp_path, cases, config=None):
+        import score
+        config = config or _config(
+            _agent_judge(feedback_type="bool", inputs=["out"]), outputs=["out"])
+        with _patched_runners(self._runner()):
+            return score.score_cases(
+                load_judges(config, project_root=str(tmp_path)), cases, config)
+
+    def test_a_staging_skip_produces_a_scoped_entry(self, tmp_path):
+        """Staging is per judge — only that judge's workspace was short, the
+        others read the record — so the entry names it."""
+        res = self._run(tmp_path,
+                        [self._case(tmp_path, "c0", suppress=True)]
+                        + [self._case(tmp_path, f"c{i}") for i in range(1, 4)])
+        entries = res["unmeasured"]["c0"]
+        assert len(entries) == 1
+        e = entries[0]
+        assert e["phase"] == "score"
+        assert e["kind"] == "hardlinked_file"
+        assert e["attribution"] == "agent"
+        assert e["judge"] == "arch_score"
+        assert "c1" not in res["unmeasured"]
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file modes")
+    def test_a_record_build_failure_produces_an_unscoped_entry(self, tmp_path):
+        """It reached every judge, so it belongs to the case, not a judge."""
+        bad = self._case(tmp_path, "c0")
+        (bad / "out" / "bad.txt").write_text("FAILING EVIDENCE")
+        config = _config(_agent_judge(feedback_type="bool", inputs=["out"]),
+                         outputs=["out"])
+        config.judges = [config.judges[0],
+                         JudgeConfig(name="shape", check="return True, 'ok'")]
+        with self._unreadable(bad / "out" / "bad.txt"):
+            res = self._run(tmp_path,
+                            [bad] + [self._case(tmp_path, f"c{i}")
+                                     for i in range(1, 4)],
+                            config=config)
+        entries = res["unmeasured"]["c0"]
+        assert all("judge" not in e for e in entries), entries
+        assert {e["kind"] for e in entries} == {"content_not_staged"}
+        # unscoped ⇒ charged to every judge, which is #276's behaviour
+        for judge in ("arch_score", "shape"):
+            assert res["aggregated"][judge]["incomplete_cases"] == 1, judge
+
+    def test_a_scoped_entry_does_not_charge_another_judge(self, tmp_path):
+        """The point of scoping. Judge A's staging was short; judge B read the
+        record and measured the case fine, so B's coverage is untouched."""
+        bad = self._case(tmp_path, "c0", suppress=True)
+        config = _config(_agent_judge(feedback_type="bool", inputs=["out"]),
+                         outputs=["out"])
+        config.judges = [config.judges[0],
+                         JudgeConfig(name="shape", check="return True, 'ok'")]
+        res = self._run(tmp_path,
+                        [bad] + [self._case(tmp_path, f"c{i}")
+                                 for i in range(1, 4)],
+                        config=config)
+        entry, = res["unmeasured"]["c0"]
+        assert entry["judge"] == "arch_score"
+        assert res["aggregated"]["arch_score"]["incomplete_cases"] == 1
+        assert res["aggregated"]["shape"]["incomplete_cases"] == 0
+
+    def test_incomplete_cases_is_derived_from_the_entries(self, tmp_path):
+        """Not counted beside them. A case with no entry must not be charged,
+        and a case with one must be — whichever way round a future producer
+        gets it wrong, this is the invariant that catches it."""
+        res = self._run(tmp_path,
+                        [self._case(tmp_path, "c0", suppress=True)]
+                        + [self._case(tmp_path, f"c{i}") for i in range(1, 10)])
+        agg = res["aggregated"]["arch_score"]
+        charged = sum(1 for case, entries in res["unmeasured"].items()
+                      if any(e.get("judge") in (None, "arch_score")
+                             for e in entries))
+        assert agg["incomplete_cases"] == charged == 1
+
+    def test_a_clean_run_has_no_unmeasured_section(self, tmp_path):
+        res = self._run(tmp_path,
+                        [self._case(tmp_path, f"c{i}") for i in range(3)])
+        assert res["unmeasured"] == {}
+        assert res["aggregated"]["arch_score"]["incomplete_cases"] == 0
