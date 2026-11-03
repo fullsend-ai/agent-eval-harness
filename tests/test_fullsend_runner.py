@@ -2588,7 +2588,11 @@ class TestConsoleFilter:
                 "Error: TOKEN=`cat <a> <b>` next\n"
                 "Error: TOKEN=$(a $(b c) d) next\n"
                 "Error: TOKEN=${X:-<a> <b>} next\n"
-                "Error: TOKEN=pre$(a b) next\n")
+                "Error: TOKEN=pre$(a b) next\n"
+                "Error: TOKEN=$(printf '%s' 'a)b c') next\n"
+                "Error: TOKEN=$(printf ')' '<a> <b>') next\n"
+                "Error: TOKEN=${X:-'a}b c'} next\n"
+                "Error: ran --password $(printf ')' '<a> <b>') next\n")
         assert self._select(text) == [
             "  💬 Ran JIRA_TOKEN=*** python3 scripts/submit.py "
             "--api-key=*** --password=*** api_secret=*** "
@@ -2603,7 +2607,11 @@ class TestConsoleFilter:
             "Error: TOKEN=*** next",
             "Error: TOKEN=*** next",
             "Error: TOKEN=*** next",
-            "Error: TOKEN=*** next"]
+            "Error: TOKEN=*** next",
+            "Error: TOKEN=*** next",
+            "Error: TOKEN=*** next",
+            "Error: TOKEN=*** next",
+            "Error: ran --password *** next"]
 
     def test_tool_call_lines_show_no_raw_argument(self):
         # A ⚙ line never forwards a command or a prompt: Bash shows the
@@ -2840,7 +2848,13 @@ class TestConsoleFilter:
                 "Error: Authorization: 'Basic ' + f('<a>')\n"
                 "  💬 Set h = Authorization: 'Bearer ' + g(k='<a>') next\n"
                 "Error: Authorization: 'Basic ' + f('a)<b>')\n"
-                'Error: Authorization: Bearer $(cat "a)b" c) next\n')
+                'Error: Authorization: Bearer $(cat "a)b" c) next\n'
+                'Error: Authorization: Basic first"second third"\n'
+                'Error: Authorization: Basic first"second third" next\n'
+                "Error: Authorization: Bearer <a>'<b> <c>'<d> next\n"
+                'Error: Authorization: Bearer abc", "password": "x"\n'
+                "Error: Authorization: Basic `a \\` b` next\n"
+                "Error: Authorization: 'Bearer ' + `cmd \\` x y` next\n")
         assert self._select(text) == [
             '  💬 Sent {"Authorization":"Basic ***","user":"me"}',
             "  💬 Sent {'Authorization': 'token ***', 'Proxy-Authorization': 'Bearer ***'}",
@@ -2904,7 +2918,13 @@ class TestConsoleFilter:
             "Error: Authorization: 'Basic ' + ***",
             "  💬 Set h = Authorization: 'Bearer ' + *** next",
             "Error: Authorization: 'Basic ' + ***",
-            "Error: Authorization: Bearer *** next"]
+            "Error: Authorization: Bearer *** next",
+            "Error: Authorization: Basic ***",
+            "Error: Authorization: Basic *** next",
+            "Error: Authorization: Bearer *** next",
+            'Error: Authorization: Bearer ***", "password": ***',
+            "Error: Authorization: Basic *** next",
+            "Error: Authorization: 'Bearer ' + *** next"]
 
     def test_environment_credential_values_masked(self):
         # The values of the credential-named variables of fullsend's
@@ -3003,7 +3023,8 @@ class TestConsoleFilter:
                   "Authorization: 'Basic ' + f(" + "(" * 100_000,
                   '{"password": [' + '"a]' * 35_000,
                   "Authorization: 'Basic ' + f(" + "'" * 100_000,
-                  "TOKEN=$(" + "a " * 50_000, "TOKEN=" + "$(x) " * 20_000)
+                  "TOKEN=$(" + "a " * 50_000, "TOKEN=" + "$(x) " * 20_000,
+                  "TOKEN=$(" + "'a)' " * 20_000, "TOKEN=${" + "'}' " * 25_000)
         lines = ["Error: " + body for body in bodies] + [
             '  ⚙ Bash: "' + "x" * 100_000, "  ⚙ Bash: " + "x" * 100_000,
             "  ⚙ Bash: " + "\\x" * 50_000, "  ⚙ Bash: " + "TOKEN=a " * 12_500 + "x",

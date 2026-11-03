@@ -183,10 +183,15 @@ _FIELD_KEY_RE = re.compile(
 # A ``$(…)`` substitution (one level of nesting), a ``${…}`` expansion and a
 # backtick substitution are one part of the word, blanks inside included
 # (TOKEN=$(printf '%s' x) is one value); each runs to the end of the line
-# when it is not closed. The bare run stops at the start of one.
+# when it is not closed. The bare run stops at the start of one. Inside a
+# substitution a quoted string or a backtick one is skipped whole, so a quoted
+# ``)`` or ``}`` (TOKEN=$(printf ')' 'a b')) does not close it.
+_SUBST_RUN = (
+    r"""(?:[^()"'\\\x60]|\\.?|"(?:[^"\\]|\\.?)*(?:"|$)|'(?:[^'\\]|\\.?)*(?:'|$)"""
+    r"""|\x60(?:[^\x60\\]|\\.?)*(?:\x60|$))""")
 _SHELL_WORD_RE = re.compile(
-    r"""(?:\$\((?:[^()\\]|\\.?|\((?:[^()\\]|\\.?)*(?:\)|$))*(?:\)|$)"""
-    r"""|\$\{(?:[^}\\]|\\.?)*(?:\}|$)"""
+    r"""(?:\$\((?:""" + _SUBST_RUN + r"""|\(""" + _SUBST_RUN + r"""*(?:\)|$))*(?:\)|$)"""
+    r"""|\$\{(?:[^}"'\\]|\\.?|"(?:[^"\\]|\\.?)*(?:"|$)|'(?:[^'\\]|\\.?)*(?:'|$))*(?:\}|$)"""
     r"""|\x60(?:[^\x60\\]|\\.?)*(?:\x60|$)"""
     r"""|(?:[^\s"'\\$\x60]|\$(?![({]))+|\\.?"""
     r"""|"(?:[^"\\]|\\.?)*(?:"|$)|'(?:[^'\\]|\\.?)*(?:'|$))+""")
@@ -194,6 +199,10 @@ _QUOTED_TAIL_RE = {
     '"': re.compile(r'(?:[^"\\]|\\.?)*(?:"|$)'),
     "'": re.compile(r"(?:[^'\\]|\\.?)*(?:'|$)"),
 }
+# The rest of a backtick substitution: to the closing backtick, an escaped
+# one passed, or the end of the line. Kept apart from _QUOTED_TAIL_RE, whose
+# keys are the quotes an assignment can open inside.
+_BACKTICK_TAIL_RE = re.compile(r"(?:[^\x60\\]|\\.?)*(?:\x60|$)")
 # A field's value: a string literal (_QUOTED_LITERAL; one continued by
 # another literal, adjacent or after a ``+``, taken whole), or a bare scalar up to a JSON/YAML delimiter (``,`` ``;`` ``}`` ``]``) or the
 # end of the line, blanks included — a multi-word password in prose
@@ -1148,7 +1157,21 @@ def _authorization_credentials(text: str, i: int, quoted_name: bool, quote):
         if word is None:
             return None
         end = word.end()
-        while end > start + 1 and text[end - 1] in ".!?":
+        bare_tail = True
+        while end < n and text[end] in "\"'":
+            # A quoted segment glued to the word is part of the same shell
+            # word (first"second third"), a bare run glued after it too. A
+            # quote closing right before a word character is a stray quote
+            # ending the value (abc", "password": "x"), left as terminator.
+            close = _QUOTED_TAIL_RE[text[end]].match(text, end + 1).end()
+            closed = close - 1 > end and text[close - 1] == text[end]
+            if closed and close < n and (text[close].isalnum() or text[close] == "_"):
+                break
+            end, bare_tail = close, False
+            more = _AUTH_WORD_RE.match(text, end)
+            if more is not None:
+                end, bare_tail = more.end(), True
+        while bare_tail and end > start + 1 and text[end - 1] in ".!?":
             end -= 1  # a sentence's punctuation, which no token ends with
         return start, end
     if i < n and text[i] in _AUTH_OPENERS:
@@ -1207,8 +1230,7 @@ def _operand(text: str, i: int):
     if c == "$" and i + 1 < n and text[i + 1] in "\"'":
         return i, _QUOTED_TAIL_RE[text[i + 1]].match(text, i + 2).end()
     if c == "`":
-        close = text.find("`", i + 1)
-        return i, n if close < 0 else close + 1
+        return i, _BACKTICK_TAIL_RE.match(text, i + 1).end()
     if c == "$" and i + 1 < n and text[i + 1] in "({":
         return i, min(n, _group_end(text, i + 1) + 1)
     if c in _AUTH_OPENERS:
