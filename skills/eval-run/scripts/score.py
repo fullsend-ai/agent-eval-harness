@@ -3640,8 +3640,10 @@ def score_cases(judges, case_dirs, config, run_id=None, samples_override=None):
     (LLM) judges are sampled; deterministic judges always run once.
     """
     if not case_dirs:
-        return {"per_case": {}, "aggregated": {n: {"values": [], "mean": None, "pass_rate": None} for n, *_ in judges}}
+        return {"per_case": {}, "unmeasured": {},
+                "aggregated": {n: {"values": [], "mean": None, "pass_rate": None} for n, *_ in judges}}
     per_case = {}
+    unmeasured = {}          # spec 016: {case_id: [entry, ...]}
     aggregated = {name: {"values": [], "errored_cases": 0,
                          "incomplete_cases": 0}
                   for name, *_ in judges}
@@ -3829,6 +3831,13 @@ def score_cases(judges, case_dirs, config, run_id=None, samples_override=None):
                 for name, _, _, jt, _ in judges:
                     result = {"value": None, "error": str(e), "judge_type": jt}
                     if lost:
+                        # The record could not be built, so NO judge got
+                        # anything — the loss belongs to the case, not to any
+                        # judge. Recorded here because this is where that is
+                        # known; inferring it later from "how many judges
+                        # carry the entry" is wrong whenever a run has one
+                        # judge (spec 016 scope).
+                        result["unmeasured_scope"] = "case"
                         # Summarised per judge, not once and shared: `yaml.dump`
                         # turns a repeated object into an `&id001`/`*id001`
                         # anchor pair, and `summary.yaml` is read by things
@@ -3839,10 +3848,17 @@ def score_cases(judges, case_dirs, config, run_id=None, samples_override=None):
                       file=sys.stderr, flush=True)
             per_case[case_id] = case_results
             with lock:
+                # spec 016. One list per case; `incomplete_cases` is DERIVED
+                # from it rather than counted alongside, so the field the gate
+                # already reads and the entries that will replace it cannot
+                # disagree.
+                entries = _unmeasured_from_case(case_results)
+                if entries:
+                    unmeasured[case_id] = entries
                 for name, result in case_results.items():
                     if name not in aggregated:
                         continue
-                    if _evidence_was_omitted(result.get("staging_skips")):
+                    if any(_applies_to(e, name) for e in entries):
                         # Counted as well as, not instead of, the error below:
                         # the sample already failed, and this records WHY so a
                         # score threshold can refuse to pass on the survivors.
@@ -3898,7 +3914,13 @@ def score_cases(judges, case_dirs, config, run_id=None, samples_override=None):
                     "total_cases": len(scored),
                 }
 
-    result = {"per_case": per_case, "aggregated": aggregated}
+    # `unmeasured` rides beside `per_case`, not inside it: `per_case[<case>]`
+    # is a judge-name -> record map and every consumer iterates its members
+    # expecting a record (spec 016). Returned from `score_cases` because the
+    # Harbor verifier composes its reward in-container, where no summary.yaml
+    # exists yet, and takes what it needs straight from this return value.
+    result = {"per_case": per_case, "aggregated": aggregated,
+              "unmeasured": unmeasured}
     # Judge-side usage (spec 014 Decision 15): tokens/cost per judge call,
     # aggregated here and written to summary.yaml — never into run_result.
     judge_usage = aggregate_judge_usage(per_case, _tool_choice_fallback_count(),
@@ -4228,6 +4250,91 @@ _CASE_OUTPUT_SKIP_REASONS = ("deeper than", "staging limit exceeded",
 # the OS said, content the judge was meant to see never reached it. It lets
 # the recorded entry count as evidence-bearing without naming each cause.
 _CONTENT_LOST = "content not staged"
+
+
+# --- spec 016: the one field for "this case produced no measurement" ---------
+#
+# Step 1 of #277: producers 1-3 only (a staging skip, staging that could copy
+# nothing, a case record that could not be built). All three are discovered
+# during scoring and all three are the graded skill's own output tree, so they
+# are `phase: score`, `attribution: agent` — the argument #260 and #276 make.
+#
+# `incomplete_cases` is DERIVED from these rather than counted beside them, so
+# the entries cannot silently disagree with the gate that already ships. Later
+# steps add producers; the legacy field keeps being derived from these three
+# until the gate itself reads `unmeasured` (spec 016, step 3).
+
+# The judge a staging entry belongs to. Staging is per-judge — only the judge
+# whose workspace was short is affected, and the others read the record — so
+# these are judge-SCOPED. A record-build failure reaches every judge and is
+# recorded unscoped by `_unmeasured_from_case`.
+_STAGING_KINDS = {
+    "hardlinked file": "hardlinked_file",
+    "sparse file": "sparse_file",
+    "deeper than": "depth_limit",
+    "staging limit exceeded": "staging_limit",
+    _CONTENT_LOST: "content_not_staged",
+}
+
+
+def _unmeasured_kind(reason):
+    """A stable slug for a `staging_skips` reason prefix."""
+    for prefix, slug in _STAGING_KINDS.items():
+        if str(reason).startswith(prefix):
+            return slug
+    return "evidence_lost"
+
+
+def _unmeasured_from_case(case_results):
+    """`unmeasured` entries for one case, from its per-judge results.
+
+    Returns `[]` when nothing was lost. An entry names the judge it applies to
+    when the loss was that judge's staging; a loss that reached every judge
+    (the record could not be built, so all of them carry the same reasons) is
+    emitted once, unscoped, which is what spec 016 means by an entry that
+    applies everywhere.
+    """
+    per_judge = {
+        name: result.get("staging_skips")
+        for name, result in case_results.items()
+        if isinstance(result, dict)
+        and _evidence_was_omitted(result.get("staging_skips"))
+    }
+    if not per_judge:
+        return []
+    # Not inferred from how many judges carry the entry — with a single judge
+    # that is indistinguishable, and the scope is part of a published shape.
+    # The record-build path marks it where it is known.
+    unscoped = any(
+        isinstance(r, dict) and r.get("unmeasured_scope") == "case"
+        for r in case_results.values())
+
+    def entry(reason, count, judge=None):
+        e = {"phase": "score", "kind": _unmeasured_kind(reason),
+             "attribution": "agent", "detail": str(reason)}
+        if count > 1:
+            e["detail"] = f"{reason} (x{count})"
+        if judge is not None:
+            e["judge"] = judge
+        return e
+
+    if unscoped:
+        skips = next(iter(per_judge.values())) or {}
+        return [entry(r, n) for r, n in sorted((skips.get("reasons") or {}).items())]
+    return [entry(r, n, judge=name)
+            for name, skips in sorted(per_judge.items())
+            for r, n in sorted(((skips or {}).get("reasons") or {}).items())]
+
+
+def _applies_to(entry, judge_name):
+    """Whether an `unmeasured` entry is in scope for `judge_name`.
+
+    Spec 016: an unscoped entry applies everywhere, a judge-scoped one only to
+    the judge it names. Consumers filter by this BEFORE resolving anything.
+    """
+    named = entry.get("judge")
+    return named is None or named == judge_name
+
 
 # Cumulative bounds on one staging operation. Depth and ancestor-loop checks do
 # not stop an acyclic fan-out (two links per level to an already-visited
@@ -5977,6 +6084,14 @@ def cmd_judges(args):
         for name, agg in judge_results.get("aggregated", {}).items()
     }, runs_dir)
     _merge_summary(args.run_id, "per_case", judge_results.get("per_case", {}), runs_dir)
+    # spec 016. A top-level sibling keyed by case id, written only when
+    # something was lost so an untouched run's summary.yaml is unchanged.
+    unmeasured = judge_results.get("unmeasured") or {}
+    if unmeasured:
+        _merge_summary(args.run_id, "unmeasured", unmeasured, runs_dir)
+        n = len(unmeasured)
+        print(f"  unmeasured: {n} case{'s' if n != 1 else ''} produced no "
+              f"valid measurement (see summary.yaml)")
     judge_usage = judge_results.get("judge_usage") or {}
     if judge_usage:
         _merge_summary(args.run_id, "judge_usage", judge_usage, runs_dir)
