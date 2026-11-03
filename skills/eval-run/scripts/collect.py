@@ -195,10 +195,20 @@ def _copy_at(root_fd, parts, dest):
             os.close(parent)
     except OSError:
         return False
-    with os.fdopen(fd, "rb") as src:
-        st = os.fstat(src.fileno())
+    # Check the kind before wrapping the descriptor: `fdopen` on a directory
+    # raises, and a path swapped from file to directory since it was listed
+    # must be refused (False), not abort collection. Until `fdopen` owns the
+    # descriptor, this block is responsible for closing it.
+    try:
+        st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
+            os.close(fd)
             return False
+        src = os.fdopen(fd, "rb")
+    except OSError:
+        os.close(fd)
+        return False
+    with src:
         dest.parent.mkdir(parents=True, exist_ok=True)
         with open(dest, "wb") as out:
             shutil.copyfileobj(src, out)
@@ -481,16 +491,23 @@ def _collect_per_case(workspace, output_dir, config):
                     lambda files, _output_cfg, cid=case_id: {cid: files})
 
                 # Collect files modified in-place during execution. A path
-                # `_copy_at` refuses — swapped for a link since the git scan
-                # vetted it — is skipped, as the scan skips links itself.
+                # `_copy_at` refuses — unreadable, or swapped for a link
+                # since the git scan vetted it — is evidence lost, recorded
+                # like every other refused path, and not counted as collected.
                 modified = _collect_modified_files(case_dir, config)
                 if modified:
                     mod_output = output_dir / "cases" / case_id / "_modified"
                     mod_output.mkdir(parents=True, exist_ok=True)
+                    copied = 0
                     for rel_path, _abs_path in modified:
-                        _copy_at(case_fd, Path(rel_path).parts,
-                                 mod_output / rel_path)
-                    results.setdefault(case_id, {})["_modified"] = len(modified)
+                        if _copy_at(case_fd, Path(rel_path).parts,
+                                    mod_output / rel_path):
+                            copied += 1
+                        else:
+                            _note_lost(results, output_dir, case_id,
+                                       rel_path)
+                    if copied:
+                        results.setdefault(case_id, {})["_modified"] = copied
             finally:
                 os.close(case_fd)
 

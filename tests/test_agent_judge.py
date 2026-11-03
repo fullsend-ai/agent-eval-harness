@@ -3330,3 +3330,95 @@ def test_a_modified_file_swapped_for_a_symlink_at_use_is_not_followed(
     assert not (run / "cases" / "c0" / "_modified" / "notes.md").exists()
     assert ((run / "cases" / "c0" / "_modified" / "kept.md").read_text()
             == "kept\n")
+    # The refusal is evidence lost, not silence, and only the copy that
+    # succeeded is counted as collected.
+    info = json.loads((run / "collection.json").read_text())["c0"]
+    assert "notes.md" in info[collect.UNLISTABLE_KEY]
+    assert info["_modified"] == 1
+
+
+def _modified_case(tmp_path):
+    """A case workspace with one tracked file edited in place, plus `kept.md`."""
+    import subprocess
+    ws = tmp_path / "ws"
+    case = ws / "cases" / "c0"
+    case.mkdir(parents=True)
+    (case / "notes.md").write_text("before\n")
+    env = {**os.environ,
+           "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    for cmd in (["git", "init", "-q"], ["git", "add", "-A"],
+                ["git", "commit", "-q", "-m", "initial"]):
+        subprocess.run(cmd, cwd=case, env=env, check=True)
+    (case / "notes.md").write_text("after\n")
+    (case / "kept.md").write_text("kept\n")
+    cfg = tmp_path / "eval.yaml"
+    cfg.write_text(textwrap.dedent("""\
+        name: t
+        execution:
+          skill: s
+        outputs:
+          - path: out
+        traces:
+          events: false
+    """))
+    return ws, case, cfg
+
+
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0,
+                    reason="root reads files regardless of mode")
+def test_an_unreadable_modified_file_is_recorded_as_lost(tmp_path,
+                                                         monkeypatch):
+    """A modified file that cannot be opened must reach collection.json as
+    lost evidence, not vanish while the rest are graded as complete."""
+    import collect
+    ws, case, cfg = _modified_case(tmp_path)
+    run = tmp_path / "run"
+    monkeypatch.setattr(sys, "argv", [
+        "collect", "--config", str(cfg), "--workspace", str(ws),
+        "--output", str(run)])
+    real_modified = collect._collect_modified_files
+
+    def scan_then_lock(case_dir, config):
+        found = real_modified(case_dir, config)
+        (case / "notes.md").chmod(0o000)
+        return found
+
+    monkeypatch.setattr(collect, "_collect_modified_files", scan_then_lock)
+    try:
+        collect.main()
+    finally:
+        (case / "notes.md").chmod(0o644)
+
+    info = json.loads((run / "collection.json").read_text())["c0"]
+    assert "notes.md" in info[collect.UNLISTABLE_KEY]
+    assert info["_modified"] == 1
+    assert not (run / "cases" / "c0" / "_modified" / "notes.md").exists()
+
+
+def test_a_modified_file_swapped_for_a_directory_is_recorded_as_lost(
+        tmp_path, monkeypatch):
+    """A path swapped from file to directory between the scan and the copy
+    is refused and recorded; it does not abort collection."""
+    import collect
+    ws, case, cfg = _modified_case(tmp_path)
+    run = tmp_path / "run"
+    monkeypatch.setattr(sys, "argv", [
+        "collect", "--config", str(cfg), "--workspace", str(ws),
+        "--output", str(run)])
+    real_modified = collect._collect_modified_files
+
+    def scan_then_swap(case_dir, config):
+        found = real_modified(case_dir, config)
+        (case / "notes.md").unlink()
+        (case / "notes.md").mkdir()
+        return found
+
+    monkeypatch.setattr(collect, "_collect_modified_files", scan_then_swap)
+    collect.main()
+
+    info = json.loads((run / "collection.json").read_text())["c0"]
+    assert "notes.md" in info[collect.UNLISTABLE_KEY]
+    assert info["_modified"] == 1
+    assert ((run / "cases" / "c0" / "_modified" / "kept.md").read_text()
+            == "kept\n")
