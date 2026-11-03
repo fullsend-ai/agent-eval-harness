@@ -126,6 +126,10 @@ forgets the field errs toward over-counting a case, never toward hiding one.
 | `agent` — the graded skill withheld or corrupted its own evidence | `0.0` | **blocks**, on top of being counted |
 | `harness` — a positively identified, agent-independent infrastructure fault | **drop the sample** | no extra block (coverage counts it, like every unmeasured case) |
 
+This table is what an entry does **to a consumer it applies to**. Which entries apply
+is a separate question, answered under mixed attribution below: an unscoped entry
+applies everywhere, a judge-scoped one only where that judge is involved.
+
 `max_error_rate` has to be widened for that to mean anything. Today its
 numerator is the judge aggregate's `errored_cases`, which increments only when
 a judge returns no value (`score.py:3680-3685`). A hook or collect failure
@@ -193,14 +197,39 @@ An `agent`-attributed judge-error entry blocks only the thresholds and baseline
 comparison of the judge it names, for the same reason coverage is scoped: the other
 judges' verdicts were reached over complete material.
 
-**Mixed attribution resolves to `agent`.** A case can carry entries of both
-kinds — the example above does. The rule is order-independent and deliberately
-asymmetric: if ANY entry is attributed to the agent, the case scores `0.0`
-rather than being dropped, and blocks. Dropping is the outcome that removes a
-case from training, so it is the one an agent could profit from; a harness
-fault that happens to coincide with the agent suppressing evidence must not
-launder the suppression into a dropped sample. The spec's own example therefore
-scores `0.0` and blocks.
+**Mixed attribution resolves to `agent` — after scope filtering, per consumer.**
+A case can carry entries of both kinds. The rule is order-independent and
+deliberately asymmetric: if any *applicable* entry is attributed to the agent, the
+outcome is `0.0`-and-block rather than dropped. Dropping is what removes a case from
+training, so it is the outcome an agent could profit from; a harness fault that
+happens to coincide with the agent suppressing evidence must not launder the
+suppression into a dropped sample.
+
+"Applicable" is what scoping added, and it has to be resolved first or the two rules
+disagree. Each consumer filters before it resolves:
+
+| Consumer | Entries it resolves over |
+| --- | --- |
+| reward | unscoped entries, plus entries naming a judge that contributes to the composed reward |
+| a judge's score thresholds and baseline | unscoped entries, plus entries naming that judge |
+| coverage (`max_error_rate`) for a judge | the same set as that judge's thresholds |
+| `unmeasured_cases`, the report | every entry — these describe the case, not a gate |
+
+Worked example. Judge A's scorer hit a provider 5xx (`harness`, scoped to A); unrelated
+judge B's scorer raised on malformed agent output (`agent`, scoped to B); neither
+contributes to the composed reward:
+
+- **reward** — no applicable entry, so the sample is scored normally. Resolving over
+  *any* entry would have forced `0.0` because B's is `agent`-attributed, punishing a
+  reward that neither judge fed.
+- **A's gates** — A's entry applies and is `harness`: A's coverage counts it, A's score
+  thresholds are not blocked.
+- **B's gates** — B's entry applies and is `agent`: B is blocked.
+- **C, which scored the case cleanly** — no applicable entry; unaffected.
+
+An unscoped entry — evidence loss — is applicable everywhere, so a case that lost its
+material still resolves to `0.0`-and-block for every consumer, which is the #260/#276
+behaviour this must not weaken.
 
 ### Case-level, not judge-level
 
