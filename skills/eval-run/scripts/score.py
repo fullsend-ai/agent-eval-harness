@@ -40,7 +40,8 @@ from typing import Optional
 import yaml
 
 from agent_eval.config import (
-    EvalConfig, RunnerConfig, _is_valid_eval_name, _validate_path_segment,
+    COLLECTION_LOSS_KEY, EvalConfig, RunnerConfig, _is_valid_eval_name,
+    _validate_path_segment,
 )
 from agent_eval.prompt_backends import (
     extract_runner_text,
@@ -115,6 +116,51 @@ def _require_listable(directory: Path) -> None:
     """
     with os.scandir(directory):
         pass
+
+
+def _require_no_collection_loss(manifest_path: Path, case_id: str) -> None:
+    """Raise if `collect.py` recorded that it lost *case_id*'s evidence.
+
+    "No manifest" (a run collected before this existed) is the one case that
+    stays silent. A manifest that EXISTS but cannot be read, parsed or
+    validated is not: the loss it would have recorded is unknowable, and
+    treating it as "nothing lost" would let a threshold pass over survivors.
+    Both raise, which `score_cases` routes through `CaseEvidenceUnavailable`.
+    The case id and every recorded path are agent-controlled, so they are
+    escaped before they reach the message.
+    """
+    if not os.path.lexists(manifest_path):
+        return
+
+    def invalid(why):
+        return ValueError(
+            f"collection manifest {escape_log_text(manifest_path)} "
+            f"cannot be validated: {escape_log_text(why)}")
+
+    if manifest_path.is_symlink() or not manifest_path.is_file():
+        raise invalid("not a regular file")
+    try:
+        with open(manifest_path, encoding="utf-8") as f:
+            collected = json.load(f)
+    except (OSError, ValueError) as e:  # JSONDecodeError, UnicodeDecodeError
+        raise invalid(f"{type(e).__name__}: {e}") from e
+    if not isinstance(collected, dict):
+        raise invalid("root is not an object")
+    # A missing key is "nothing recorded"; an explicit null is a value that
+    # cannot be validated, so it fails closed like every other bad shape.
+    if case_id not in collected:
+        return
+    entry = collected[case_id]
+    if not isinstance(entry, dict):
+        raise invalid("a case entry is not an object")
+    if UNLISTABLE_KEY not in entry:
+        return
+    lost = entry[UNLISTABLE_KEY]
+    if not isinstance(lost, list) or not all(isinstance(p, str) for p in lost):
+        raise invalid(f"`{UNLISTABLE_KEY}` is not a list of paths")
+    if lost:
+        raise OSError("collection could not collect "
+                      + ", ".join(escape_log_text(p) for p in lost))
 
 
 # ---------------------------------------------------------------------------
@@ -606,6 +652,23 @@ def load_case_record(case_dir, config, run_id=None, runs_dir=None,
                 record["hook_outputs"] = yaml.safe_load(f) or {}
         except (yaml.YAMLError, OSError):
             record["hook_outputs"] = {}
+
+    # --- Collection losses (written by collect.py) ---
+    # Collection walks the agent's WORKSPACE, which `_require_listable` below
+    # never sees: a directory the agent made unlistable there simply never
+    # reaches the case directory, so by the time scoring probes it there is
+    # nothing missing to find. `collect.py` records what it could not list;
+    # raising here routes it through the same `CaseEvidenceUnavailable` path
+    # as every other way a case loses its material (#277).
+    #
+    # `collection.json` sits at the run root, outside every case directory,
+    # so artifact collection cannot plant one. It is located from the case
+    # directory's own place in the run (`<run>/cases/<case>`), NOT from
+    # `run_id`: `compare_runs` loads each side without one, and each side has
+    # its own manifest.
+    if case_dir.parent.name == "cases":
+        _require_no_collection_loss(
+            case_dir.parent.parent / "collection.json", case_id)
 
     # --- Per-case hook results (written by execute.py) ---
     # Exposed as outputs["hooks"] so a judge or an `if:` condition can gate on
@@ -1976,9 +2039,9 @@ def _note_verdict_stepdown(backend, model, exc, *, route=""):
         first = key not in _VERDICT_STEPDOWNS
         _VERDICT_STEPDOWNS.add(key)
     if first:
-        where = f" (routing {_escape_staging_text(route)})" if route else ""
-        print(f"  WARNING: {_escape_staging_text(backend)} rejected structured outputs for "
-              f"{_escape_staging_text(model)}{where}; judges fall back to the forced tool "
+        where = f" (routing {escape_log_text(route)})" if route else ""
+        print(f"  WARNING: {escape_log_text(backend)} rejected structured outputs for "
+              f"{escape_log_text(model)}{where}; judges fall back to the forced tool "
               f"call for the rest of the run ({_stepdown_diagnostic(exc)})",
               file=sys.stderr, flush=True)
 
@@ -1994,7 +2057,7 @@ def _stepdown_diagnostic(exc):
     parts = []
     status = getattr(exc, "status_code", None)
     if status is not None:
-        parts.append(f"HTTP {_escape_staging_text(status)}")
+        parts.append(f"HTTP {escape_log_text(status)}")
     text = _http_error_text(exc)
     marker = next((m for m in STRUCTURED_OUTPUT_400_MARKERS if m in text), None)
     if marker:
@@ -2009,7 +2072,7 @@ def _stepdown_diagnostic(exc):
         except AttributeError:
             request_id = None
     if request_id:
-        parts.append(f"request id {_escape_staging_text(str(request_id)[:80])}")
+        parts.append(f"request id {escape_log_text(str(request_id)[:80])}")
     return ", ".join(parts) or "provider refusal"
 
 
@@ -4397,7 +4460,12 @@ def _copy_tree_dereferenced(src, dest, confine_root, ancestors, skip=None,
     return errors
 
 
-def _escape_staging_text(text):
+# One definition of the key, in config.py, which also reserves it as an
+# `outputs[].path` so a configured output cannot collide with it.
+UNLISTABLE_KEY = COLLECTION_LOSS_KEY
+
+
+def escape_log_text(text):
     """Make a path or reason safe to print on a log line.
 
     Paths come from skill-produced (untrusted) trees, so a name can carry a
@@ -4412,7 +4480,7 @@ def _escape_staging_text(text):
 
 def _format_staging_problems(problems, limit=10):
     detail = "; ".join(
-        f"{_escape_staging_text(p)}: {_escape_staging_text(why[:200])}"
+        f"{escape_log_text(p)}: {escape_log_text(why[:200])}"
         for p, why in problems[:limit])
     more = "" if len(problems) <= limit else f" (+{len(problems) - limit} more)"
     noun = "entry" if len(problems) == 1 else "entries"

@@ -29,6 +29,7 @@ from agent_eval.config import EvalConfig
 from agent_eval.events import (
     DEFAULT_RESULT_CAP, parse_stream_events, merge_subagent_transcripts,
 )
+from score import UNLISTABLE_KEY, escape_log_text
 
 # Files/dirs created by the harness infrastructure, not by the skill
 _HARNESS_PATHS = {
@@ -36,6 +37,92 @@ _HARNESS_PATHS = {
     "stdout.log", "stderr.log",
     "run_result.json", "batch.yaml", "case_order.yaml",
 }
+
+
+
+
+def _confined(root: Path, path: Path) -> bool:
+    """True if *path* sits under *root* with no symlink on the way.
+
+    Decided from the path components before anything is traversed or copied
+    (the same order `score.py::_resolve_under` uses): a symlinked output
+    root, or a symlinked ancestor of it, would otherwise hand `os.scandir`
+    a directory outside the workspace and pull its files into the artifacts.
+    An `OSError` while checking counts as "not confined".
+    """
+    try:
+        cur = root
+        for part in path.relative_to(root).parts:
+            cur = cur / part
+            if cur.is_symlink():
+                return False
+        return path.resolve().is_relative_to(root.resolve())
+    except (OSError, ValueError):
+        return False
+
+
+def _note_lost(results, output_dir, case_id, rel):
+    """Record that *rel* could not be collected for *case_id*.
+
+    A loss has two halves, and this is the only place either happens:
+    the manifest entry, and a `cases/<case_id>` directory under *output_dir*.
+    `score.py::_get_case_dirs` enumerates directories, not `collection.json`,
+    so a case whose artifacts were all lost would otherwise have no directory
+    and leave the denominator instead of counting as incomplete.
+
+    `collection.json` is read by `score.py::load_case_record`, which raises on
+    a recorded loss. Both the path and the case id come from the agent's
+    workspace, so they are escaped before they reach the log
+    (`escape_log_text`): a newline or a leading ``::`` must not forge a
+    log line or a workflow command.
+    """
+    (output_dir / "cases" / case_id).mkdir(parents=True, exist_ok=True)
+    lost = results.setdefault(case_id, {}).setdefault(UNLISTABLE_KEY, [])
+    rel = str(rel)
+    if rel not in lost:
+        lost.append(rel)
+    print(f"  WARNING: {escape_log_text(case_id)}: cannot collect "
+          f"{escape_log_text(rel)} — its contents are not collected",
+          file=sys.stderr)
+
+
+def _walk_output_files(src: Path, root: Path = None):
+    """``(files, unlistable)`` under *src*.
+
+    `Path.rglob` does **not** raise on a directory it cannot open: it yields
+    the entry and nothing beneath it. The workspace is agent-written, so a
+    `chmod 000` on an output sub-directory silently kept its contents out of
+    the case directory — where the scoring pass's own listability probe
+    (`score.py::_require_listable`, #276) would have caught them. Collection
+    runs earlier, so it has to notice.
+
+    Symlinked directories are not descended into, matching what `rglob` did.
+    When *root* is given, *src* itself must be confined under it (see
+    `_confined`); otherwise nothing is traversed and *src* is reported as
+    lost, because evidence the agent routed through a link cannot be
+    collected safely.
+    """
+    if root is not None and not _confined(root, src):
+        return [], [src]
+    files, unlistable = [], []
+    stack = [src]
+    while stack:
+        directory = stack.pop()
+        try:
+            with os.scandir(directory) as entries:
+                children = sorted(entries, key=lambda e: e.name)
+        except OSError:
+            unlistable.append(directory)
+            continue
+        for entry in children:
+            path = Path(entry.path)
+            if entry.is_symlink():
+                continue
+            if entry.is_dir(follow_symlinks=False):
+                stack.append(path)
+            elif entry.is_file(follow_symlinks=False):
+                files.append(path)
+    return sorted(files), sorted(unlistable)
 
 
 def _safe_path_component(value, field):
@@ -85,7 +172,15 @@ def main():
 
     # Collect from each output path defined in config (directory or file)
     for output_cfg in config.outputs:
-        out_path = _safe_path_component(output_cfg.path or ".", "output path")
+        if not output_cfg.path:
+            # Tool-only output: no filesystem path, same as the per-case
+            # branch. Defaulting it to "." walked the whole workspace, so an
+            # unreadable directory with nothing to do with any declared
+            # output — a private scratch dir — was recorded as lost evidence
+            # against every case and blocked the run. `rglob` ignored such
+            # directories silently, so that false block would be new here.
+            continue
+        out_path = _safe_path_component(output_cfg.path, "output path")
         src = workspace / out_path
         if not src.exists():
             continue
@@ -94,10 +189,27 @@ def main():
         if src.is_file():
             files = [src]
             src_dir = src.parent
+            if not _confined(workspace, src):
+                files, unlistable = [], [src]
+            else:
+                unlistable = []
         else:
             src_dir = src
-            # Get all files in the output directory (including subdirs)
-            files = sorted(f for f in src_dir.rglob("*") if f.is_file())
+            # Get all files in the output directory (including subdirs).
+            # Not `rglob`: it silently skips a directory it cannot open.
+            files, unlistable = _walk_output_files(src_dir, workspace)
+
+        # Batch output reaches cases through `batch_pattern` / grouping, so a
+        # directory we could not list cannot be attributed to one case: any
+        # file inside it might have mapped to any of them. Record it against
+        # EVERY case in case_order. Over-attributing is the safe direction —
+        # a false block is recoverable (fix the directory, re-collect), a
+        # silent loss is the bug this guards against.
+        for d in unlistable:
+            for entry in case_order:
+                cid = entry["case_id"] if isinstance(entry, dict) else entry
+                _note_lost(results, output_dir, cid, d.relative_to(workspace))
+
         if not files:
             continue
 
@@ -122,6 +234,10 @@ def main():
             case_output.mkdir(parents=True, exist_ok=True)
 
             for src_file in matched_files:
+                if not _confined(workspace, src_file):
+                    _note_lost(results, output_dir, case_id,
+                               src_file.relative_to(workspace))
+                    continue
                 # Preserve subdirectory structure relative to src_dir
                 rel = src_file.relative_to(src_dir)
                 dest = case_output / rel
@@ -184,6 +300,22 @@ def _collect_per_case(workspace, output_dir, config):
 
     for case_dir in sorted(d for d in cases_dir.iterdir() if d.is_dir()):
         case_id = case_dir.name
+        # `is_dir()` follows symlinks, so `cases/<id> -> /outside` reaches
+        # here and every path under it then resolves "under" that root. The
+        # confinement check below is relative to the case dir, so the root
+        # itself has to be checked against the workspace — the same ordering
+        # mistake one level up.
+        if not _confined(workspace, case_dir):
+            # Record it like every other unconfined path in this file, and
+            # keep the case in the run. Warning and moving on would hand the
+            # agent the suppression this whole change exists to stop: replace
+            # your case directory with a symlink and the unfavourable
+            # artifacts are simply never collected. Worse, with nothing
+            # copied there is no `cases/<id>` for `_get_case_dirs` to find,
+            # so the case would leave the denominator entirely rather than
+            # being marked incomplete.
+            _note_lost(results, output_dir, case_id, case_dir.name)
+            continue
 
         for output_cfg in config.outputs:
             if not output_cfg.path:
@@ -195,11 +327,17 @@ def _collect_per_case(workspace, output_dir, config):
                 continue
 
             if src.is_file():
-                files = [src]
+                if _confined(case_dir, src):
+                    files, unlistable = [src], []
+                else:
+                    files, unlistable = [], [src]
                 src_base = src.parent
             else:
-                files = sorted(f for f in src.rglob("*") if f.is_file())
+                files, unlistable = _walk_output_files(src, case_dir)
                 src_base = src
+            for d in unlistable:
+                _note_lost(results, output_dir, case_id,
+                           d.relative_to(case_dir))
 
             if not files:
                 continue
@@ -208,8 +346,13 @@ def _collect_per_case(workspace, output_dir, config):
             case_output.mkdir(parents=True, exist_ok=True)
 
             for f in files:
-                # Reject symlinks (CWE-59)
+                # Reject symlinks (CWE-59) and anything that does not resolve
+                # under the case root through a link-free path.
                 if f.is_symlink():
+                    continue
+                if not _confined(case_dir, f):
+                    _note_lost(results, output_dir, case_id,
+                               f.relative_to(case_dir))
                     continue
                 rel = f.relative_to(src_base)
                 dest = case_output / rel
