@@ -117,6 +117,12 @@ _GIT_SHA_RE = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")
 # Live console streaming (``log_prefix`` set). Forwarded lines are cut here so
 # a long batch stays well inside a CI job log's output limit.
 _MAX_STREAM_LINE_CHARS = 200
+# The most characters one read of a pipe takes. A longer line arrives in
+# pieces that the capture joins back unchanged (the filter clips at
+# _MAX_STREAM_LINE_CHARS anyway), and once detached each piece is dropped as
+# it arrives, so a descendant writing without a newline cannot grow memory
+# after the case returned.
+_MAX_PIPE_READ_CHARS = 65_536
 # Seconds to wait for the pipes to reach EOF once the process group is down
 # (a descendant that inherited a pipe may outlive fullsend).
 _PIPE_DRAIN_S = 5.0
@@ -174,8 +180,16 @@ _FIELD_KEY_RE = re.compile(
 # inside it) runs to the end of the line, a trailing lone backslash included,
 # so no fragment of the value gets through. An assignment that opens inside
 # a quoted word ("api_key=ab cd") runs to that word's closing quote first.
+# A ``$(…)`` substitution (one level of nesting), a ``${…}`` expansion and a
+# backtick substitution are one part of the word, blanks inside included
+# (TOKEN=$(printf '%s' x) is one value); each runs to the end of the line
+# when it is not closed. The bare run stops at the start of one.
 _SHELL_WORD_RE = re.compile(
-    r"""(?:[^\s"'\\]+|\\.?|"(?:[^"\\]|\\.?)*(?:"|$)|'(?:[^'\\]|\\.?)*(?:'|$))+""")
+    r"""(?:\$\((?:[^()\\]|\\.?|\((?:[^()\\]|\\.?)*(?:\)|$))*(?:\)|$)"""
+    r"""|\$\{(?:[^}\\]|\\.?)*(?:\}|$)"""
+    r"""|\x60(?:[^\x60\\]|\\.?)*(?:\x60|$)"""
+    r"""|(?:[^\s"'\\$\x60]|\$(?![({]))+|\\.?"""
+    r"""|"(?:[^"\\]|\\.?)*(?:"|$)|'(?:[^'\\]|\\.?)*(?:'|$))+""")
 _QUOTED_TAIL_RE = {
     '"': re.compile(r'(?:[^"\\]|\\.?)*(?:"|$)'),
     "'": re.compile(r"(?:[^'\\]|\\.?)*(?:'|$)"),
@@ -794,7 +808,10 @@ class _ConsoleCapture:
     harness (:meth:`join` is bounded, and what was read by then is kept).
     Once the run is over, :meth:`detach` ends the forwarding and the keeping;
     a reader still blocked on such a pipe goes on emptying it (a blocked read
-    cannot be interrupted) and closes it at EOF."""
+    cannot be interrupted) and closes it at EOF. It reads in pieces of at
+    most :data:`_MAX_PIPE_READ_CHARS` characters, so a descendant writing a
+    line that never ends keeps nothing after detach: each piece is dropped as
+    it arrives."""
 
     def __init__(self, proc: subprocess.Popen, log_prefix: Optional[str] = None,
                  secrets=()):
@@ -815,13 +832,15 @@ class _ConsoleCapture:
               secrets=()) -> None:
         lines = self._lines[name]
         select = _ConsoleFilter(secrets) if log_prefix else None
+        mid_line = False  # the previous piece did not end its line
         try:
-            for line in stream:
+            while (line := stream.readline(_MAX_PIPE_READ_CHARS)):
+                continued, mid_line = mid_line, not line.endswith("\n")
                 if self._detached:
                     continue  # the run has returned: drain, keep nothing
                 lines.append(line)
-                if select is None:
-                    continue
+                if select is None or continued:
+                    continue  # the rest of a line already filtered by its head
                 shown = select.select(line)
                 if shown is None:
                     continue
@@ -1204,17 +1223,37 @@ def _operand(text: str, i: int):
 
 
 def _group_end(text: str, i: int) -> int:
-    """The index of the bracket closing the one opened at ``i``, nesting
-    honoured; the end of the line when none does."""
-    depth = 0
-    for j in range(i, len(text)):
-        if text[j] in _AUTH_OPENERS:
-            depth += 1
-        elif text[j] in _AUTH_CLOSERS:
-            depth -= 1
-            if depth == 0:
+    """The index of the bracket closing the one opened at ``i``; the end of
+    the line when none does.
+
+    One linear scan with a stack of the expected closers, so a closer of
+    another type does not end a group. A quoted string (``"``, ``'`` or a
+    backtick, a backslash escape honoured inside it) is skipped whole — a
+    bracket inside one is data, ``["a]SECRET"]`` — and so is a backslash
+    escape outside; a string never closed runs to the end of the line, and
+    with it the group, so no fragment of the value gets through."""
+    n = len(text)
+    stack: list = []
+    j = i
+    while j < n:
+        c = text[j]
+        if c == "\\":
+            j += 2
+            continue
+        if c in "\"'\x60":
+            j += 1
+            while j < n and text[j] != c:
+                j += 2 if text[j] == "\\" else 1
+            j += 1  # the closing quote (past the end when unterminated)
+            continue
+        if c in _AUTH_OPENERS:
+            stack.append(_AUTH_OPENERS[c])
+        elif stack and c == stack[-1]:
+            stack.pop()
+            if not stack:
                 return j
-    return len(text)
+        j += 1
+    return n
 
 
 def _bracketed(text: str, i: int):

@@ -2582,7 +2582,13 @@ class TestConsoleFilter:
                 "  ✓ Environment\n"
                 "    AWS_ACCESS_KEY_ID=<aws-key-id> MYSECRET=x TOKEN = spaced\n"
                 "    SSH_PASSPHRASE=p1 Signature=s1 https://s3.test/o?X-Amz-Signature=sg "
-                "SIGNATURES=3\n")
+                "SIGNATURES=3\n"
+                "Error: TOKEN=$(printf '%s' '<a>') next\n"
+                "Error: ran --password $(printf '%s' '<a> <b>') next\n"
+                "Error: TOKEN=`cat <a> <b>` next\n"
+                "Error: TOKEN=$(a $(b c) d) next\n"
+                "Error: TOKEN=${X:-<a> <b>} next\n"
+                "Error: TOKEN=pre$(a b) next\n")
         assert self._select(text) == [
             "  💬 Ran JIRA_TOKEN=*** python3 scripts/submit.py "
             "--api-key=*** --password=*** api_secret=*** "
@@ -2591,7 +2597,13 @@ class TestConsoleFilter:
             "  ✓ Environment",
             "    AWS_ACCESS_KEY_ID=*** MYSECRET=*** TOKEN = ***",
             "    SSH_PASSPHRASE=*** Signature=*** https://s3.test/o?X-Amz-Signature=*** "
-            "SIGNATURES=3"]
+            "SIGNATURES=3",
+            "Error: TOKEN=*** next",
+            "Error: ran --password *** next",
+            "Error: TOKEN=*** next",
+            "Error: TOKEN=*** next",
+            "Error: TOKEN=*** next",
+            "Error: TOKEN=*** next"]
 
     def test_tool_call_lines_show_no_raw_argument(self):
         # A ⚙ line never forwards a command or a prompt: Bash shows the
@@ -2687,6 +2699,8 @@ class TestConsoleFilter:
                 '  💬 Set password: "<a>"<b>, x: 1\n'
                 '  💬 Set {"password": ["<a>", "<b>"]}\n'
                 "  💬 Set token: {a: 1, b: 2} next\n"
+                'Error: password: ["a]<b>", "<c>"]\n'
+                'Error: {"password": ["a]<b>"]}\n'
                 "  ✓ Harness loaded (0.5s)\n"
                 "    Tokens: in=158 out=54740 reasoning=14976 cache_read=4674845\n"
                 "  💬 Basic usage of the bearer concept\n")
@@ -2715,6 +2729,8 @@ class TestConsoleFilter:
             "  💬 Set password: ***, x: 1",
             '  💬 Set {"password": ***}',
             "  💬 Set token: *** next",
+            "Error: password: ***",
+            'Error: {"password": ***}',
             "  ✓ Harness loaded (0.5s)",
             "    Tokens: in=158 out=54740 reasoning=14976 cache_read=4674845",
             "  💬 Basic usage of the bearer ***"]
@@ -2822,7 +2838,9 @@ class TestConsoleFilter:
                 "  💬 Sent Authorization: Bearer $(<cmd> <a> <b>) next\n"
                 'Error: "Authorization": SSWS <a>, "x": 1\n'
                 "Error: Authorization: 'Basic ' + f('<a>')\n"
-                "  💬 Set h = Authorization: 'Bearer ' + g(k='<a>') next\n")
+                "  💬 Set h = Authorization: 'Bearer ' + g(k='<a>') next\n"
+                "Error: Authorization: 'Basic ' + f('a)<b>')\n"
+                'Error: Authorization: Bearer $(cat "a)b" c) next\n')
         assert self._select(text) == [
             '  💬 Sent {"Authorization":"Basic ***","user":"me"}',
             "  💬 Sent {'Authorization': 'token ***', 'Proxy-Authorization': 'Bearer ***'}",
@@ -2884,7 +2902,9 @@ class TestConsoleFilter:
             "  💬 Sent Authorization: Bearer *** next",
             'Error: "Authorization": ***, "x": 1',
             "Error: Authorization: 'Basic ' + ***",
-            "  💬 Set h = Authorization: 'Bearer ' + *** next"]
+            "  💬 Set h = Authorization: 'Bearer ' + *** next",
+            "Error: Authorization: 'Basic ' + ***",
+            "Error: Authorization: Bearer *** next"]
 
     def test_environment_credential_values_masked(self):
         # The values of the credential-named variables of fullsend's
@@ -2980,7 +3000,10 @@ class TestConsoleFilter:
                   "password: " + "a " * 50_000, "\x1b]" * 50_000, "\\" * 100_000,
                   "password: " + "$'a' + " * 17_000, '{"token": `' + "a," * 50_000,
                   "password: " + "$'a'b " * 17_000, '{"password": [' + '"a", ' * 20_000,
-                  "Authorization: 'Basic ' + f(" + "(" * 100_000)
+                  "Authorization: 'Basic ' + f(" + "(" * 100_000,
+                  '{"password": [' + '"a]' * 35_000,
+                  "Authorization: 'Basic ' + f(" + "'" * 100_000,
+                  "TOKEN=$(" + "a " * 50_000, "TOKEN=" + "$(x) " * 20_000)
         lines = ["Error: " + body for body in bodies] + [
             '  ⚙ Bash: "' + "x" * 100_000, "  ⚙ Bash: " + "x" * 100_000,
             "  ⚙ Bash: " + "\\x" * 50_000, "  ⚙ Bash: " + "TOKEN=a " * 12_500 + "x",
@@ -3468,6 +3491,27 @@ class TestFullsendConsoleStreaming:
                      "  💬 *** and *** and short",
                      "Error: *** rejected for ***"):
             assert streamed.count(line) == 1, line
+
+    def test_line_longer_than_one_read_kept_whole_and_forwarded_once(
+            self, tmp_path, capsys):
+        # A line with no newline, far past one pipe read (_MAX_PIPE_READ_CHARS),
+        # arrives in pieces: the capture joins them back unchanged and the
+        # forwarding shows one clipped line, not one per piece.
+        text = "  💬 " + "x" * 300_000
+        # (built in the child: one argv entry is capped near 128 KB)
+        child = ("import sys; sys.stderr.write('  💬 ' + 'x' * 300_000); "
+                 "sys.stderr.flush()")
+        runner = _runner(tmp_path, log_prefix="eval", term_grace_s=1)
+        rc, _out, err, _duration = runner._run(
+            [sys.executable, "-c", child], tmp_path, dict(os.environ), timeout_s=30)
+        assert rc == 0
+        assert len(text) > 4 * fullsend_mod._MAX_PIPE_READ_CHARS
+        assert err == text
+        lead = "  eval | "
+        streamed = [line for line in capsys.readouterr().out.splitlines()
+                    if line.startswith(lead)]
+        assert streamed == [
+            lead + text[:fullsend_mod._MAX_STREAM_LINE_CHARS - 1] + "…"]
 
     def test_late_write_after_the_bounded_drain_not_forwarded(
             self, tmp_path, monkeypatch, capsys):
