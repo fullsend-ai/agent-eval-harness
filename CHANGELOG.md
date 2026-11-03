@@ -1,3 +1,10 @@
+## [1.61.5](https://github.com/fullsend-ai/agent-eval-harness/compare/v1.61.4...v1.61.5) (2026-11-03)
+
+
+### Bug Fixes
+
+* **collect:** a directory collection cannot list is evidence lost, not silence ([#291](https://github.com/fullsend-ai/agent-eval-harness/issues/291)) ([77a0ce8](https://github.com/fullsend-ai/agent-eval-harness/commit/77a0ce81f7da9b91a79d7598fa25e0f88578c8e4)), closes [#277](https://github.com/fullsend-ai/agent-eval-harness/issues/277) [#276](https://github.com/fullsend-ai/agent-eval-harness/issues/276) [#264](https://github.com/fullsend-ai/agent-eval-harness/issues/264)
+
 ## [1.61.4](https://github.com/fullsend-ai/agent-eval-harness/compare/v1.61.3...v1.61.4) (2026-11-02)
 
 
