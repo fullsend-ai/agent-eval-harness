@@ -3170,3 +3170,163 @@ def test_batch_tool_only_output_does_not_record_unrelated_losses(tmp_path,
                 if (out / "collection.json").exists() else {})
     assert not any(collect.UNLISTABLE_KEY in v
                    for v in manifest.values() if isinstance(v, dict)), manifest
+
+
+# ── #292: the TOCTOU between checking a path and reading it ─────────────
+
+_OUTSIDE = "NOT THE AGENT'S TO SHOW"
+
+
+def _swap_at_open(monkeypatch, root, targets):
+    """Swap each ``root/<name>`` for a symlink to ``targets[name]`` from inside
+    the first open whose path names it — the latest moment any implementation
+    could have checked it. A check-then-reopen-by-pathname (the `_confined`
+    + `shutil.copy2` shape) has already checked by then and follows the link;
+    an open made link-free relative to a held directory descriptor refuses
+    it. Both `os.open` and `builtins.open` are covered so either shape trips
+    the swap. Returns the set of names actually swapped."""
+    import builtins
+    swapped = set()
+    real_os_open, real_open = os.open, builtins.open
+
+    def trigger(path):
+        if isinstance(path, int):
+            return
+        path = os.fspath(path)
+        if isinstance(path, bytes):
+            return
+        segments = path.split(os.sep)
+        for name, target in targets.items():
+            if name in segments and name not in swapped:
+                swapped.add(name)
+                victim = root / name
+                victim.rename(victim.with_name(victim.name + ".orig"))
+                os.symlink(target, victim)
+
+    def os_open(path, *args, **kwargs):
+        trigger(path)
+        return real_os_open(path, *args, **kwargs)
+
+    def builtin_open(file, *args, **kwargs):
+        trigger(file)
+        return real_open(file, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", os_open)
+    monkeypatch.setattr(builtins, "open", builtin_open)
+    return swapped
+
+
+def _leaked(run):
+    return [p for p in run.rglob("*")
+            if p.is_file() and not p.is_symlink()
+            and _OUTSIDE in p.read_text(errors="replace")]
+
+
+@pytest.mark.parametrize("mode", ["case", "batch"])
+def test_a_path_swapped_for_a_symlink_at_use_is_not_followed(tmp_path,
+                                                             monkeypatch,
+                                                             mode):
+    """A live agent process can swap a checked file — or a directory above
+    one — for a symlink between validation and use. Collection opens every
+    component link-free relative to a held descriptor and reads the bytes
+    from the descriptor it checked, so the swapped paths are recorded as
+    lost and nothing outside the workspace is copied.
+
+    Parametrised over both modes because they share one routine: reverting
+    either loop to its own pathname walk and copy fails here."""
+    import collect
+    outside = tmp_path / "outside"
+    (outside / "dir").mkdir(parents=True)
+    (outside / "secret.md").write_text(_OUTSIDE)
+    (outside / "dir" / "f.md").write_text(_OUTSIDE)
+    ws = tmp_path / "ws"
+    root = ws / "cases" / "c0" if mode == "case" else ws
+    (root / "out" / "swapdir").mkdir(parents=True)
+    (root / "out" / "keep.md").write_text("fine")
+    (root / "out" / "swapme.md").write_text("inside")
+    (root / "out" / "swapdir" / "f.md").write_text("inside")
+    if mode == "batch":
+        (ws / "case_order.yaml").write_text(
+            json.dumps([{"case_id": "c0", "entry_count": 1}]))
+    cfg = tmp_path / "eval.yaml"
+    cfg.write_text(textwrap.dedent(f"""\
+        name: t
+        execution:
+          mode: {mode}
+          skill: s
+        outputs:
+          - path: out
+            batch_pattern: "*"
+        traces:
+          events: false
+    """))
+    run = tmp_path / "run"
+    monkeypatch.setattr(sys, "argv", [
+        "collect", "--config", str(cfg), "--workspace", str(ws),
+        "--output", str(run)])
+    swapped = _swap_at_open(monkeypatch, root / "out", {
+        "swapme.md": outside / "secret.md", "swapdir": outside / "dir"})
+    collect.main()
+    monkeypatch.undo()
+
+    assert swapped == {"swapme.md", "swapdir"}   # the race really happened
+    assert _leaked(run) == []
+    assert (run / "cases" / "c0" / "out" / "keep.md").read_text() == "fine"
+    lost = json.loads((run / "collection.json").read_text())["c0"][
+        collect.UNLISTABLE_KEY]
+    assert "out/swapme.md" in lost
+    assert any(p.startswith("out/swapdir") for p in lost)
+
+
+def test_a_modified_file_swapped_for_a_symlink_at_use_is_not_followed(
+        tmp_path, monkeypatch):
+    """The in-place edits under `_modified/` are copied from the same
+    agent-written case directory, through the same descriptor-based copy.
+    The git scan already skips a link; one swapped in after it is skipped
+    the same way rather than followed."""
+    import subprocess
+
+    import collect
+    outside = tmp_path / "outside.md"
+    outside.write_text(_OUTSIDE)
+    ws = tmp_path / "ws"
+    case = ws / "cases" / "c0"
+    case.mkdir(parents=True)
+    (case / "notes.md").write_text("before\n")
+    env = {**os.environ,
+           "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    for cmd in (["git", "init", "-q"], ["git", "add", "-A"],
+                ["git", "commit", "-q", "-m", "initial"]):
+        subprocess.run(cmd, cwd=case, env=env, check=True)
+    (case / "notes.md").write_text("after\n")
+    (case / "kept.md").write_text("kept\n")
+    cfg = tmp_path / "eval.yaml"
+    cfg.write_text(textwrap.dedent("""\
+        name: t
+        execution:
+          skill: s
+        outputs:
+          - path: out
+        traces:
+          events: false
+    """))
+    run = tmp_path / "run"
+    monkeypatch.setattr(sys, "argv", [
+        "collect", "--config", str(cfg), "--workspace", str(ws),
+        "--output", str(run)])
+    real_modified = collect._collect_modified_files
+
+    def scan_then_race(case_dir, config):
+        found = real_modified(case_dir, config)   # vetted by the scan...
+        _swap_at_open(monkeypatch, case, {"notes.md": outside})
+        return found                              # ...swapped before use
+
+    monkeypatch.setattr(collect, "_collect_modified_files", scan_then_race)
+    collect.main()
+    monkeypatch.undo()
+
+    assert _leaked(run) == []
+    assert not (run / "cases" / "c0" / "_modified" / "notes.md").exists()
+    assert ((run / "cases" / "c0" / "_modified" / "kept.md").read_text()
+            == "kept\n")
