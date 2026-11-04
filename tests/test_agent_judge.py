@@ -14,6 +14,7 @@ import json
 import os
 import sys
 import textwrap
+import yaml
 from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
@@ -3289,6 +3290,51 @@ class TestUnmeasuredField:
                       if any(e.get("judge") in (None, "arch_score")
                              for e in entries))
         assert agg["incomplete_cases"] == charged == 1
+
+    def test_only_evidence_bearing_reasons_become_entries(self, tmp_path):
+        """`_evidence_was_omitted` answers "did this case lose anything" for
+        the whole summary, so a case that lost a hardlinked file AND skipped
+        a dangling link is true overall. The entries must be narrower: a
+        dangling link carries nothing, and publishing it as an
+        `agent`-attributed loss says the skill withheld what it did not."""
+        import score
+        mixed = {"a": {"staging_skips": {"count": 2, "reasons": {
+            "hardlinked file": 1,
+            "dangling symlink or special file": 1}}}}
+        kinds = [e["kind"] for e in score._unmeasured_from_case(mixed)]
+        assert kinds == ["hardlinked_file"]
+
+    def test_the_scope_flag_does_not_reach_the_published_record(self,
+                                                                tmp_path):
+        """`unmeasured_scope` routes the scope decision; `per_case` is a
+        published schema and it is not part of it."""
+        bad = self._case(tmp_path, "c0")
+        (bad / "out" / "bad.txt").write_text("FAILING EVIDENCE")
+        with self._unreadable(bad / "out" / "bad.txt"):
+            res = self._run(tmp_path, [bad] + [self._case(tmp_path, f"c{i}")
+                                               for i in range(1, 3)])
+        for judge_record in res["per_case"]["c0"].values():
+            assert "unmeasured_scope" not in judge_record
+
+    def test_a_clean_rescore_clears_a_stale_unmeasured_section(self,
+                                                               tmp_path):
+        """`_merge_summary` replaces only the key it is handed. Writing
+        `unmeasured` only when something was lost would leave a previous
+        run's section standing beside this run's clean `per_case` and
+        `incomplete_cases` — a field contradicting the rest of the file."""
+        import score
+        runs_dir = tmp_path / "runs"
+        run_dir = runs_dir / "r1"
+        run_dir.mkdir(parents=True)
+        (run_dir / "summary.yaml").write_text(yaml.dump({
+            "run_id": "r1",
+            "unmeasured": {"c0": [{"phase": "score", "kind": "hardlinked_file",
+                                   "attribution": "agent", "detail": "stale"}]},
+        }))
+        # what cmd_judges now does on a clean pass
+        score._merge_summary("r1", "unmeasured", {}, runs_dir)
+        after = yaml.safe_load((run_dir / "summary.yaml").read_text())
+        assert after["unmeasured"] == {}, after
 
     def test_a_clean_run_has_no_unmeasured_section(self, tmp_path):
         res = self._run(tmp_path,
