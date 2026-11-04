@@ -3853,6 +3853,11 @@ def score_cases(judges, case_dirs, config, run_id=None, samples_override=None):
                 # already reads and the entries that will replace it cannot
                 # disagree.
                 entries = _unmeasured_from_case(case_results)
+                # Internal routing only — `case_results` is persisted as the
+                # per-judge record, and this is not part of that schema.
+                for _r in case_results.values():
+                    if isinstance(_r, dict):
+                        _r.pop("unmeasured_scope", None)
                 if entries:
                     unmeasured[case_id] = entries
                 for name, result in case_results.items():
@@ -4285,6 +4290,21 @@ def _unmeasured_kind(reason):
     return "evidence_lost"
 
 
+def _evidence_bearing(reasons):
+    """The reasons in a `staging_skips` summary that lost gradeable content.
+
+    `_evidence_was_omitted` answers "did this case lose anything?" for the
+    whole summary, so a case that lost a hardlinked file AND skipped a
+    dangling link is true overall. The entries have to be narrower than that:
+    a dangling link, a socket or a loop carries nothing the judge could have
+    read, and publishing it as an `agent`-attributed loss says the skill
+    withheld something it did not.
+    """
+    bearing = _CASE_OUTPUT_SKIP_REASONS + (_CONTENT_LOST,)
+    return {r: n for r, n in (reasons or {}).items()
+            if str(r).startswith(bearing)}
+
+
 def _unmeasured_from_case(case_results):
     """`unmeasured` entries for one case, from its per-judge results.
 
@@ -4320,10 +4340,12 @@ def _unmeasured_from_case(case_results):
 
     if unscoped:
         skips = next(iter(per_judge.values())) or {}
-        return [entry(r, n) for r, n in sorted((skips.get("reasons") or {}).items())]
+        return [entry(r, n) for r, n
+                in sorted(_evidence_bearing(skips.get("reasons")).items())]
     return [entry(r, n, judge=name)
             for name, skips in sorted(per_judge.items())
-            for r, n in sorted(((skips or {}).get("reasons") or {}).items())]
+            for r, n in sorted(
+                _evidence_bearing((skips or {}).get("reasons")).items())]
 
 
 def _applies_to(entry, judge_name):
@@ -6086,9 +6108,13 @@ def cmd_judges(args):
     _merge_summary(args.run_id, "per_case", judge_results.get("per_case", {}), runs_dir)
     # spec 016. A top-level sibling keyed by case id, written only when
     # something was lost so an untouched run's summary.yaml is unchanged.
+    # Written unconditionally. `_merge_summary` replaces only the key it is
+    # given, so skipping the write when nothing was lost would leave a
+    # previous run's section standing next to this run's clean `per_case` and
+    # `incomplete_cases` — a field contradicting the rest of the file.
     unmeasured = judge_results.get("unmeasured") or {}
+    _merge_summary(args.run_id, "unmeasured", unmeasured, runs_dir)
     if unmeasured:
-        _merge_summary(args.run_id, "unmeasured", unmeasured, runs_dir)
         n = len(unmeasured)
         print(f"  unmeasured: {n} case{'s' if n != 1 else ''} produced no "
               f"valid measurement (see summary.yaml)")
