@@ -242,6 +242,7 @@ tag = hashlib.sha1(os.getcwd().encode()).hexdigest()[:6]
 model = flag("--model", "?")
 bare = model.split(":")[0]
 ids = [f"gen-fake-{tag}-{i}" for i in range(1, 3)]
+message_ids = [f"msg-fake-{tag}-{i}" for i in range(1, 3)]
 hook_path = os.environ.get("AGENT_EVAL_HOOK_IDS")
 if hook_path and "HOOKCALL" in prompt:
     with open(hook_path, "a") as f:
@@ -253,10 +254,12 @@ with open(os.path.join(rec_dir, "records.jsonl"), "a") as f:
         "env": {k: v for k, v in os.environ.items() if k.startswith(
             ("ANTHROPIC", "CLAUDE_CODE", "AGENT_EVAL", "OPENROUTER", "CLOUD_ML", "GOOGLE_CLOUD", "AWS"))},
         "settings": settings, "settings_mode": mode, "ids": ids,
+        "message_ids": message_ids,
         "token_sha": hashlib.sha256(token.encode()).hexdigest()[:8] if token else None}) + "\n")
 events = [{"type": "system", "subtype": "init", "model": model, "claude_code_version": "9.9.9"}]
-for i, gid in enumerate(ids, 1):
-    events.append({"type": "assistant", "message": {"id": gid, "model": bare, "role": "assistant",
+for i, (gid, msg_id) in enumerate(zip(ids, message_ids), 1):
+    events.append({"type": "assistant", "requestId": gid,
+                   "message": {"id": msg_id, "model": bare, "role": "assistant",
                    "content": [{"type": "text", "text": f"step {i}"}],
                    "usage": {"input_tokens": 10, "output_tokens": 5}}})
 result = {"type": "result", "subtype": "success", "is_error": False, "num_turns": len(ids),

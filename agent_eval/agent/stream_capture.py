@@ -114,10 +114,10 @@ def extract_usage(stdout_lines):
                 if _is_real_model(model):
                     seen_msg_ids_by_model.setdefault(model, set()).add(msg_id)
             u = obj.get("message", {}).get("usage", {})
-            fb_input += u.get("input_tokens", 0)
-            fb_output += u.get("output_tokens", 0)
-            fb_cache_read += u.get("cache_read_input_tokens", 0)
-            fb_cache_create += u.get("cache_creation_input_tokens", 0)
+            fb_input += u.get("input_tokens") or 0
+            fb_output += u.get("output_tokens") or 0
+            fb_cache_read += u.get("cache_read_input_tokens") or 0
+            fb_cache_create += u.get("cache_creation_input_tokens") or 0
             if _is_real_model(model):
                 models_seen.add(model)
         elif obj.get("type") == "result":
@@ -132,10 +132,10 @@ def extract_usage(stdout_lines):
         total_input = total_output = total_cache_read = total_cache_create = 0
         per_model_usage = {}
         for model_name, stats in model_usage.items():
-            m_input = stats.get("inputTokens", 0)
-            m_output = stats.get("outputTokens", 0)
-            m_cache_read = stats.get("cacheReadInputTokens", 0)
-            m_cache_create = stats.get("cacheCreationInputTokens", 0)
+            m_input = stats.get("inputTokens") or 0
+            m_output = stats.get("outputTokens") or 0
+            m_cache_read = stats.get("cacheReadInputTokens") or 0
+            m_cache_create = stats.get("cacheCreationInputTokens") or 0
             total_input += m_input
             total_output += m_output
             total_cache_read += m_cache_read
@@ -234,6 +234,31 @@ def subagent_message_ids(subagent_dir):
     return ids
 
 
+def subagent_generation_ids(subagent_dir):
+    """Every top-level assistant ``requestId`` across captured subagent
+    transcripts (deduplicated). Only OpenRouter ``gen-…`` ids are returned."""
+    subagent_path = Path(subagent_dir)
+    ids = set()
+    if not subagent_path.is_dir():
+        return ids
+    for transcript in subagent_path.iterdir():
+        if not transcript.is_file() or transcript.suffix != ".jsonl":
+            continue
+        try:
+            with open(transcript) as f:
+                for line in f:
+                    try:
+                        obj = json.loads(line)
+                    except (json.JSONDecodeError, ValueError):
+                        continue
+                    request_id = obj.get("requestId") if isinstance(obj, dict) else None
+                    if (isinstance(request_id, str) and request_id.startswith("gen-")):
+                        ids.add(request_id)
+        except OSError:
+            continue
+    return ids
+
+
 def message_ids_for_run(stream_ids, subagent_dir):
     """The run's cost-truth key set: root-stream ids merged with the subagent
     transcripts' ids, in a stable order."""
@@ -241,9 +266,125 @@ def message_ids_for_run(stream_ids, subagent_dir):
     return sorted(ids)
 
 
+def generation_ids_for_run(stream_generation_ids, subagent_dir):
+    """The run's OpenRouter generation-id set: root-stream ids merged with
+    subagent transcript ids, in a stable order."""
+    ids = set(stream_generation_ids or ()) | subagent_generation_ids(subagent_dir)
+    return sorted(ids)
+
+
+def extract_session_id(stdout_lines):
+    """The Claude Code session id from the most recent result event."""
+    for line in reversed(list(stdout_lines or ())):
+        try:
+            obj = json.loads(line)
+        except (json.JSONDecodeError, ValueError, TypeError):
+            continue
+        if not isinstance(obj, dict) or obj.get("type") != "result":
+            continue
+        session_id = obj.get("session_id")
+        if isinstance(session_id, str) and session_id:
+            return session_id
+    return None
+
+
+def claude_session_dir_name(workspace):
+    """Claude Code's encoded project-directory name for a workspace."""
+    return re.sub(r"[^A-Za-z0-9-]", "-", str(Path(workspace).resolve()))
+
+
+def claude_session_generation_ids(workspace, session_id, projects_dir=None):
+    """OpenRouter generation ids from Claude Code's persisted session transcript.
+
+    Claude Code's stream-json output does not always include the top-level
+    ``requestId``, but its session transcript does. The transcript is removed
+    after a successful run, so callers must read it before cleanup.
+    """
+    if not isinstance(session_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", session_id):
+        return set()
+    try:
+        projects = (Path(projects_dir) if projects_dir is not None
+                    else Path.home() / ".claude" / "projects").resolve(strict=True)
+    except OSError:
+        return set()
+    encoded = claude_session_dir_name(workspace)
+    session_dir = projects / encoded
+    if session_dir.is_symlink() or not session_dir.is_dir():
+        return set()
+    try:
+        session_root = session_dir.resolve(strict=True)
+    except OSError:
+        return set()
+    if not session_root.is_relative_to(projects):
+        return set()
+    root_transcript = session_root / f"{session_id}.jsonl"
+    transcripts = [root_transcript]
+    nested_dir = session_root / session_id
+    if nested_dir.is_symlink() or not nested_dir.is_dir():
+        nested_dir = None
+    else:
+        transcripts.extend(nested_dir.rglob("*.jsonl"))
+    ids = set()
+    for transcript in transcripts:
+        if transcript.is_symlink():
+            continue
+        try:
+            transcript = transcript.resolve(strict=True)
+        except OSError:
+            continue
+        if not transcript.is_file() or not transcript.is_relative_to(session_root):
+            continue
+        try:
+            with open(transcript) as stream:
+                for line in stream:
+                    try:
+                        obj = json.loads(line)
+                    except (json.JSONDecodeError, ValueError):
+                        continue
+                    request_id = obj.get("requestId") if isinstance(obj, dict) else None
+                    if isinstance(request_id, str) and request_id.startswith("gen-"):
+                        ids.add(request_id)
+        except OSError:
+            continue
+    return ids
+
+
+def extract_generation_ids(stdout_lines):
+    """Top-level OpenRouter ``requestId`` values from stream-json output."""
+    ids = set()
+    for line in stdout_lines:
+        try:
+            obj = json.loads(line)
+        except (json.JSONDecodeError, ValueError, TypeError):
+            continue
+        request_id = obj.get("requestId") if isinstance(obj, dict) else None
+        if isinstance(request_id, str) and request_id.startswith("gen-"):
+            ids.add(request_id)
+    return ids
+
+
+def assistant_event_ids(obj):
+    """``(message id, generation id, model)`` from an assistant event.
+
+    Claude's ``message.id`` is retained for turn counting. On an OpenRouter
+    connection the generation id is the newer top-level ``requestId``.
+    """
+    if not isinstance(obj, dict) or obj.get("type") != "assistant":
+        return None, None, None
+    msg = obj.get("message")
+    if not isinstance(msg, dict):
+        return None, None, None
+    message_id = msg.get("id")
+    request_id = obj.get("requestId")
+    generation_id = (request_id
+                     if isinstance(request_id, str) and request_id.startswith("gen-")
+                     else None)
+    return message_id, generation_id, msg.get("model")
+
+
 def assistant_message_id(obj):
-    """``(message id, model)`` of an ``assistant`` stream event — what a
-    provider session sights as the stream is read; ``(None, None)`` otherwise."""
+    """``(message id, model)`` of an ``assistant`` stream event, used for
+    turn counting; ``(None, None)`` otherwise."""
     if not isinstance(obj, dict) or obj.get("type") != "assistant":
         return None, None
     msg = obj.get("message")

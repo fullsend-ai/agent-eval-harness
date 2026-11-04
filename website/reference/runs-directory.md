@@ -150,7 +150,8 @@ breakdown; judges read it when `traces.metrics` is on.
 | `num_cases` | Number of cases executed |
 | `per_case.<case>.hooks` | Per-phase `before_each` / `after_each` results: `description`, `exit_code`, `timed_out`, `skipped`, `duration_s`, `on_failure`, `log` (relative to the run dir). Present only when per-case hooks ran; judges read the same structure as `outputs["hooks"]`. An entry failed when `timed_out` is true, or `skipped` is false and `exit_code` is non-zero. Read from here rather than the per-case copy: an output declared with an empty path makes artifact collection copy the agent's own files into the case directory. |
 | `model` / `agent` / `agent_version` | Model, runner name, runner version |
-| `message_ids` | Every assistant message id of the run (root stream + subagent transcripts). On a direct OpenRouter connection these are `gen-…` generation ids: the cost-truth key set the backfill prices. |
+| `message_ids` | Every Claude assistant message id of the run (root stream + subagent transcripts), used for turn accounting. |
+| `generation_ids` | Every top-level assistant `requestId` beginning with `gen-…` (root stream + subagent transcripts). On an OpenRouter run these are the generation ids the backfill prices and the routing audit attributes. Older run results may still carry `gen-…` ids in `message_ids`; the offline backfill accepts that legacy shape. |
 | `cost_source`, `cost_usd_estimate`, `cost_confidence`, `cost_coverage`, `cost_warnings`, `hook_cost_usd`, `providers`, `routing`, `provider`, `budget` | Cost provenance — see below. Absent on runs that never touched a provider. |
 | `permission_denials` | Tool calls denied by permissions, as `[{tool_name, tool_use_id, tool_input}]` from the CLI result event (`[]` when none). Per case inside `per_case` entries (and per step under a multi-step case's `steps`); the top level carries the concatenation across cases (batch/single-run mode: that run's own list) |
 | `execution_mode` | `case` or `batch` |
@@ -161,7 +162,7 @@ breakdown; judges read it when `traces.metrics` is on.
 
 Every `run_result.json` write goes through one reconciling writer
 (`agent_eval.providers.reconcile.write_run_result`): it joins the run's
-`provider/ledger.jsonl` rows against the transcript's `message_ids` and writes the
+`provider/ledger.jsonl` rows against the transcript's `generation_ids` and writes the
 fields below. With no provider plan and no ledger file the payload is written
 unchanged, so a run without OpenRouter reads exactly as before.
 

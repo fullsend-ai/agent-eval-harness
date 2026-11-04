@@ -124,7 +124,9 @@ there is nothing to audit and the key warns.
    runs it without a run.
 2. **Snapshot**: the frozen catalog view the audit joins against, so a catalog change
    during the run cannot change a verdict.
-3. **Run**: ids are sighted from Claude Code's own stream-json as it is read.
+3. **Run**: top-level assistant `requestId` values beginning with `gen-…` are sighted from
+   Claude Code's own stream-json as it is read. Claude's nested `message.id` remains a
+   separate turn-counting key and is not sent to OpenRouter.
 4. **Backfill**: `GET /generation` per id (first poll 5 s after sighting, then every 2 s,
    giving up at 60 s with a run-end retry); `python3 -m
    agent_eval.providers.openrouter.backfill <run_dir>` repeats it offline.

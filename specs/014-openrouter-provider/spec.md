@@ -1005,8 +1005,9 @@ of `openrouter.ai` or a pure function over files in `<run_dir>/provider/`.
 ### `agent_eval/agent/base.py`
 
 `RunResult` (:15-30) gains, all defaulted to `None`: `cost_source`, `cost_usd_estimate`,
-`providers`, `message_ids: list[str]` (the **cost-truth key set** — probe #12 VERIFIED
-2026-09-16 that on a direct OpenRouter connection these are `gen-…` generation ids),
+`providers`, `message_ids: list[str]` (Claude assistant message ids, used for turn
+accounting) and `generation_ids: list[str]` (top-level OpenRouter `requestId` values,
+the **cost-truth key set**),
 `error_class` (from the runner's own error output, `errors.py`), `budget` (dict as in
 Reconcile). `execute()`'s signature
 (:56-67) is unchanged: the plan is a constructor argument, not a per-call one.
@@ -1015,10 +1016,10 @@ Reconcile). `execute()`'s signature
 
 `extract_usage` (:65-160) already collects `seen_msg_ids` (:105-112); expose them on
 `RunResult.message_ids` (root stream) merged with ids from `count_subagent_turns`
-(:165) transcripts. On a direct OpenRouter connection every assistant `message.id` is a
-`gen-…` generation id (probe #12: 2 per turn, including the `generate_session_title`
-background call, whose cost is real spend and is therefore included), so each id is handed
-to the `generation.py` worker **as the stream is read** (a per-message callback the
+(:165) transcripts. Current OpenRouter transcripts carry the generation id in the
+assistant event's top-level `requestId` (`gen-…`) and Claude's `message.id` separately;
+collect both, keep the latter for turn counting, and hand every `requestId` to
+the `generation.py` worker **as the stream is read** (a per-message callback the
 runner installs when a plan is active; `extract_usage` itself stays a pure post-hoc
 function for callers without a plan) — not only at run end — and each id yields one
 ledger record `source: generation`, `role: agent` (or `hook` for the ids the same collector drains from the

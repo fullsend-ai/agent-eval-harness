@@ -45,7 +45,7 @@ from agent_eval.config import resolve_env_value, workspace_source_roots
 from .base import EvalRunner, RunResult, terminate_process_group
 from .stream_capture import (
     count_subagent_turns, extract_usage, message_ids_for_run,
-    combine_per_model_turns,
+    combine_per_model_turns, extract_generation_ids, generation_ids_for_run,
 )
 
 _print_lock = threading.Lock()
@@ -464,6 +464,8 @@ class FullsendRunner(EvalRunner):
             per_model_turns = combine_per_model_turns(
                 invocation_subagents, stream_ids_by_model)
             message_ids = message_ids_for_run(stream_ids, invocation_subagents)
+            generation_ids = generation_ids_for_run(
+                extract_generation_ids(stdout.splitlines()), invocation_subagents)
 
         resolved_model = None
         raw_output = {"run_dir": str(run_dir) if run_dir else None}
@@ -507,6 +509,7 @@ class FullsendRunner(EvalRunner):
             permission_denials=denials,
             raw_output=raw_output,
             message_ids=message_ids,
+            generation_ids=generation_ids,
         )
 
 

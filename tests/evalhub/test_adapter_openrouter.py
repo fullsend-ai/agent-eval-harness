@@ -108,7 +108,9 @@ def test_adapter_runs_the_plan_in_the_pod(tmp_path, monkeypatch):
     assert prov["cost_usd"] == pytest.approx(4 * GEN_COST, abs=1e-6)     # 2 cases × 2 generations, priced
     assert prov["routing"]["violations"] == [] and prov["routing"]["audit_complete"] is True
     assert prov["provider"]["runner"] == "evalhub" and prov["provider"]["key_scope"] == "operator"
-    assert prov["cases_priced"] == 2 and prov["message_ids_count"] == 4 and "message_ids" not in prov
+    assert (prov["cases_priced"] == 2 and prov["message_ids_count"] == 4
+            and prov["generation_ids_count"] == 4
+            and "message_ids" not in prov and "generation_ids" not in prov)
     metrics = {r.metric_name: r.metric_value for r in results.results}
     assert metrics["cost_usd"] == pytest.approx(4 * GEN_COST, abs=1e-6)   # the reconciled value, not 2 × $0.5
     assert metrics["exit_code"] == 0 and results.model_name == "openrouter:/z-ai/glm-5.2:exacto"

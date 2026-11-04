@@ -41,7 +41,7 @@ def make_tool(name, tool_use_id, input_dict=None):
 
 def make_assistant(msg_id, tools=None, text=None, model="claude-sonnet-4-5",
                    parent_tool_use_id=None, input_tokens=100, output_tokens=50,
-                   thinking=None):
+                   thinking=None, request_id=None):
     """Build an assistant event.
 
     Args:
@@ -75,6 +75,8 @@ def make_assistant(msg_id, tools=None, text=None, model="claude-sonnet-4-5",
     }
     if parent_tool_use_id:
         event["parent_tool_use_id"] = parent_tool_use_id
+    if request_id is not None:
+        event["requestId"] = request_id
     return event
 
 

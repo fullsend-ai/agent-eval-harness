@@ -1111,6 +1111,7 @@ def _aggregate_step_metrics(step_metrics):
         "per_model_turns": agg_pmt or None,
         "permission_denials": agg_denials,
         "message_ids": sorted({i for r in results for i in (r.get("message_ids") or [])}),
+        "generation_ids": sorted({i for r in results for i in (r.get("generation_ids") or [])}),
     }
 
 
@@ -1258,6 +1259,7 @@ def _run_single_case_in_repo(runner, skill_name, case_ws, output_dir,
         "permission_denials": result.permission_denials or [],
         "repo_modified": repo_dirty,
         "message_ids": result.message_ids or [],
+        "generation_ids": result.generation_ids or [],
         "cost_source": result.cost_source,
         "error_class": result.error_class,
         "budget": result.budget,
@@ -1443,6 +1445,7 @@ def _run_single_case(runner, skill_name, case_id, case_ws, output_dir,
             "per_model_turns": None,
             "error": error_msg,
             "message_ids": [],
+            "generation_ids": [],
         }
         _apply_hook_results(failed_result, hook_results, output_dir)
         # run_result write-site 2: case mode, runner exception (crash path)
@@ -1494,6 +1497,7 @@ def _run_single_case(runner, skill_name, case_id, case_ws, output_dir,
         # solely in raw stdout.log, invisible to every downstream reader.
         "permission_denials": result.permission_denials or [],
         "message_ids": result.message_ids or [],
+        "generation_ids": result.generation_ids or [],
         "cost_source": result.cost_source,
         "error_class": result.error_class,
         "budget": result.budget,
@@ -1712,6 +1716,7 @@ def _run_multi_step_case(runner, case_id, case_ws, output_dir, model,
                 "per_model_turns": step_result.per_model_turns,
                 "permission_denials": step_result.permission_denials or [],
                 "message_ids": step_result.message_ids or [],
+                "generation_ids": step_result.generation_ids or [],
                 "cost_source": step_result.cost_source,
                 "error_class": step_result.error_class,
                 "budget": step_result.budget,
@@ -1753,6 +1758,8 @@ def _run_multi_step_case(runner, case_id, case_ws, output_dir, model,
             "steps": step_metrics or None,
             "message_ids": sorted({i for m in (step_metrics or {}).values()
                                    for i in (m.get("message_ids") or [])}),
+            "generation_ids": sorted({i for m in (step_metrics or {}).values()
+                                      for i in (m.get("generation_ids") or [])}),
         }
         _apply_hook_results(failed, hook_results, output_dir)
         # run_result write-site 4: multi-step, failed result with partial steps
@@ -2046,6 +2053,7 @@ def _execute_per_case(args, config, runner, runner_cls,
                         case_output = output_dir / "cases" / case_id
                         case_output.mkdir(parents=True, exist_ok=True)
                         result["message_ids"] = []
+                        result["generation_ids"] = []
                         # run_result write-site 6: parallel case exception result
                         result = write_run_result(case_output / "run_result.json", result)
                 else:
@@ -2148,6 +2156,8 @@ def _execute_per_case(args, config, runner, runner_cls,
         "per_case": case_results,
         "message_ids": sorted({i for r in case_results.values()
                                for i in (r.get("message_ids") or [])}),
+        "generation_ids": sorted({i for r in case_results.values()
+                                  for i in (r.get("generation_ids") or [])}),
     }
     if cases_priced is not None:
         run_meta["cases_priced"] = cases_priced
@@ -2279,6 +2289,7 @@ def _save_result(result, args, output_dir, runner, model, eval_params=None):
         "execution_mode": "batch",
         "eval_params": _with_runner_provenance(eval_params, runner, [result.stderr]),
         "message_ids": result.message_ids or [],
+        "generation_ids": result.generation_ids or [],
         "cost_source": result.cost_source,
         "error_class": result.error_class,
         "budget": result.budget,

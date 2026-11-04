@@ -88,7 +88,9 @@ def test_plan_run_uses_the_overlay_and_a_clean_process_env(workspace):
     # ids were sighted as the stream was read (before the process exited), then the rest
     assert [s[0] for s in binding.sighted] == rec["ids"]
     assert binding.sighted[0][1:] == (1, "z-ai/glm-5.2", "agent")
-    assert binding.after == [sorted(rec["ids"])] and result.message_ids == sorted(rec["ids"])
+    assert binding.after == [sorted(rec["ids"])]
+    assert result.message_ids == sorted(rec["message_ids"])
+    assert result.generation_ids == sorted(rec["ids"])
     assert json.loads(binding.hook_ids_path.read_text())["id"].endswith("-hook")
     assert result.cost_source == "runner:estimate" and result.cost_usd_estimate == 0.5
     assert result.error_class is None and result.budget is None
@@ -103,7 +105,8 @@ def test_no_plan_is_unchanged(workspace, monkeypatch):
     assert "--settings" in argv and argv[argv.index("--settings") + 1].endswith("settings.json")
     assert "CLAUDE_CODE_USE_VERTEX" in rec["env_keys"] and rec["env"]["ANTHROPIC_API_KEY"] == "sk-ant-host-secret"
     assert result.cost_source == "runner:reported" and result.cost_usd_estimate is None
-    assert result.message_ids == sorted(rec["ids"])
+    assert result.message_ids == sorted(rec["message_ids"])
+    assert result.generation_ids == sorted(rec["ids"])
 
 
 def test_budget_flag_mapping_and_cost_source_labels():
@@ -257,7 +260,7 @@ def test_a_failure_mid_stream_keeps_the_sighted_ids(workspace, tmp_path, monkeyp
     result, _ = _run(workspace, make_plan(), binding)
     assert result.exit_code == -1 and "boom" in result.stderr
     ids = sorted(fake_claude_records(workspace)[-1]["ids"])
-    assert result.message_ids == ids                              # the id whose sight raised included
+    assert result.generation_ids == ids                           # the id whose sight raised included
     assert binding.after == [ids]                                 # after_run still ran, with all of them
     assert procs and procs[-1].returncode is not None             # the CLI was reaped, not left running
     assert result.cost_source == "runner:estimate" and result.cost_usd_estimate is None
