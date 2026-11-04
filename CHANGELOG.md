@@ -1,3 +1,10 @@
+# [1.62.0](https://github.com/fullsend-ai/agent-eval-harness/compare/v1.61.5...v1.62.0) (2026-11-04)
+
+
+### Features
+
+* **runner:** stream fullsend's console live under the progress prefix ([#286](https://github.com/fullsend-ai/agent-eval-harness/issues/286)) ([d87a7ab](https://github.com/fullsend-ai/agent-eval-harness/commit/d87a7abf80263d381a33e5194d186d3d158991d4))
+
 ## [1.61.5](https://github.com/fullsend-ai/agent-eval-harness/compare/v1.61.4...v1.61.5) (2026-11-03)
 
 
