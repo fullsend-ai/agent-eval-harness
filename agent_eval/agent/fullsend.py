@@ -172,29 +172,6 @@ _ASSIGNMENT_KEY_RE = re.compile(r"\b(?P<key>\w+)\s*=\s*")
 _FLAG_KEY_RE = re.compile(r"(?<!\S)-{1,2}(?P<key>[A-Za-z][\w-]*)\s+")
 _FIELD_KEY_RE = re.compile(
     r"""(?<![\w-])(?:[bBrRuUfF]{1,2}(?=["']))?(?P<q>["']?)(?P<key>[\w-]+)(?P=q)\s*:\s*""")
-# The value of an assignment or a flag is one shell word: unquoted runs,
-# backslash escapes (a blank included) and quoted parts in any order, up to
-# an unescaped blank outside quotes — TOKEN=ab"c d" and TOKEN=abc\ def are
-# one value each — and a quote never closed (the 120-rune cut fullsend
-# applies to a displayed command, or the forwarded line's own cut, landed
-# inside it) runs to the end of the line, a trailing lone backslash included,
-# so no fragment of the value gets through. An assignment that opens inside
-# a quoted word ("api_key=ab cd") runs to that word's closing quote first.
-# A ``$(…)`` substitution (one level of nesting), a ``${…}`` expansion and a
-# backtick substitution are one part of the word, blanks inside included
-# (TOKEN=$(printf '%s' x) is one value); each runs to the end of the line
-# when it is not closed. The bare run stops at the start of one. Inside a
-# substitution a quoted string or a backtick one is skipped whole, so a quoted
-# ``)`` or ``}`` (TOKEN=$(printf ')' 'a b')) does not close it.
-_SUBST_RUN = (
-    r"""(?:[^()"'\\\x60]|\\.?|"(?:[^"\\]|\\.?)*(?:"|$)|'(?:[^'\\]|\\.?)*(?:'|$)"""
-    r"""|\x60(?:[^\x60\\]|\\.?)*(?:\x60|$))""")
-_SHELL_WORD_RE = re.compile(
-    r"""(?:\$\((?:""" + _SUBST_RUN + r"""|\(""" + _SUBST_RUN + r"""*(?:\)|$))*(?:\)|$)"""
-    r"""|\$\{(?:[^}"'\\]|\\.?|"(?:[^"\\]|\\.?)*(?:"|$)|'(?:[^'\\]|\\.?)*(?:'|$))*(?:\}|$)"""
-    r"""|\x60(?:[^\x60\\]|\\.?)*(?:\x60|$)"""
-    r"""|(?:[^\s"'\\$\x60]|\$(?![({]))+|\\.?"""
-    r"""|"(?:[^"\\]|\\.?)*(?:"|$)|'(?:[^'\\]|\\.?)*(?:'|$))+""")
 _QUOTED_TAIL_RE = {
     '"': re.compile(r'(?:[^"\\]|\\.?)*(?:"|$)'),
     "'": re.compile(r"(?:[^'\\]|\\.?)*(?:'|$)"),
@@ -203,6 +180,9 @@ _QUOTED_TAIL_RE = {
 # one passed, or the end of the line. Kept apart from _QUOTED_TAIL_RE, whose
 # keys are the quotes an assignment can open inside.
 _BACKTICK_TAIL_RE = re.compile(r"(?:[^\x60\\]|\\.?)*(?:\x60|$)")
+# The body of a quoted segment that is no part of a credential: blanks and
+# delimiters alone (the ``", "`` of a stray quote before a JSON key).
+_DELIMITER_BODY_RE = re.compile(r"[\s,;:]*$")
 # A field's value: a string literal (_QUOTED_LITERAL; one continued by
 # another literal, adjacent or after a ``+``, taken whole), or a bare scalar up to a JSON/YAML delimiter (``,`` ``;`` ``}`` ``]``) or the
 # end of the line, blanks included — a multi-word password in prose
@@ -828,6 +808,8 @@ class _ConsoleCapture:
         self._threads: list = []
         # Written under _print_lock by detach(), read under it before a print.
         self._detached = False
+        if log_prefix:  # printed on every forwarded line: no workflow command
+            log_prefix = _neutralise_commands(log_prefix)
         for name, stream in (("stdout", proc.stdout), ("stderr", proc.stderr)):
             if stream is None:
                 continue
@@ -950,6 +932,18 @@ class _ConsoleFilter:
         return bool(_ALERT_LINE_RE.match(text))
 
 
+_WORKFLOW_COMMAND_RE = re.compile(r":(?=:)")
+_ENCODED_NEWLINE_RE = re.compile(r"%0[ad]", re.IGNORECASE)
+
+
+def _neutralise_commands(text: str) -> str:
+    """``text`` that cannot carry a GitHub Actions workflow command, as
+    fullsend's own console does (``sanitizeStreamText``): ``::`` is written
+    ``: :`` and an encoded line break (``%0A``, ``%0D``, any case) is a
+    blank."""
+    return _ENCODED_NEWLINE_RE.sub(" ", _WORKFLOW_COMMAND_RE.sub(": ", text))
+
+
 def _present(text: str, secrets=()) -> str:
     """A console line as forwarded. A ``⚙`` line is rendered without its raw
     argument first (:func:`_render_tool_call`); ``secrets`` (the values of the
@@ -968,7 +962,7 @@ def _present(text: str, secrets=()) -> str:
     cut = len(text) > _MAX_STREAM_LINE_CHARS
     if cut:
         text = text[:_MAX_STREAM_LINE_CHARS - 1]
-    text = _redact(text, cut=cut)
+    text = _neutralise_commands(_redact(text, cut=cut))
     if cut or len(text) > _MAX_STREAM_LINE_CHARS:
         text = text[:_MAX_STREAM_LINE_CHARS - 1] + "…"
     return text
@@ -1051,7 +1045,7 @@ def _redact(text: str, cut: bool = False) -> str:
     and ``Authorization`` values, then the keyed forms — ``KEY=value``,
     ``--flag value``, ``key: value`` — whose key names a credential. Each
     keyed form is found with one forward scan; its value is consumed whole
-    (:data:`_SHELL_WORD_RE`, :data:`_FIELD_VALUE_RE`), the key kept and the
+    (:func:`_shell_word_span`, :data:`_FIELD_VALUE_RE`), the key kept and the
     value shown as ``***``."""
     userinfo_re = _URL_USERINFO_CUT_RE if cut else _URL_USERINFO_RE
     text = userinfo_re.sub(r"\1***\2", text)
@@ -1161,11 +1155,14 @@ def _authorization_credentials(text: str, i: int, quoted_name: bool, quote):
         while end < n and text[end] in "\"'":
             # A quoted segment glued to the word is part of the same shell
             # word (first"second third"), a bare run glued after it too. A
-            # quote closing right before a word character is a stray quote
-            # ending the value (abc", "password": "x"), left as terminator.
+            # stray quote ending the value before a structured field
+            # (abc", "password": "x") is told by its segment: a closed one
+            # that holds nothing but blanks and delimiters, right before a
+            # word character, is left as terminator.
             close = _QUOTED_TAIL_RE[text[end]].match(text, end + 1).end()
             closed = close - 1 > end and text[close - 1] == text[end]
-            if closed and close < n and (text[close].isalnum() or text[close] == "_"):
+            if (closed and close < n and (text[close].isalnum() or text[close] == "_")
+                    and _DELIMITER_BODY_RE.match(text, end + 1, close - 1)):
                 break
             end, bare_tail = close, False
             more = _AUTH_WORD_RE.match(text, end)
@@ -1363,15 +1360,72 @@ def _assignment_value_end(text: str, m) -> Optional[int]:
         # ``"api_key=ab cd"``: the quoted word the assignment opened inside
         # ends the value, with any concatenated part after it.
         start = _QUOTED_TAIL_RE[opener].match(text, start).end()
-        word = _SHELL_WORD_RE.match(text, start)
-        return word.end() if word else start
-    word = _SHELL_WORD_RE.match(text, start)
-    return word.end() if word else None
+        return _shell_word_span(text, start)
+    end = _shell_word_span(text, start)
+    return end if end > start else None
 
 
 def _shell_word_end(text: str, m) -> Optional[int]:
-    word = _SHELL_WORD_RE.match(text, m.end())
-    return word.end() if word else None
+    end = _shell_word_span(text, m.end())
+    return end if end > m.end() else None
+
+
+def _shell_word_span(text: str, i: int) -> int:
+    """Where the shell word starting at ``i`` ends (``i`` when none starts
+    there).
+
+    The value of an assignment or a flag is one shell word: unquoted runs,
+    backslash escapes (a blank included) and quoted parts in any order, up to
+    an unescaped blank outside quotes and groups — TOKEN=ab"c d" and
+    TOKEN=abc\\ def are one value each. A quote or a group never closed (the
+    120-rune cut fullsend applies to a displayed command, or the forwarded
+    line's own cut, landed inside it) runs to the end of the line, a trailing
+    lone backslash included, so no fragment of the value gets through. An
+    assignment that opens inside a quoted word ("api_key=ab cd") runs to that
+    word's closing quote first (:func:`_assignment_value_end`).
+
+    A ``$(…)`` substitution, a ``${…}`` expansion and a backtick substitution
+    are one part of the word, blanks inside included, whether bare or inside
+    a double-quoted segment (TOKEN=$(printf '%s' x) and
+    TOKEN="$(printf "%s" "a b")" are one value each). A substitution is
+    skipped with :func:`_group_end`, any depth deep, its quoted strings
+    opaque, so a quoted ``)`` or ``}`` (TOKEN=$(printf ')' 'a b')) does not
+    close it. A single-quoted segment is skipped whole, to its closing quote
+    (a backslash-escaped one passed, as the other quote scanners do).
+
+    One forward scan, every part consumed once: linear."""
+    n = len(text)
+    j = i
+    while j < n:
+        c = text[j]
+        if c == "'":
+            j = _QUOTED_TAIL_RE["'"].match(text, j + 1).end()
+        elif c == '"':
+            j += 1
+            while j < n:
+                d = text[j]
+                if d == "\\":
+                    j += 2
+                elif d == '"':
+                    j += 1
+                    break
+                elif d == "$" and text.startswith(("(", "{"), j + 1):
+                    j = _group_end(text, j + 1) + 1
+                elif d == "\x60":
+                    j = _BACKTICK_TAIL_RE.match(text, j + 1).end()
+                else:
+                    j += 1
+        elif c == "\\":
+            j += 2
+        elif c == "$" and text.startswith(("(", "{"), j + 1):
+            j = _group_end(text, j + 1) + 1
+        elif c == "\x60":
+            j = _BACKTICK_TAIL_RE.match(text, j + 1).end()
+        elif c.isspace():
+            break
+        else:
+            j += 1  # a bare run: up to the next blank, quote, backslash or $
+    return min(j, n)
 
 
 def _field_value_end(text: str, m) -> Optional[int]:

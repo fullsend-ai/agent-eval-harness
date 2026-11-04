@@ -426,7 +426,9 @@ thinking (`🧠`, which the `claude-code` runner does not stream either) and mul
 text, and the pre/post-script output are not forwarded. A two-case run forwards about
 360 lines (30 KB), so a long batch stays well inside a CI job log's output limit. There
 is no knob: streaming follows the harness's progress logging, as it does for the
-`claude-code` runner.
+`claude-code` runner. A forwarded line cannot carry a GitHub Actions workflow command:
+`::` is written `: :` and an encoded line break (`%0A`, `%0D`) becomes a blank, in the
+text and in the prefix.
 
 Every forwarded line is redacted before it is printed, in this order. Terminal control
 sequences (colours and cursor movement, OSC titles and hyperlinks, DCS/SOS/PM/APC

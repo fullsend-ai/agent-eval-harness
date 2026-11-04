@@ -2592,7 +2592,11 @@ class TestConsoleFilter:
                 "Error: TOKEN=$(printf '%s' 'a)b c') next\n"
                 "Error: TOKEN=$(printf ')' '<a> <b>') next\n"
                 "Error: TOKEN=${X:-'a}b c'} next\n"
-                "Error: ran --password $(printf ')' '<a> <b>') next\n")
+                "Error: ran --password $(printf ')' '<a> <b>') next\n"
+                "Error: TOKEN=$(echo $(echo $(printf <s>))) next\n"
+                "Error: TOKEN=${OUTER:-${INNER:-<a>} <b>} next\n"
+                'Error: TOKEN="$(printf "%s" "<a> <b>")" next\n'
+                'Error: ran --password "$(printf "%s" "<a> <b>")" next\n')
         assert self._select(text) == [
             "  💬 Ran JIRA_TOKEN=*** python3 scripts/submit.py "
             "--api-key=*** --password=*** api_secret=*** "
@@ -2608,6 +2612,10 @@ class TestConsoleFilter:
             "Error: TOKEN=*** next",
             "Error: TOKEN=*** next",
             "Error: TOKEN=*** next",
+            "Error: TOKEN=*** next",
+            "Error: TOKEN=*** next",
+            "Error: TOKEN=*** next",
+            "Error: ran --password *** next",
             "Error: TOKEN=*** next",
             "Error: TOKEN=*** next",
             "Error: TOKEN=*** next",
@@ -2851,6 +2859,8 @@ class TestConsoleFilter:
                 'Error: Authorization: Bearer $(cat "a)b" c) next\n'
                 'Error: Authorization: Basic first"second third"\n'
                 'Error: Authorization: Basic first"second third" next\n'
+                'Error: Authorization: Basic first"second third"suffix\n'
+                'Error: Authorization: Basic first"second third"suffix next\n'
                 "Error: Authorization: Bearer <a>'<b> <c>'<d> next\n"
                 'Error: Authorization: Bearer abc", "password": "x"\n'
                 "Error: Authorization: Basic `a \\` b` next\n"
@@ -2921,10 +2931,24 @@ class TestConsoleFilter:
             "Error: Authorization: Bearer *** next",
             "Error: Authorization: Basic ***",
             "Error: Authorization: Basic *** next",
+            "Error: Authorization: Basic ***",
+            "Error: Authorization: Basic *** next",
             "Error: Authorization: Bearer *** next",
             'Error: Authorization: Bearer ***", "password": ***',
             "Error: Authorization: Basic *** next",
             "Error: Authorization: 'Bearer ' + *** next"]
+
+    def test_workflow_commands_neutralised(self):
+        # A forwarded line cannot carry a GitHub Actions workflow command:
+        # "::" is written ": :" and an encoded line break (any case) is a
+        # blank, as fullsend's own console does.
+        text = ("  💬 Sent ::add-mask::x and %0Aline\n"
+                "Error: ::error::injected\n"
+                "Error: a %0d%0D b ::: c\n")
+        assert self._select(text) == [
+            "  💬 Sent : :add-mask: :x and  line",
+            "Error: : :error: :injected",
+            "Error: a    b : : : c"]
 
     def test_environment_credential_values_masked(self):
         # The values of the credential-named variables of fullsend's
@@ -3024,7 +3048,8 @@ class TestConsoleFilter:
                   '{"password": [' + '"a]' * 35_000,
                   "Authorization: 'Basic ' + f(" + "'" * 100_000,
                   "TOKEN=$(" + "a " * 50_000, "TOKEN=" + "$(x) " * 20_000,
-                  "TOKEN=$(" + "'a)' " * 20_000, "TOKEN=${" + "'}' " * 25_000)
+                  "TOKEN=$(" + "'a)' " * 20_000, "TOKEN=${" + "'}' " * 25_000,
+                  "TOKEN=" + "$(" * 50_000, 'TOKEN="' + '$(a "' * 20_000)
         lines = ["Error: " + body for body in bodies] + [
             '  ⚙ Bash: "' + "x" * 100_000, "  ⚙ Bash: " + "x" * 100_000,
             "  ⚙ Bash: " + "\\x" * 50_000, "  ⚙ Bash: " + "TOKEN=a " * 12_500 + "x",
@@ -3479,6 +3504,21 @@ class TestFullsendConsoleStreaming:
                      "  ✗ Sandboxteardown failed", "Error: naïve 日本語 kept"):
             assert streamed.count(line) == 1, line
         assert out in result.stderr and err in result.stderr
+
+    def test_workflow_commands_neutralised_in_the_prefix(
+            self, tmp_path, fake_fullsend, monkeypatch, capsys):
+        # The prefix is printed on every forwarded line, so it is rewritten
+        # the same way: "case-::x" prints as "case-: :x".
+        self._console_files(tmp_path, monkeypatch,
+                            out="  ✓ Sandbox created (1.0s)\n", err="")
+        ws = _workspace(tmp_path)
+        result = _runner(tmp_path, log_prefix="case-::x").execute(
+            target="s", args="", workspace=ws, model="m", timeout_s=60)
+        assert result.exit_code == 0
+        printed = capsys.readouterr().out
+        assert "  case-: :x |   ✓ Sandbox created (1.0s)" in printed.splitlines()
+        assert not any(line.startswith("  case-: :x | ") and "::" in line
+                       for line in printed.splitlines())
 
     def test_environment_credential_values_masked_on_both_pipes(
             self, tmp_path, fake_fullsend, monkeypatch, capsys):
