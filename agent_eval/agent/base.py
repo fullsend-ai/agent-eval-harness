@@ -150,14 +150,21 @@ class EvalRunner(ABC):
 
 
 def terminate_process_group(proc: subprocess.Popen, grace_s: float = 0.0,
-                            final_wait_s: float = 5.0) -> tuple[str, str]:
+                            final_wait_s: float = 5.0, *,
+                            capture_output: bool = True) -> tuple[str, str]:
     """Stop ``proc`` and its process group, then reap it; returns the captured
     ``(stdout, stderr)``.
 
     With ``grace_s`` > 0 the group first gets SIGTERM and that long to exit; the
     SIGKILL that finishes the group (a descendant may ignore SIGTERM and keep
     the pipes open) is sent while the leader is still unreaped, so the pgid
-    cannot have been recycled. ``grace_s`` 0 sends SIGKILL at once."""
+    cannot have been recycled. ``grace_s`` 0 sends SIGKILL at once.
+
+    ``capture_output`` reaps through ``communicate`` and returns what the pipes
+    still held. A caller whose own threads read the pipes passes ``False``:
+    the pipes are left to those readers, only the exit is waited for, and the
+    returned strings are empty (or the hung note on a leader that outlives
+    ``final_wait_s``)."""
     def _signal(sig):
         if sys.platform != "win32":
             try:
@@ -182,7 +189,10 @@ def terminate_process_group(proc: subprocess.Popen, grace_s: float = 0.0,
     # Still unreaped here (communicate/wait below does the reaping).
     _signal(kill)
     try:
-        return proc.communicate(timeout=final_wait_s)
+        if capture_output:
+            return proc.communicate(timeout=final_wait_s)
+        proc.wait(timeout=final_wait_s)
+        return "", ""
     except subprocess.TimeoutExpired:
         return "", "Process group termination hung"
 
