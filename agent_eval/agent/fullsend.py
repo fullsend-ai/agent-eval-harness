@@ -168,7 +168,7 @@ _MIN_MASKED_VALUE_CHARS = 8
 # "key": value one (JSON; a prefixed key, b'key' or f'key', too). Whether the key names a
 # credential is decided on the capture (_SECRET_KEY_RE), never inside the
 # scan.
-_ASSIGNMENT_KEY_RE = re.compile(r"\b(?P<key>\w+)\s*=\s*")
+_ASSIGNMENT_KEY_RE = re.compile(r"(?<![\w-])-{0,2}(?P<key>[\w-]+)\s*=\s*")
 _FLAG_KEY_RE = re.compile(r"(?<!\S)-{1,2}(?P<key>[A-Za-z][\w-]*)\s+")
 _FIELD_KEY_RE = re.compile(
     r"""(?<![\w-])(?:[bBrRuUfF]{1,2}(?=["']))?(?P<q>["']?)(?P<key>[\w-]+)(?P=q)\s*:\s*""")
@@ -183,6 +183,12 @@ _BACKTICK_TAIL_RE = re.compile(r"(?:[^\x60\\]|\\.?)*(?:\x60|$)")
 # The body of a quoted segment that is no part of a credential: blanks and
 # delimiters alone (the ``", "`` of a stray quote before a JSON key).
 _DELIMITER_BODY_RE = re.compile(r"[\s,;:]*$")
+# The body of a quoted segment that is a bare key (the ``"password"`` of a
+# JSON field glued after a credential word).
+_KEY_BODY_RE = re.compile(r"[\w-]+$")
+# What ends a bare run of an Authorization credential: a delimiter, a bracket
+# or a backslash (an escaped line break), none of which a token holds.
+_AUTH_BARE_STOPS = frozenset(",;()[]{}\\")
 # A field's value: a string literal (_QUOTED_LITERAL; one continued by
 # another literal, adjacent or after a ``+``, taken whole), or a bare scalar up to a JSON/YAML delimiter (``,`` ``;`` ``}`` ``]``) or the
 # end of the line, blanks included — a multi-word password in prose
@@ -1090,7 +1096,8 @@ def _authorization_credentials(text: str, i: int, quoted_name: bool, quote):
         # A quoted value, or the value of a header that opened a quoted
         # word: through the closing quote, past a scheme the rule knows; a
         # string holding the scheme alone is concatenated with its credential.
-        end = _QUOTED_BODY_RE[quote].match(text, i).end(1)
+        end = (_double_quote_close(text, i) if quote == '"'
+               else _QUOTED_BODY_RE[quote].match(text, i).end(1))
         body = text[i:end].strip()
         if not body or " " not in body and "\t" not in body:
             # The scheme alone, or nothing: the credential is concatenated
@@ -1133,7 +1140,8 @@ def _authorization_credentials(text: str, i: int, quoted_name: bool, quote):
         dollar = text[start] == "$" and start + 1 < n and text[start + 1] in "\"'"
         if dollar or text[start] in "\"'":  # a quoted credential, hidden with its quotes
             q = start + 1 if dollar else start
-            end = _QUOTED_TAIL_RE[text[q]].match(text, q + 1).end()
+            end = (_double_quoted_end(text, q + 1) if text[q] == '"'
+                   else _QUOTED_TAIL_RE[text[q]].match(text, q + 1).end())
             while (more := _FIELD_CONTINUATION_RE.match(text, end)) is not None:
                 end = more.end()  # and the literals concatenated after it
             return start, end
@@ -1147,27 +1155,14 @@ def _authorization_credentials(text: str, i: int, quoted_name: bool, quote):
             return start, end
         if text[start] in _AUTH_OPENERS:
             return _bracketed(text, start)
-        word = _AUTH_WORD_RE.match(text, start)
-        if word is None:
+        if _AUTH_WORD_RE.match(text, start) is None:
             return None
-        end = word.end()
-        bare_tail = True
-        while end < n and text[end] in "\"'":
-            # A quoted segment glued to the word is part of the same shell
-            # word (first"second third"), a bare run glued after it too. A
-            # stray quote ending the value before a structured field
-            # (abc", "password": "x") is told by its segment: a closed one
-            # that holds nothing but blanks and delimiters, right before a
-            # word character, is left as terminator.
-            close = _QUOTED_TAIL_RE[text[end]].match(text, end + 1).end()
-            closed = close - 1 > end and text[close - 1] == text[end]
-            if (closed and close < n and (text[close].isalnum() or text[close] == "_")
-                    and _DELIMITER_BODY_RE.match(text, end + 1, close - 1)):
-                break
-            end, bare_tail = close, False
-            more = _AUTH_WORD_RE.match(text, end)
-            if more is not None:
-                end, bare_tail = more.end(), True
+        # One shell word: a quoted segment, a substitution or a bare run glued
+        # to the word is part of it (first"second third", prefix$(cmd)). A
+        # stray quote ending the value before a structured field
+        # (abc", "password": "x") is left as terminator (_stray_quote).
+        end = _shell_word_span(text, start, auth=True)
+        bare_tail = text[end - 1] not in "\"'\x60)}"
         while bare_tail and end > start + 1 and text[end - 1] in ".!?":
             end -= 1  # a sentence's punctuation, which no token ends with
         return start, end
@@ -1185,6 +1180,7 @@ def _concatenated_credential(text: str, end: int):
     n = len(text)
     if end >= n:
         return None
+    shell_quote = text[end]
     j = end + 1
     for _ in range(3):
         k = j
@@ -1196,7 +1192,7 @@ def _concatenated_credential(text: str, end: int):
                 k += 1
         elif k != j:
             return None  # a blank and no "+": nothing concatenated
-        span = _operand(text, k)
+        span = _operand(text, k, shell_quote)
         if span is None:
             return None
         first, last = text[span[0]], text[span[1] - 1]
@@ -1204,41 +1200,71 @@ def _concatenated_credential(text: str, end: int):
                 text[span[0] + 1:span[1] - 1].strip().lower() in _KNOWN_SCHEMES):
             j = span[1]
             continue
-        end = span[1]
-        if first in "\"'" or first == "$" and span[1] - span[0] > 1 and text[span[0] + 1] in "\"'":
-            # A quoted operand is continued by the literals concatenated
-            # after it; a bare word is not (curl -H '…Basic '<b64>' -H '…').
-            while (more := _FIELD_CONTINUATION_RE.match(text, end)) is not None:
-                end = more.end()
-        return span[0], end
+        return span[0], _concatenation_end(text, span[1], _quoted_operand(text, span))
     return None
 
 
-def _operand(text: str, i: int):
+def _quoted_operand(text: str, span) -> bool:
+    """Whether the operand at ``span`` is a quoted string (``$'…'`` too)."""
+    first = text[span[0]]
+    return first in "\"'" or (
+        first == "$" and span[1] - span[0] > 1 and text[span[0] + 1] in "\"'")
+
+
+def _concatenation_end(text: str, end: int, quoted: bool) -> int:
+    """Where the chain of operands concatenated after the one that ends at
+    ``end`` stops: ``+`` operands of any kind (``+ encode(x) + '…'``), and,
+    after a quoted operand, the literals and bare runs glued to it. A bare
+    operand is not continued by a glued literal — that quote is the shell's
+    own (curl -H '…Basic '<b64>' -H '…')."""
+    n = len(text)
+    while True:
+        if quoted and (more := _FIELD_CONTINUATION_RE.match(text, end)) is not None:
+            end = more.end()
+            continue
+        k = end
+        while k < n and text[k] in " \t":
+            k += 1
+        if k >= n or text[k] != "+":
+            return end
+        k += 1
+        while k < n and text[k] in " \t":
+            k += 1
+        span = _operand(text, k)
+        if span is None:
+            return end
+        end, quoted = span[1], _quoted_operand(text, span)
+
+
+def _operand(text: str, i: int, shell_quote: str = ""):
     """The span of the operand at ``i``: a quoted string, a ``$(…)``, ``${…}``
-    or backquoted substitution, a bracketed group or one word; ``None`` at a
-    delimiter or the end of the line."""
+    or backquoted substitution, a bracketed group or one shell word (quoted
+    segments and substitutions glued to it included, bar the ``shell_quote``
+    the header was quoted with); ``None`` at a delimiter or the end of the
+    line."""
     n = len(text)
     if i >= n:
         return None
     c = text[i]
     if c in "\"'":
-        return i, _QUOTED_TAIL_RE[c].match(text, i + 1).end()
+        return i, (_double_quoted_end(text, i + 1) if c == '"'
+                   else _QUOTED_TAIL_RE[c].match(text, i + 1).end())
     if c == "$" and i + 1 < n and text[i + 1] in "\"'":
-        return i, _QUOTED_TAIL_RE[text[i + 1]].match(text, i + 2).end()
+        return i, (_double_quoted_end(text, i + 2) if text[i + 1] == '"'
+                   else _QUOTED_TAIL_RE["'"].match(text, i + 2).end())
     if c == "`":
         return i, _BACKTICK_TAIL_RE.match(text, i + 1).end()
     if c == "$" and i + 1 < n and text[i + 1] in "({":
         return i, min(n, _group_end(text, i + 1) + 1)
     if c in _AUTH_OPENERS:
         return i, min(n, _group_end(text, i) + 1)
-    word = _AUTH_WORD_RE.match(text, i)
-    if word is None:
+    if _AUTH_WORD_RE.match(text, i) is None:
         return None
-    if word.end() < n and text[word.end()] == "(":
+    end = _shell_word_span(text, i, auth=True, shell_quote=shell_quote)
+    if end < n and text[end] == "(":
         # A call expression (``btoa('…')``): the word and its arguments.
-        return i, min(n, _group_end(text, word.end()) + 1)
-    return i, word.end()
+        return i, min(n, _group_end(text, end) + 1)
+    return i, end
 
 
 def _group_end(text: str, i: int) -> int:
@@ -1246,32 +1272,76 @@ def _group_end(text: str, i: int) -> int:
     the line when none does.
 
     One linear scan with a stack of the expected closers, so a closer of
-    another type does not end a group. A quoted string (``"``, ``'`` or a
-    backtick, a backslash escape honoured inside it) is skipped whole — a
-    bracket inside one is data, ``["a]SECRET"]`` — and so is a backslash
-    escape outside; a string never closed runs to the end of the line, and
-    with it the group, so no fragment of the value gets through."""
+    another type does not end a group. A single-quoted string or a backtick
+    one (a backslash escape honoured inside it) is skipped whole — a bracket
+    inside one is data, ``["a]SECRET"]`` — and so is a backslash escape
+    outside; a double-quoted string is walked as the shell reads it, a
+    ``$(…)`` or ``${…}`` inside it a group of its own with quotes of its own
+    (:func:`_scan_closer`); a string never closed runs to the end of the
+    line, and with it the group, so no fragment of the value gets through."""
+    return _scan_closer(text, i, [])
+
+
+def _double_quote_close(text: str, i: int) -> int:
+    """The index of the ``"`` closing the double-quoted string whose body
+    starts at ``i`` (just after the opening quote); the end of the line when
+    none does. The body is read as the shell does: a backslash escape is
+    passed, and a ``$(…)``, ``${…}`` or backtick substitution is one part
+    whose quotes — ``"$(echo "$(echo ")" "x")")"`` — are its own."""
+    return _scan_closer(text, i, ['"'])
+
+
+def _double_quoted_end(text: str, i: int) -> int:
+    """Where the double-quoted string whose body starts at ``i`` ends: just
+    past its closing ``"``, the end of the line when it is never closed."""
+    return min(len(text), _double_quote_close(text, i) + 1)
+
+
+def _scan_closer(text: str, i: int, stack: list) -> int:
+    """Scan from ``i`` with ``stack`` of the contexts open there — the closer
+    each bracket expects, ``"`` for a double-quoted string — and return the
+    index of the character that closes the last of them, the end of the line
+    when it never closes.
+
+    One iterative scan (no recursion, however deep the nesting), every
+    character consumed once: linear. Inside a double-quoted string only an
+    escape, a closing quote, a ``$(``/``${`` group and a backtick segment
+    are special; elsewhere a ``"`` opens a string, a ``'`` or backtick
+    segment is skipped whole and a bracket opens a group."""
     n = len(text)
-    stack: list = []
     j = i
     while j < n:
         c = text[j]
         if c == "\\":
             j += 2
-            continue
-        if c in "\"'\x60":
+        elif stack and stack[-1] == '"':
+            if c == '"':
+                stack.pop()
+                if not stack:
+                    return j
+                j += 1
+            elif c == "$" and text.startswith(("(", "{"), j + 1):
+                stack.append(_AUTH_OPENERS[text[j + 1]])
+                j += 2
+            elif c == "\x60":
+                j = _BACKTICK_TAIL_RE.match(text, j + 1).end()
+            else:
+                j += 1
+        elif c == '"':
+            stack.append('"')
             j += 1
-            while j < n and text[j] != c:
-                j += 2 if text[j] == "\\" else 1
-            j += 1  # the closing quote (past the end when unterminated)
-            continue
-        if c in _AUTH_OPENERS:
-            stack.append(_AUTH_OPENERS[c])
-        elif stack and c == stack[-1]:
-            stack.pop()
-            if not stack:
-                return j
-        j += 1
+        elif c == "'":
+            j = _QUOTED_TAIL_RE["'"].match(text, j + 1).end()
+        elif c == "\x60":
+            j = _BACKTICK_TAIL_RE.match(text, j + 1).end()
+        else:
+            if c in _AUTH_OPENERS:
+                stack.append(_AUTH_OPENERS[c])
+            elif stack and c == stack[-1]:
+                stack.pop()
+                if not stack:
+                    return j
+            j += 1
     return n
 
 
@@ -1310,8 +1380,12 @@ def _bare_value_end(text: str, i: int, loose: bool = False) -> int:
                 while k > i and (text[k - 1].isalnum() or text[k - 1] in "_-"):
                     k -= 1
                 return k
-            else:
+            elif _stray_quote(text, j):
                 break
+            else:
+                # A quote glued to a word is a quoted part of the same shell
+                # word (ab"cd ef"), a bare run glued after it too.
+                j = _shell_word_span(text, j, auth=True)
         elif c in _AUTH_CLOSERS:
             break
         elif c in ",;":
@@ -1355,7 +1429,7 @@ def _redact_keyed(text: str, key_re, value_end) -> str:
 
 def _assignment_value_end(text: str, m) -> Optional[int]:
     start = m.end()
-    opener = text[m.start("key") - 1] if m.start("key") else ""
+    opener = text[m.start() - 1] if m.start() else ""
     if opener in _QUOTED_TAIL_RE:
         # ``"api_key=ab cd"``: the quoted word the assignment opened inside
         # ends the value, with any concatenated part after it.
@@ -1370,7 +1444,8 @@ def _shell_word_end(text: str, m) -> Optional[int]:
     return end if end > m.end() else None
 
 
-def _shell_word_span(text: str, i: int) -> int:
+def _shell_word_span(text: str, i: int, auth: bool = False,
+                     shell_quote: str = "") -> int:
     """Where the shell word starting at ``i`` ends (``i`` when none starts
     there).
 
@@ -1390,42 +1465,63 @@ def _shell_word_span(text: str, i: int) -> int:
     TOKEN="$(printf "%s" "a b")" are one value each). A substitution is
     skipped with :func:`_group_end`, any depth deep, its quoted strings
     opaque, so a quoted ``)`` or ``}`` (TOKEN=$(printf ')' 'a b')) does not
-    close it. A single-quoted segment is skipped whole, to its closing quote
-    (a backslash-escaped one passed, as the other quote scanners do).
+    close it; a double-quoted segment is walked with
+    :func:`_double_quote_close`, so the quotes of a substitution inside it
+    (TOKEN="$(echo "$(echo ")" "x")")") are its own. A single-quoted segment
+    is skipped whole, to its closing quote (a backslash-escaped one passed,
+    as the other quote scanners do).
+
+    ``auth`` reads a credential operand of an ``Authorization`` value: a
+    bare run ends at a delimiter or bracket (``,`` ``;`` ``(`` ``)`` ``[``
+    ``]`` ``{`` ``}``) or a backslash, none of which a token holds, and a
+    quoted segment glued to the word joins it unless it is a stray quote
+    (:func:`_stray_quote`) or the ``shell_quote`` the header itself was
+    quoted with, which is the shell's own quote of the next argument.
 
     One forward scan, every part consumed once: linear."""
     n = len(text)
     j = i
     while j < n:
         c = text[j]
-        if c == "'":
-            j = _QUOTED_TAIL_RE["'"].match(text, j + 1).end()
-        elif c == '"':
-            j += 1
-            while j < n:
-                d = text[j]
-                if d == "\\":
-                    j += 2
-                elif d == '"':
-                    j += 1
-                    break
-                elif d == "$" and text.startswith(("(", "{"), j + 1):
-                    j = _group_end(text, j + 1) + 1
-                elif d == "\x60":
-                    j = _BACKTICK_TAIL_RE.match(text, j + 1).end()
-                else:
-                    j += 1
-        elif c == "\\":
-            j += 2
+        if c in "\"'":
+            if auth and j > i and (c == shell_quote or _stray_quote(text, j)):
+                break
+            if c == "'":
+                j = _QUOTED_TAIL_RE["'"].match(text, j + 1).end()
+            else:
+                j = _double_quoted_end(text, j + 1)
         elif c == "$" and text.startswith(("(", "{"), j + 1):
             j = _group_end(text, j + 1) + 1
         elif c == "\x60":
             j = _BACKTICK_TAIL_RE.match(text, j + 1).end()
+        elif auth and c in _AUTH_BARE_STOPS:
+            break
+        elif c == "\\":
+            j += 2
         elif c.isspace():
             break
         else:
             j += 1  # a bare run: up to the next blank, quote, backslash or $
     return min(j, n)
+
+
+def _stray_quote(text: str, j: int) -> bool:
+    """Whether the quote at ``j``, glued to the word before it, is a stray
+    one that ends the credential rather than a quoted part of it: a closed
+    segment holding blanks and delimiters alone right before a word
+    character (the ``", "`` of ``abc", "password": "x"``), or holding a bare
+    key right before a ``:`` (the ``"password"`` of ``x"password":"z"``)."""
+    n = len(text)
+    q = text[j]
+    close = (_double_quoted_end(text, j + 1) if q == '"'
+             else _QUOTED_TAIL_RE[q].match(text, j + 1).end())
+    if close - 1 <= j or text[close - 1] != q or close >= n:
+        return False
+    body = text[j + 1:close - 1]
+    after = text[close]
+    if after.isalnum() or after == "_":
+        return _DELIMITER_BODY_RE.match(body) is not None
+    return after == ":" and _KEY_BODY_RE.match(body) is not None
 
 
 def _field_value_end(text: str, m) -> Optional[int]:

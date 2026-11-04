@@ -2596,7 +2596,15 @@ class TestConsoleFilter:
                 "Error: TOKEN=$(echo $(echo $(printf <s>))) next\n"
                 "Error: TOKEN=${OUTER:-${INNER:-<a>} <b>} next\n"
                 'Error: TOKEN="$(printf "%s" "<a> <b>")" next\n'
-                'Error: ran --password "$(printf "%s" "<a> <b>")" next\n')
+                'Error: ran --password "$(printf "%s" "<a> <b>")" next\n'
+                # A hyphenated name is classified whole, its dashes kept off
+                # the key (--access-key-id=<a> once matched "id=" alone); a
+                # substitution inside a double-quoted value has quotes of its
+                # own, a quoted ")" among them.
+                "Error: --access-key-id=<a> next\n"
+                "Error: --api-key=<a> --secret-access-key=<b> next\n"
+                'Error: TOKEN="$(echo "$(echo ")" "<h>")")" next\n'
+                'Error: TOKEN="a b"c next\n')
         assert self._select(text) == [
             "  💬 Ran JIRA_TOKEN=*** python3 scripts/submit.py "
             "--api-key=*** --password=*** api_secret=*** "
@@ -2619,7 +2627,11 @@ class TestConsoleFilter:
             "Error: TOKEN=*** next",
             "Error: TOKEN=*** next",
             "Error: TOKEN=*** next",
-            "Error: ran --password *** next"]
+            "Error: ran --password *** next",
+            "Error: --access-key-id=*** next",
+            "Error: --api-key=*** --secret-access-key=*** next",
+            "Error: TOKEN=*** next",
+            "Error: TOKEN=*** next"]
 
     def test_tool_call_lines_show_no_raw_argument(self):
         # A ⚙ line never forwards a command or a prompt: Bash shows the
@@ -2864,7 +2876,22 @@ class TestConsoleFilter:
                 "Error: Authorization: Bearer <a>'<b> <c>'<d> next\n"
                 'Error: Authorization: Bearer abc", "password": "x"\n'
                 "Error: Authorization: Basic `a \\` b` next\n"
-                "Error: Authorization: 'Bearer ' + `cmd \\` x y` next\n")
+                "Error: Authorization: 'Bearer ' + `cmd \\` x y` next\n"
+                # One shell operand everywhere a credential is read: quotes
+                # of a substitution inside a double-quoted credential are its
+                # own, a quoted segment, a substitution or a bare run glued
+                # to a bare word is part of it (a stray quote before a
+                # structured field is not), and a "+" chain is taken whole.
+                'Error: Authorization: Basic "$(echo "x y" "<a> <b>")" next\n'
+                "Error: Authorization: 'Basic ' + ab\"cd ef\" next\n"
+                'Error: Authorization: SSWS ab"cd ef" next\n'
+                "Error: Authorization: Basic prefix$(printf <s>) next\n"
+                "Error: Authorization: Bearer a${B}c next\n"
+                'Error: Authorization: SSWS x"password":"z"\n'
+                "Error: Authorization: 'Basic ' + encode('<a>') + '<b>'\n"
+                "Error: h = 'Authorization: ' + 'Basic ' + f(x) + g(y) + '<c>'\n"
+                "  💬 Ran curl -H 'Authorization: Basic $(echo \"a)b\" c)' https://x\n"
+                'Error: {"Authorization":"Bearer <t>","password":"p w"}\n')
         assert self._select(text) == [
             '  💬 Sent {"Authorization":"Basic ***","user":"me"}',
             "  💬 Sent {'Authorization': 'token ***', 'Proxy-Authorization': 'Bearer ***'}",
@@ -2936,7 +2963,17 @@ class TestConsoleFilter:
             "Error: Authorization: Bearer *** next",
             'Error: Authorization: Bearer ***", "password": ***',
             "Error: Authorization: Basic *** next",
-            "Error: Authorization: 'Bearer ' + *** next"]
+            "Error: Authorization: 'Bearer ' + *** next",
+            "Error: Authorization: Basic *** next",
+            "Error: Authorization: 'Basic ' + *** next",
+            "Error: Authorization: ***",
+            "Error: Authorization: Basic *** next",
+            "Error: Authorization: Bearer *** next",
+            'Error: Authorization: ***"password":***',
+            "Error: Authorization: 'Basic ' + ***",
+            "Error: h = 'Authorization: ' + 'Basic ' + ***",
+            "  💬 Ran curl -H 'Authorization: Basic ***' https://x",
+            'Error: {"Authorization":"Bearer ***","password":***}']
 
     def test_workflow_commands_neutralised(self):
         # A forwarded line cannot carry a GitHub Actions workflow command:
@@ -3049,7 +3086,8 @@ class TestConsoleFilter:
                   "Authorization: 'Basic ' + f(" + "'" * 100_000,
                   "TOKEN=$(" + "a " * 50_000, "TOKEN=" + "$(x) " * 20_000,
                   "TOKEN=$(" + "'a)' " * 20_000, "TOKEN=${" + "'}' " * 25_000,
-                  "TOKEN=" + "$(" * 50_000, 'TOKEN="' + '$(a "' * 20_000)
+                  "TOKEN=" + "$(" * 50_000, 'TOKEN="' + '$(a "' * 20_000,
+                  'TOKEN="$(echo "' * 10_000, "Authorization: SSWS a" + '"b"c' * 25_000)
         lines = ["Error: " + body for body in bodies] + [
             '  ⚙ Bash: "' + "x" * 100_000, "  ⚙ Bash: " + "x" * 100_000,
             "  ⚙ Bash: " + "\\x" * 50_000, "  ⚙ Bash: " + "TOKEN=a " * 12_500 + "x",
