@@ -47,7 +47,10 @@ agent_eval/optimize/        — engine-agnostic. No cap-evolve imports.
   rollout.py                  run ONE case: workspace -> execute -> collect ->
                                judge -> compose_reward() (the only reward path)
   export.py                   place a rollout into the standard run-dir layout
-  redact.py                   gold-answer scrubbing; outcome-only feedback
+  redact.py                   gold-answer scrubbing; outcome-only feedback,
+                               plus a per-judge rationale opt-in for judges the
+                               eval author marks gold-free (feedback_rationale:
+                               true) — bounded, whitespace-collapsed excerpts
 
 agent_eval/engines/         — search-engine-specific integrations
   capevolve.py                 the ONE file coupled to cap-evolve: additional
@@ -137,6 +140,20 @@ cap-evolve's `run_target` thread pool instead of always running serially.
   `rejected.jsonl`/`splits.json`/`final.json` for progress and the winning
   candidate — nothing cap-evolve already tracks is reimplemented.
 
+### Feedback redaction: a recorded decision
+
+The proposer's feedback string is outcome-only by default (`judge=pass`,
+`score=3.2`), never judge rationale. This was chosen deliberately on the leak
+argument: rationale can quote a gold answer, and a judge that *paraphrases*
+one defeats any content matcher — redaction by construction beats scrubbing
+by filtering. The cost is real and accepted: on a rubric judge the rationale
+is exactly the gradient a proposer needs (GEPA's "actionable side
+information"), so a per-judge escape hatch exists — `feedback_rationale:
+true` on a judge is the eval author's assertion that this judge's rationale
+is gold-free, and opts it into a bounded (400-char, whitespace-collapsed)
+excerpt in the feedback. A structured `criterion + fix` feedback shape
+(no quoted content at all) remains a future extension.
+
 ### eval.yaml — the only new block
 
 ```yaml
@@ -150,7 +167,10 @@ optimize:
     - {dest: SKILL.md, source: skills/my-skill/SKILL.md}
     - {dest: references/, source: skills/my-skill/references/}
   apply_to: .claude/skills/my-skill
-  feedback: redacted      # judge rationale reaches the proposer; gold answers do not
+  feedback: redacted      # outcome labels only; rationale is redacted (it can
+                          # quote gold) unless a judge opts in via
+                          # feedback_rationale: true — the eval author's
+                          # gold-free assertion, included bounded
   on_error: noise         # infra failure = missing data, never reward 0
 ```
 

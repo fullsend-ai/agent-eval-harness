@@ -242,6 +242,41 @@ def test_score_from_summary_uses_harness_reward_and_redacts_judge_rationale(tmp_
     assert reward == expected_reward
 
 
+def test_a_gold_free_judges_rationale_reaches_the_proposer_bounded(tmp_path, monkeypatch):
+    """astefanutti's feedback question: outcome-only feedback gives the
+    proposer no gradient on rubric judges. The middle option he proposed is
+    implemented here — per-judge opt-in (feedback_rationale: true), the eval
+    author's assertion that this judge's rationale is gold-free. The excerpt
+    is whitespace-collapsed and capped, so even a mis-marked judge leaks a
+    bounded fragment rather than the whole answer key."""
+    monkeypatch.chdir(tmp_path)
+    _demo_eval_yaml(tmp_path)
+    body = open("eval.yaml").read().replace(
+        "  - name: quality\n", "  - name: quality\n    feedback_rationale: true\n", 1)
+    open("eval.yaml", "w").write(body)
+    from agent_eval.config import EvalConfig
+    config = EvalConfig.from_yaml("eval.yaml")
+    assert [j.name for j in config.judges if j.feedback_rationale] == ["quality"]
+
+    long_rationale = "word " * 200  # 1000 chars once collapsed
+    summary = {"per_case": {"case-1": {
+        "quality": {"value": False, "rationale": long_rationale},
+        "files_exist": {"value": True, "rationale": "Gold answer: secret-answer"},
+    }}}
+    error, reward, feedback = rollout.score_from_summary("case-1", summary, config, execution_error=False)
+
+    assert error is None
+    # Opted-in judge: rationale present, whitespace-collapsed, capped at 400.
+    assert "quality_rationale=" in feedback
+    excerpt = feedback.split("quality_rationale=")[1].split(",")[0]
+    assert len(excerpt) == 400
+    assert "  " not in excerpt
+    # Not opted in: outcome only — rationale never reaches the proposer.
+    assert "files_exist=pass" in feedback
+    assert "files_exist_rationale" not in feedback
+    assert "secret-answer" not in feedback
+
+
 def test_score_from_summary_treats_execution_error_as_missing_data(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     _demo_eval_yaml(tmp_path)

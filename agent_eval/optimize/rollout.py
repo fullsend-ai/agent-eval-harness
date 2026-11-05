@@ -193,8 +193,13 @@ def score_from_summary(
         raise ValueError("optimization requires an explicit eval.yaml 'reward:' configuration")
     reward, _metrics = compose_reward(per_case, judge_ranges=judge_ranges(config), reward_cfg=config.reward)
     # Judge rationale can contain expected/gold content. The proposer only
-    # ever sees score labels and the target-agent transcript.
-    feedback = redact.build_redacted_feedback(per_case, reward)
+    # ever sees score labels and the target-agent transcript — except for
+    # judges the eval author explicitly marked gold-free
+    # (feedback_rationale: true), which contribute a bounded excerpt.
+    feedback = redact.build_redacted_feedback(
+        per_case, reward,
+        rationale_judges={j.name for j in config.judges or [] if j.feedback_rationale},
+    )
     return None, reward, feedback
 
 

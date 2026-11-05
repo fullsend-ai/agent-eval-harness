@@ -20,7 +20,19 @@ def remove_gold(case_workspace: Path) -> None:
         gold.unlink()
 
 
-def build_redacted_feedback(per_case_judges: dict, reward: float) -> str:
+def build_redacted_feedback(per_case_judges: dict, reward: float,
+                            rationale_judges: "frozenset[str] | set[str] | None" = None) -> str:
+    """Outcome labels for every judge; bounded rationale only for opted-in ones.
+
+    ``rationale_judges`` names judges whose rationale the eval author has
+    marked gold-free (``feedback_rationale: true`` in eval.yaml). Even then
+    the excerpt is whitespace-collapsed and length-capped: an opted-in judge
+    that nonetheless quotes the answer key leaks a bounded fragment, not the
+    whole thing. Everyone else stays outcome-only — a judge that paraphrases
+    a gold answer defeats any content matcher, so the default is redaction
+    by construction rather than filtering.
+    """
+    rationale_judges = frozenset(rationale_judges or ())
     outcomes = []
     for name, result in sorted(per_case_judges.items()):
         value = result.get("value") if isinstance(result, dict) else None
@@ -30,4 +42,9 @@ def build_redacted_feedback(per_case_judges: dict, reward: float) -> str:
             outcomes.append(f"{name}={float(value):g}")
         elif value is None:
             outcomes.append(f"{name}=unscored")
+        if name in rationale_judges:
+            rationale = (result.get("rationale") or "") if isinstance(result, dict) else ""
+            excerpt = " ".join(str(rationale).split())[:400]
+            if excerpt:
+                outcomes.append(f"{name}_rationale={excerpt}")
     return f"Harness reward: {reward:.4f}. Judge outcomes: " + ", ".join(outcomes)

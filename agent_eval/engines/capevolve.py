@@ -419,7 +419,9 @@ def _benchmark_facts(manifest: dict) -> str:
         "- Scoring source: the eval config's own judges. Each rollout's `summary.yaml` "
         "per-case judge results are composed into one reward by the harness's "
         "`compose_reward()` over the `reward:` block. Feedback carries judge labels "
-        "(pass/fail, scores), never judge rationale, which can quote gold content.\n"
+        "(pass/fail, scores). Judge rationale is redacted (it can quote gold content) "
+        "unless the eval author marked a judge gold-free with `feedback_rationale: "
+        "true` in the eval config, in which case a bounded excerpt is included.\n"
         # No trajectories line: the bridge implements no trajectories() and no
         # ./trajectories/ dir exists — telling the proposer to look there made
         # it spend optimizer-model iterations hunting for signal that isn't
@@ -505,7 +507,9 @@ def _project_md(manifest: dict, resolved: dict, spec: dict, substrate: dict) -> 
         "## How we score",
         "- Metric: the eval config's judges composed by `compose_reward()` over its `reward:` "
         "block (reward in [0,1])",
-        "- Feedback signal: per-judge labels (pass/fail, score) only — judge rationale is "
+        "- Feedback signal: per-judge labels (pass/fail, score); rationale only for "
+        "judges marked `feedback_rationale: true` (the eval author's gold-free "
+        "assertion), as a bounded excerpt — otherwise rationale is "
         "redacted because it can quote gold content",
         "- Infra failure or an errored judge: missing data (`raw={\"errored\": true}`), never reward 0",
         "",
