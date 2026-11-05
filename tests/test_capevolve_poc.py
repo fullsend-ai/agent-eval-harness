@@ -2076,6 +2076,84 @@ def test_apply_winner_tolerates_an_absolute_runs_dir_outside_the_repo(tmp_path, 
     assert result["best_id"] == "cand_1"
 
 
+def _nested_apply_fixture(tmp_path):
+    """Like _apply_fixture, but the benchmark sits nested inside a larger
+    repository (project_root != repo_root) — the shape astefanutti's #2/#4
+    findings live in."""
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    _init_git_repo(repo_root)
+    project_root = repo_root / "bench"
+    skill_path = project_root / "skills" / "demo" / "SKILL.md"
+    skill_path.parent.mkdir(parents=True)
+    skill_path.write_text("original skill", encoding="utf-8")
+    _git_commit_all(repo_root, "initial")
+
+    run_dir = tmp_path / "outside" / "run_20260101_000000"
+    run_dir.mkdir(parents=True)
+    (run_dir / "final.json").write_text(
+        json.dumps({"best_id": "cand_1", "test_delta": 0.12}), encoding="utf-8"
+    )
+    (run_dir / "splits.json").write_text(json.dumps({
+        "train": ["case-1", "case-2"], "val": ["case-3"], "test": ["case-4"],
+    }), encoding="utf-8")
+    candidate_dir = run_dir / "candidates" / "cand_1"
+    candidate_dir.mkdir(parents=True)
+    (candidate_dir / "SKILL.md").write_text("candidate skill", encoding="utf-8")
+
+    harness_manifest = {
+        "candidate": [{"dest": "SKILL.md", "source": str(skill_path), "is_dir": False}],
+    }
+    campaign_manifest = {"run_dir": str(run_dir)}
+    return repo_root, project_root, harness_manifest, campaign_manifest, skill_path
+
+
+def test_apply_winner_gate_covers_uncommitted_work_outside_a_nested_benchmark(tmp_path):
+    """astefanutti #2 (blocking): the dirty-check was pathspec-scoped to the
+    benchmark while the failure-path `git reset --hard HEAD` resets the
+    whole worktree — a benchmark nested in a larger repository would wave
+    through uncommitted work elsewhere that a failed apply then destroyed.
+    The gate must cover everything the rollback can touch."""
+    repo_root, project_root, harness_manifest, campaign_manifest, _ = _nested_apply_fixture(tmp_path)
+    outside = repo_root / "src" / "work.txt"
+    outside.parent.mkdir()
+    outside.write_text("precious uncommitted work", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="not clean"):
+        capevolve.apply_winner(
+            project_root=project_root,
+            harness_manifest=harness_manifest, campaign_manifest=campaign_manifest,
+        )
+    assert outside.read_text(encoding="utf-8") == "precious uncommitted work"
+    assert _current_branch(project_root) in ("main", "master")
+
+
+def test_apply_winner_tolerates_a_runs_dir_inside_the_repo_but_outside_the_benchmark(tmp_path, monkeypatch):
+    """astefanutti #4: the runs-dir exclude guarded on repo_root but
+    computed against project_root — an AGENT_EVAL_RUNS_DIR inside the repo
+    but outside the benchmark raised an uncaught ValueError, so --apply
+    could never run for that layout."""
+    repo_root, project_root, harness_manifest, campaign_manifest, _ = _nested_apply_fixture(tmp_path)
+    runs_dir = repo_root / "shared-eval-runs" / "opt-1"
+    runs_dir.mkdir(parents=True)
+    (runs_dir / "run_result.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("AGENT_EVAL_RUNS_DIR", str(runs_dir))
+
+    result = capevolve.apply_winner(
+        project_root=project_root,
+        harness_manifest=harness_manifest, campaign_manifest=campaign_manifest,
+    )
+
+    assert result["best_id"] == "cand_1"
+    # The campaign's own run records stayed untracked — never committed
+    # with the winner.
+    tracked = subprocess.run(
+        ["git", "ls-files", "--", "shared-eval-runs"], cwd=repo_root,
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    assert tracked == ""
+
+
 def test_apply_winner_chains_the_original_error_when_rollback_also_fails(tmp_path, monkeypatch):
     """A `finally` block that raises replaces whatever was propagating from
     the try body (CPython: the original is not even in __context__ unless

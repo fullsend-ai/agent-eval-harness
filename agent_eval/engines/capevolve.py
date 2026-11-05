@@ -1325,16 +1325,25 @@ def apply_winner(*, project_root: Path, harness_manifest: dict, campaign_manifes
     # AGENT_EVAL_RUNS_DIR is relative to project_root, but a user can also
     # point it absolute and outside the repo entirely, and git's own
     # `:(exclude)` pathspec hard-errors on a path outside the worktree.
-    pathspecs = [".", _CAPEVOLVE_EXCLUDE]
+    #
+    # The dirty-check covers the WHOLE worktree (the `:/` pathspec), because
+    # the failure-path `git reset --hard HEAD` below takes no pathspec and
+    # resets the entire worktree: with a benchmark nested in a larger
+    # repository, a gate scoped to the benchmark would wave through
+    # uncommitted work elsewhere that the rollback then destroys. The gate
+    # and the rollback must agree on the blast radius. The runs-dir exclude
+    # is worktree-root-relative (`:(top)`), so it holds from any cwd and a
+    # runs dir inside the repo but outside the benchmark computes fine.
+    pathspecs = [":/", _CAPEVOLVE_EXCLUDE]
     runs_dir = Path(os.environ.get("AGENT_EVAL_RUNS_DIR", "eval/runs"))
     if not runs_dir.is_absolute():
         runs_dir = project_root / runs_dir
     runs_dir = runs_dir.resolve()
     if runs_dir.is_relative_to(repo_root):
-        pathspecs.append(f":(exclude){runs_dir.relative_to(project_root.resolve())}")
+        pathspecs.append(f":(exclude,top){runs_dir.relative_to(repo_root)}")
     dirty = _git(["status", "--porcelain", "--", *pathspecs], cwd=project_root).stdout.strip()
     if dirty:
-        raise RuntimeError("project working tree is not clean; commit or stash your changes before --apply")
+        raise RuntimeError("repository working tree is not clean; commit or stash your changes before --apply")
     current_branch = _git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=project_root).stdout.strip()
     if current_branch == "HEAD":
         # Detached HEAD: return to the exact commit, not to "HEAD" (which
@@ -1380,8 +1389,12 @@ def apply_winner(*, project_root: Path, harness_manifest: dict, campaign_manifes
             if isinstance(exc, subprocess.CalledProcessError) else exc
         )
         try:
+            # reset --hard is deliberately worktree-wide (git refuses paths
+            # with --hard); the dirty-check above covers that blast radius.
+            # clean stays scoped to the benchmark ("." include) — it only
+            # needs to wipe the partial copy, which lives under it.
             _git(["reset", "--hard", "HEAD"], cwd=project_root)
-            _git(["clean", "-fd", "--", *pathspecs[1:]], cwd=project_root)
+            _git(["clean", "-fd", "--", ".", *pathspecs[1:]], cwd=project_root)
             _git(["checkout", current_branch], cwd=project_root)
             _git(["branch", "-D", branch], cwd=project_root)
         except subprocess.CalledProcessError as rollback_exc:
