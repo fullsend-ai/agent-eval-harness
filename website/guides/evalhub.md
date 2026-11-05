@@ -192,6 +192,11 @@ resource requests/limits).
     [Model providers → Credentials by backend](../concepts/providers.md#credentials-by-backend)
     and the [OpenRouter guide](openrouter.md#backends).
 
+    The returned provenance artifact carries `message_ids_count` for Claude turn
+    accounting and `generation_ids_count` for OpenRouter request coverage. The ID lists
+    themselves stay in the Job pod; consume `generation_ids_count` for generation-backed
+    cost and routing coverage.
+
 === "Client-side (/eval-run --runner evalhub)"
 
     From a project checkout, `/eval-run --runner evalhub` wraps the whole flow —

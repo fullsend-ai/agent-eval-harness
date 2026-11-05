@@ -50,11 +50,15 @@ def test_bind_sight_finish_and_reconcile(fake, tmp_path):
     assert b.after_run(["gen-fake-1", "gen-fake-2"]) == 2   # gen-fake-2 + the hook id
     # per-case write inside the lag: pending, no warning; then the run-end pass
     case = write_run_result(tmp_path / "cases" / "c1" / "run_result.json",
-                            {"exit_code": 0, "cost_usd": 0.5, "message_ids": ["gen-fake-1", "gen-fake-2"]},
+                            {"exit_code": 0, "cost_usd": 0.5,
+                             "message_ids": ["msg-fake-1", "msg-fake-2"],
+                             "generation_ids": ["gen-fake-1", "gen-fake-2"]},
                             plan=plan, ledger=session.ledger)
     run = write_run_result(tmp_path / "run_result.json",
                            {"exit_code": 0, "cost_usd": None, "per_case": {"c1": case},
-                            "message_ids": ["gen-fake-1", "gen-fake-2"], "eval_params": {"max_budget_usd": 5}},
+                            "message_ids": ["msg-fake-1", "msg-fake-2"],
+                            "generation_ids": ["gen-fake-1", "gen-fake-2"],
+                            "eval_params": {"max_budget_usd": 5}},
                            plan=plan, ledger=session.ledger)
     assert run["cost_source"] in ("unavailable", "openrouter:generation")
     delta = session.finish()
@@ -81,7 +85,8 @@ def test_close_on_a_crash_path_does_finish_and_reconcile(fake, tmp_path):
     session = FastSession(plan, tmp_path).start()
     plan.attach(session)
     session.bind("c1").sight("gen-fake-9")
-    write_run_result(tmp_path / "run_result.json", {"exit_code": -1, "message_ids": ["gen-fake-9"]},
+    write_run_result(tmp_path / "run_result.json", {"exit_code": -1,
+                     "message_ids": ["msg-fake-9"], "generation_ids": ["gen-fake-9"]},
                      plan=plan, ledger=session.ledger)
     plan.close()
     final = json.loads((tmp_path / "run_result.json").read_text())

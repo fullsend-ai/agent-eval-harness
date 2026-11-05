@@ -90,6 +90,7 @@ def _empty_transcript_metrics() -> dict:
         "cost_usd": None, "token_usage": None, "per_model_usage": None,
         "num_turns": None, "duration_s": None, "agent_version": None,
         "message_ids": [],
+        "generation_ids": [],
     }
 
 
@@ -117,6 +118,12 @@ def _extract_transcript_metrics(transcript_path: Path) -> dict:
                 msg_id = msg.get("id") if isinstance(msg, dict) else None
                 if isinstance(msg_id, str) and msg_id and msg_id not in result["message_ids"]:
                     result["message_ids"].append(msg_id)
+                request_id = ev.get("requestId")
+                if request_id is None and isinstance(msg_id, str) and msg_id.startswith("gen-"):
+                    request_id = msg_id
+                if (isinstance(request_id, str) and request_id.startswith("gen-")
+                        and request_id not in result["generation_ids"]):
+                    result["generation_ids"].append(request_id)
             if (ev.get("type") == "system" and ev.get("subtype") == "init"
                     and not result["agent_version"]):
                 result["agent_version"] = ev.get("claude_code_version")
@@ -271,6 +278,7 @@ def _errored_trial_record(trial_dir: Path) -> dict:
         "token_usage": None,
         "per_model_usage": None,
         "message_ids": [],
+        "generation_ids": [],
         "num_turns": None,
         "duration_s": None,
         "agent_version": None,
@@ -358,6 +366,7 @@ def parse_trial(trial_dir: Path) -> dict | None:
     # doesn't have them).
     extracted = _agent_transcript_metrics(trial_dir / "agent")
     record["message_ids"] = list(extracted.get("message_ids") or [])
+    record["generation_ids"] = list(extracted.get("generation_ids") or [])
     if record["cost_usd"] is None:
         record["cost_usd"] = extracted["cost_usd"]
     if record["token_usage"] is None:
@@ -399,7 +408,8 @@ def _parse_multi_step_trial(trial_dir: Path, steps_dir: Path) -> dict | None:
     step_dirs = sorted(d for d in steps_dir.iterdir() if d.is_dir())
     if not step_dirs:
         return None
-    message_ids: list = []          # cost-truth key set across the steps (spec 014)
+    message_ids: list = []
+    generation_ids: list = []       # OpenRouter ids across the steps (spec 014)
 
     rewards = []
     per_judge: dict = {}
@@ -461,6 +471,9 @@ def _parse_multi_step_trial(trial_dir: Path, steps_dir: Path) -> dict | None:
         for msg_id in extracted.get("message_ids") or []:
             if msg_id not in message_ids:
                 message_ids.append(msg_id)
+        for gen_id in extracted.get("generation_ids") or []:
+            if gen_id not in generation_ids:
+                generation_ids.append(gen_id)
         harbor_step = harbor_steps.get(step_name, {})
         fallback = _agent_result_metrics(harbor_step.get("agent_result"))
         step_cost = extracted.get("cost_usd")
@@ -563,6 +576,7 @@ def _parse_multi_step_trial(trial_dir: Path, steps_dir: Path) -> dict | None:
         "duration_s": total_duration if total_duration > 0 else None,
         "agent_version": agent_version,
         "message_ids": message_ids,
+        "generation_ids": generation_ids,
     }
 
 
@@ -583,7 +597,10 @@ def price_trials(trials: list, rows: list) -> None:
                    if r.get("source") == "generation" and r.get("status") == "ok"
                    and r.get("gen_id") and isinstance(r.get("cost_usd"), (int, float))}
     for trial in trials:
-        ids = [i for i in (trial.get("message_ids") or []) if is_generation_id(i)]
+        ids = trial.get("generation_ids")
+        if ids is None:
+            ids = trial.get("message_ids") or []
+        ids = [i for i in ids if is_generation_id(i)]
         trial["cost_usd_estimate"] = trial.get("cost_usd")
         costs = [priced_rows[i]["cost_usd"] for i in ids if i in priced_rows]
         if ids and len(costs) == len(ids):

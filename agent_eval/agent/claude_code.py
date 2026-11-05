@@ -18,9 +18,10 @@ from .stream_capture import (
     make_prompt_event, inject_timestamp, extract_usage,
     count_subagent_turns, combine_per_model_turns,
     setup_subagent_hook,
-    assistant_message_id,
+    assistant_event_ids, extract_generation_ids,
+    claude_session_dir_name, claude_session_generation_ids, extract_session_id,
     classify_stream_errors,
-    message_ids_for_run,
+    generation_ids_for_run, message_ids_for_run,
 )
 from agent_eval.tools.permissions import compile_permission_rules
 from agent_eval.config import (
@@ -413,7 +414,9 @@ class ClaudeCodeRunner(EvalRunner):
         cleanup_settings = temp_settings_file
         cost_source = None
         proc = None
-        stream_ids_seen = []          # every assistant id parsed, sighted or not
+        stream_ids_seen = []          # Claude message ids, for turn accounting
+        stream_message_ids_seen = set()
+        stream_generation_ids_seen = set()
 
         try:
             # Inside the try: the overlay already holds the key, so a failure
@@ -478,12 +481,16 @@ class ClaudeCodeRunner(EvalRunner):
                         if self._binding is not None:
                             # Sight generation ids as the stream is read, so
                             # the backfill starts before the process exits.
-                            mid, mecho = assistant_message_id(obj)
-                            if mid:
+                            message_id, generation_id, mecho = assistant_event_ids(obj)
+                            if message_id and message_id not in stream_message_ids_seen:
                                 msg_index += 1
-                                stream_ids_seen.append(mid)     # before sight: it is billed either way
-                                self._binding.sight(mid, message_index=msg_index,
-                                                    model_echo=mecho)
+                                stream_message_ids_seen.add(message_id)
+                                stream_ids_seen.append(message_id)
+                            if generation_id:
+                                stream_generation_ids_seen.add(generation_id)
+                                self._binding.sight(
+                                    generation_id, message_index=msg_index or None,
+                                    model_echo=mecho)
                         msg = _extract_progress(obj, estimate=plan is not None)
                         if msg:
                             if msg.startswith("PERMISSION DENIED"):
@@ -533,6 +540,11 @@ class ClaudeCodeRunner(EvalRunner):
                 timeout_stderr += (f"\nWARNING: {len(denial_list)} permission "
                                    f"denial(s) detected during execution")
             message_ids = message_ids_for_run(stream_ids, workspace / "subagents")
+            session_generation_ids = claude_session_generation_ids(
+                workspace, extract_session_id(stdout_lines))
+            generation_ids = generation_ids_for_run(
+                extract_generation_ids(stdout_lines) | stream_generation_ids_seen | session_generation_ids,
+                workspace / "subagents")
 
             return RunResult(
                 exit_code=-1,
@@ -548,24 +560,31 @@ class ClaudeCodeRunner(EvalRunner):
                 per_model_turns=per_model_turns,
                 permission_denials=denial_list,
                 message_ids=message_ids,
-                **self._provenance(stdout_lines, message_ids, cost_usd, cost_source),
+                generation_ids=generation_ids,
+                **self._provenance(stdout_lines, generation_ids, cost_usd, cost_source),
             )
         except Exception as e:
             duration = time.monotonic() - start
             # Stop and reap the CLI first: a child left running would keep
             # producing billed generations nobody reads (CWE-772). Drain what
             # it already wrote — those ids are billed too — then keep every
-            # streamed id as the result's cost-truth key set and let the
+            # streamed generation id as the result's cost-truth key set and let the
             # binding finish (subagent transcripts, hook ids), or the partial
             # run's spend would stay unpriced and unaudited.
             if proc is not None:
                 stdout_lines.extend(_reap(proc))
             stream_ids = set(extract_usage(stdout_lines)[3]) | set(stream_ids_seen)
             message_ids = message_ids_for_run(stream_ids, workspace / "subagents")
+            session_generation_ids = claude_session_generation_ids(
+                workspace, extract_session_id(stdout_lines))
+            generation_ids = generation_ids_for_run(
+                extract_generation_ids(stdout_lines) | stream_generation_ids_seen | session_generation_ids,
+                workspace / "subagents")
             return RunResult(
                 exit_code=-1, stdout="", stderr=str(e), duration_s=duration,
                 message_ids=message_ids,
-                **self._provenance(stdout_lines, message_ids, None, cost_source),
+                generation_ids=generation_ids,
+                **self._provenance(stdout_lines, generation_ids, None, cost_source),
             )
         finally:
             # The overlay may hold the plan's literal key: gone on every path
@@ -578,6 +597,8 @@ class ClaudeCodeRunner(EvalRunner):
 
         duration = time.monotonic() - start
         stdout_text = "\n".join(stdout_lines)
+        session_generation_ids = claude_session_generation_ids(
+            workspace, extract_session_id(stdout_lines))
 
         # Clean up session directory now that SubagentStop hooks have fired
         # and copied transcripts.  Without this, session files accumulate
@@ -646,6 +667,9 @@ class ClaudeCodeRunner(EvalRunner):
             )
 
         message_ids = message_ids_for_run(stream_ids, workspace / "subagents")
+        generation_ids = generation_ids_for_run(
+                extract_generation_ids(stdout_lines) | stream_generation_ids_seen | session_generation_ids,
+            workspace / "subagents")
         return RunResult(
             exit_code=exit_code,
             stdout=stdout_text,
@@ -661,17 +685,18 @@ class ClaudeCodeRunner(EvalRunner):
             permission_denials=denial_list,
             raw_output=raw_output,
             message_ids=message_ids,
-            **self._provenance(stdout_lines, message_ids, cost_usd, cost_source),
+            generation_ids=generation_ids,
+            **self._provenance(stdout_lines, generation_ids, cost_usd, cost_source),
         )
 
-    def _provenance(self, stdout_lines, message_ids, cost_usd, cost_source) -> dict:
+    def _provenance(self, stdout_lines, generation_ids, cost_usd, cost_source) -> dict:
         """The cost-provenance RunResult fields (spec 014): hand the binding
         every id the stream did not show (subagent transcripts, the hook's own
         ids), classify the run's visible provider errors, and label the CLI's
         own number — an estimate under a plan (Claude Code prices at Anthropic
         rates), ``runner:reported`` on Anthropic/Vertex."""
         if self._binding is not None:
-            self._binding.after_run(message_ids)
+            self._binding.after_run(generation_ids)
         error_class, budget = classify_stream_errors(stdout_lines)
         return {
             "cost_source": cost_source,
@@ -806,8 +831,10 @@ class ClaudeCodeRunner(EvalRunner):
         projects_dir = Path.home() / ".claude" / "projects"
         if not projects_dir.exists():
             return
-        encoded = "-" + str(workspace).replace("/", "-")
+        encoded = claude_session_dir_name(workspace)
         session_dir = projects_dir / encoded
+        if session_dir == projects_dir:
+            return
         if session_dir.exists() and session_dir.is_dir():
             shutil.rmtree(session_dir, ignore_errors=True)
 

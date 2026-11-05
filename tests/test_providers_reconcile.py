@@ -139,8 +139,20 @@ def test_neither_source_is_unavailable_unless_estimate_is_allowed():
     out = reconcile(_payload(["gen-1", "gen-2"]), [], _plan())
     assert out["cost_usd"] is None and out["cost_source"] == "unavailable"
     assert out["cost_confidence"] is None
+    assert out["routing"]["audit_complete"] is False
     allowed = reconcile(_payload(["gen-1", "gen-2"], estimate=0.9), [], _plan(), allow_estimate=True)
     assert allowed["cost_usd"] == 0.9 and allowed["cost_source"] == "runner:estimate"
+
+
+def test_current_generation_ids_drive_coverage_not_message_ids():
+    payload = {"exit_code": 0, "cost_usd": 1.5,
+               "message_ids": ["msg-1", "msg-2"],
+               "generation_ids": ["gen-1", "gen-2"],
+               "per_model_usage": {SLUG: {"input": 10, "output": 5, "cost_usd": 1.5}}}
+    rows = [_row("gen-1", 0.01, "novita"), _row("gen-2", 0.02, "z-ai")]
+    out = reconcile(payload, rows, _plan())
+    assert out["cost_coverage"]["requests"] == 2
+    assert out["cost_usd"] == pytest.approx(0.03)
 
 
 def test_cross_check_deviation_lowers_confidence_and_warns():

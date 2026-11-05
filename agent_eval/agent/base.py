@@ -33,12 +33,10 @@ class RunResult:
     per_model_turns: Optional[dict] = None  # Per-model assistant turn count
     permission_denials: Optional[list] = None  # [{tool_name, tool_use_id, tool_input}]
     raw_output: Optional[dict] = None  # Runner-specific parsed output
-    # Cost provenance (spec 014). `message_ids` is the cost-truth key set: every
-    # assistant message id in the root stream and the subagent transcripts —
-    # on a direct OpenRouter connection these are `gen-…` generation ids that
-    # the backfill prices. The other fields are filled by reconcile (or by a
-    # runner that knows its own number is an estimate); None = not applicable.
+    # Claude message ids, used for assistant-turn accounting. OpenRouter
+    # generation ids live separately in `generation_ids`.
     message_ids: Optional[list] = None
+    generation_ids: Optional[list] = None
     cost_source: Optional[str] = None
     cost_usd_estimate: Optional[float] = None
     providers: Optional[dict] = None

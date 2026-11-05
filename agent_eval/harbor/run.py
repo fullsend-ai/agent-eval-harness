@@ -884,7 +884,7 @@ def _run_eval_on_harbor(
         # Gen ids come from the trials' captured stream-json (per trial, exact);
         # the /generation lag has long passed, so the backfill takes seconds.
         for trial in parsed.get("trials", []):
-            session.sight_trial(trial.get("message_ids") or [], case_id=trial.get("case_id"))
+            session.sight_trial(trial.get("generation_ids") or [], case_id=trial.get("case_id"))
         session.finish()
         results_mod.price_trials(parsed["trials"], session.ledger.read())
 
@@ -904,6 +904,8 @@ def _run_eval_on_harbor(
         # Cost-truth key set across the trials (reconcile's coverage denominator).
         "message_ids": sorted({i for t in parsed.get("trials", [])
                                for i in (t.get("message_ids") or [])}),
+        "generation_ids": sorted({i for t in parsed.get("trials", [])
+                                  for i in (t.get("generation_ids") or [])}),
         "num_turns": parsed.get("num_turns"),
         "duration_s": parsed.get("duration_s"),
         "mean_reward": parsed["mean_reward"],

@@ -118,11 +118,11 @@ FAKE_FULLSEND = textwrap.dedent('''\
     }))
     events = [
         {"type": "system", "subtype": "init", "model": "claude-opus-4-6"},
-        {"type": "assistant", "message": {
+        {"type": "assistant", "requestId": "gen-1", "message": {
             "id": "msg_1", "model": "claude-opus-4-6", "role": "assistant",
             "content": [{"type": "text", "text": "Working"}],
             "usage": {"input_tokens": 10, "output_tokens": 5}}},
-        {"type": "assistant", "message": {
+        {"type": "assistant", "requestId": "gen-2", "message": {
             "id": "msg_2", "model": "claude-opus-4-6", "role": "assistant",
             "content": [{"type": "tool_use", "id": "toolu_1", "name": "Read",
                          "input": {"file_path": "batch.yaml"}}],
@@ -138,7 +138,7 @@ FAKE_FULLSEND = textwrap.dedent('''\
         "\\n".join(json.dumps(e) for e in events) + "\\n")
     (it / "output" / "agent-result.json").write_text(json.dumps({"ok": True}))
     (it / "transcripts" / "s1-agent-a1.jsonl").write_text(json.dumps(
-        {"message": {"role": "assistant", "id": "msg_sub_1",
+        {"requestId": "gen-sub-1", "message": {"role": "assistant", "id": "msg_sub_1",
                      "model": "claude-haiku-4-5"}}) + "\\n")
     (it / "transcripts" / "main.jsonl").write_text("{}\\n")
     (run / "run-telemetry.jsonl").write_text("\\n".join([
@@ -162,12 +162,12 @@ FAKE_FULLSEND = textwrap.dedent('''\
         (it2 / "output").mkdir(parents=True)
         (it2 / "transcripts").mkdir()
         (it2 / "output.jsonl").write_text(json.dumps(
-            {"type": "assistant", "message": {
+            {"type": "assistant", "requestId": "gen-3", "message": {
                 "id": "msg_3", "model": "claude-opus-4-6", "role": "assistant",
                 "content": [{"type": "text", "text": "Second iteration"}],
                 "usage": {"input_tokens": 4, "output_tokens": 2}}}) + "\\n")
         (it2 / "transcripts" / "s1-agent-a1.jsonl").write_text(json.dumps(
-            {"message": {"role": "assistant", "id": "msg_sub_2",
+            {"requestId": "gen-sub-2", "message": {"role": "assistant", "id": "msg_sub_2",
                          "model": "claude-haiku-4-5"}}) + "\\n")
 
     if os.environ.get("FAKE_FULLSEND_HANG_AFTER_RUN"):
@@ -886,6 +886,7 @@ class TestFullsendExecute:
         assert result.per_model_usage["claude-opus-4-6"]["cost_usd"] == 0.11
         assert result.per_model_turns == {"claude-opus-4-6": 2, "claude-haiku-4-5": 1}
         assert result.message_ids == ["msg_1", "msg_2", "msg_sub_1"]
+        assert result.generation_ids == ["gen-1", "gen-2", "gen-sub-1"]
         # Subagent transcripts copied; non-agent transcripts are not.
         assert sorted(p.name for p in (ws / "subagents").iterdir()) == ["s1-agent-a1.jsonl"]
         # Hook block events from run-telemetry.jsonl.
@@ -906,6 +907,8 @@ class TestFullsendExecute:
                                            model="m", timeout_s=60)
         assert "Working" in result.stdout and "Second iteration" in result.stdout
         assert result.message_ids == ["msg_1", "msg_2", "msg_3", "msg_sub_1", "msg_sub_2"]
+        assert result.generation_ids == [
+            "gen-1", "gen-2", "gen-3", "gen-sub-1", "gen-sub-2"]
         assert sorted(p.name for p in (ws / "subagents").iterdir()) == [
             "it2-s1-agent-a1.jsonl", "s1-agent-a1.jsonl"]
 

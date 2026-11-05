@@ -18,11 +18,15 @@ from openrouter_fakes import FAKE_KEY, GEN_COST, FakeOpenRouter, make_plan  # no
 def _interrupted_run(tmp_path, plan):
     """A run whose case was written but whose generations never landed."""
     case = write_run_result(tmp_path / "cases" / "c1" / "run_result.json",
-                            {"exit_code": 0, "cost_usd": 0.4, "message_ids": ["gen-fake-a", "gen-fake-b"]},
+                            {"exit_code": 0, "cost_usd": 0.4,
+                             "message_ids": ["msg-fake-a", "msg-fake-b"],
+                             "generation_ids": ["gen-fake-a", "gen-fake-b"]},
                             plan=plan, ledger=[])
     write_run_result(tmp_path / "run_result.json",
                      {"exit_code": 0, "cost_usd": None, "per_case": {"c1": case},
-                      "message_ids": ["gen-fake-a", "gen-fake-b"], "eval_params": {"max_budget_usd": 1}},
+                      "message_ids": ["msg-fake-a", "msg-fake-b"],
+                      "generation_ids": ["gen-fake-a", "gen-fake-b"],
+                      "eval_params": {"max_budget_usd": 1}},
                      plan=plan, ledger=[])
 
 
@@ -103,6 +107,15 @@ def test_checked_base_url_rules():
     with pytest.raises(ValueError, match="https"):
         bf.checked_base_url("http://gateway.example/api", explicit=True)
     assert bf.checked_base_url("http://127.0.0.1:9/api", explicit=True)
+
+
+def test_collect_sightings_keeps_legacy_message_ids_as_fallback(tmp_path):
+    (tmp_path / "run_result.json").write_text(json.dumps({
+        "message_ids": ["gen-legacy"], "generation_ids": ["gen-current"]}))
+    assert bf.collect_sightings(tmp_path) == [{"gen_id": "gen-current", "case_id": None}]
+
+    (tmp_path / "run_result.json").write_text(json.dumps({"message_ids": ["gen-legacy"]}))
+    assert bf.collect_sightings(tmp_path) == [{"gen_id": "gen-legacy", "case_id": None}]
 
 
 def test_offline_backfill_needs_the_key_and_a_run(tmp_path, monkeypatch, capsys):

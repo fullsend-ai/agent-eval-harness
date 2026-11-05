@@ -240,7 +240,10 @@ def reconcile(run_result: dict, ledger_rows: Iterable[dict], plan=None, *, key_u
         out["cost_usd_estimate"] = out["cost_usd"]
     estimate = _num(out.get("cost_usd_estimate"))
 
-    ids = message_ids if message_ids is not None else out.get("message_ids") or []
+    generation_ids = out.get("generation_ids")
+    if generation_ids is None:
+        generation_ids = out.get("message_ids") or []
+    ids = message_ids if message_ids is not None else generation_ids
     agent_rows = _generation_rows(rows, roles=("agent",))
     hook_rows = _generation_rows(rows, roles=("hook",))
     ok_agent = [r for r in agent_rows if r.get("status") == "ok"]

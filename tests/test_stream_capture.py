@@ -5,8 +5,9 @@ import json
 from conftest import make_assistant, make_result, to_jsonl
 
 from agent_eval.agent.stream_capture import (
+    claude_session_generation_ids,
     _is_real_model, count_subagent_turns, count_subagent_turns_by_model,
-    extract_usage,
+    extract_session_id, extract_usage,
 )
 
 
@@ -18,6 +19,88 @@ class TestExtractUsage:
         _, _, num_turns, seen_msg_ids, _, _, _ = result
         assert isinstance(seen_msg_ids, set)
         assert len(seen_msg_ids) == num_turns
+
+    def test_treats_null_usage_fields_as_zero(self):
+        """OpenRouter streams may emit explicit null token fields."""
+        event = make_assistant(
+            "msg_001",
+            input_tokens=None,
+            output_tokens=3,
+        )
+
+        usage, _, _, _, _, _, _ = extract_usage(to_jsonl([event]))
+
+        assert usage == {
+            "input": 0,
+            "output": 3,
+            "cache_read": 0,
+            "cache_create": 0,
+        }
+
+
+class TestClaudeSessionGenerationIds:
+    def test_reads_root_and_subagent_transcripts(self, tmp_path):
+        workspace = tmp_path / "work_space"
+        workspace.mkdir()
+        session_id = "session-123"
+        projects = tmp_path / "projects"
+        encoded = str(workspace).replace("/", "-").replace("_", "-")
+        session_dir = projects / encoded
+        session_dir.mkdir(parents=True)
+        (session_dir / f"{session_id}.jsonl").write_text(
+            json.dumps({"type": "assistant", "requestId": "gen-root"}) + "\n" +
+            json.dumps({"type": "assistant",
+                        "message": {"role": "assistant", "id": "gen-legacy"}}) + "\n")
+        subagents = session_dir / session_id / "subagents"
+        subagents.mkdir(parents=True)
+        (subagents / "agent.jsonl").write_text(
+            json.dumps({"type": "assistant", "requestId": "gen-sub"}) + "\n" +
+            json.dumps({"type": "assistant", "requestId": "msg-not-generation"}) + "\n")
+
+        ids = claude_session_generation_ids(workspace, session_id, projects)
+
+        assert ids == {"gen-root", "gen-sub", "gen-legacy"}
+
+    def test_requires_a_session_id(self, tmp_path):
+        assert claude_session_generation_ids(tmp_path, None, tmp_path) == set()
+
+    def test_rejects_unsafe_session_ids(self, tmp_path):
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        projects = tmp_path / "projects"
+        projects.mkdir()
+
+        for session_id in ("../escape", "/tmp/escape", "..", "."):
+            assert claude_session_generation_ids(workspace, session_id, projects) == set()
+
+    def test_rejects_transcript_symlinks(self, tmp_path):
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        session_id = "session-123"
+        projects = tmp_path / "projects"
+        encoded = str(workspace).replace("/", "-").replace("_", "-")
+        session_dir = projects / encoded
+        session_dir.mkdir(parents=True)
+        outside = tmp_path / "outside.jsonl"
+        outside.write_text(json.dumps({"requestId": "gen-outside"}) + "\n")
+        (session_dir / f"{session_id}.jsonl").symlink_to(outside)
+
+        assert claude_session_generation_ids(workspace, session_id, projects) == set()
+
+    def test_extracts_the_latest_result_session_id(self):
+        lines = [
+            json.dumps({"type": "result", "session_id": "old"}),
+            json.dumps({"type": "result", "session_id": "new"}),
+        ]
+
+        assert extract_session_id(lines) == "new"
+
+    def test_falls_back_to_init_session_id_before_result(self):
+        lines = [
+            json.dumps({"type": "system", "subtype": "init", "session_id": "session-123"}),
+        ]
+
+        assert extract_session_id(lines) == "session-123"
 
     def test_includes_subagent_ids_post_2_1_108(self, post_2_1_108_stream):
         """Post-2.1.108: seen_msg_ids includes foreground subagent message IDs."""
@@ -174,33 +257,41 @@ class TestPlaceholderModel:
 
 
 class TestMessageIds:
-    """The cost-truth key set (spec 014): root-stream ids merged with the
-    subagent transcripts' ids."""
+    """Claude message ids and OpenRouter generation ids remain separate."""
 
-    def test_subagent_message_ids_dedupes_and_ignores_non_assistant(self, tmp_path):
+    def test_subagent_ids_dedupe_and_ignore_non_assistant(self, tmp_path):
         from agent_eval.agent.stream_capture import subagent_message_ids
+        from agent_eval.agent.stream_capture import subagent_generation_ids
 
         sub = tmp_path / "subagents"
         sub.mkdir()
         (sub / "a.jsonl").write_text("\n".join([
-            json.dumps({"message": {"role": "assistant", "id": "gen-a1"}}),
-            json.dumps({"message": {"role": "assistant", "id": "gen-a1"}}),   # second block
+            json.dumps({"requestId": "gen-a1", "message": {"role": "assistant", "id": "msg-a1"}}),
+            json.dumps({"requestId": "gen-a1", "message": {"role": "assistant", "id": "msg-a1"}}),
+            json.dumps({"message": {"role": "assistant", "id": "gen-legacy"}}),
             json.dumps({"message": {"role": "user", "id": "u1"}}),
             "not json",
-            json.dumps({"message": {"role": "assistant", "id": "gen-a2"}}),
+            json.dumps({"requestId": "msg-not-generation", "message": {
+                "role": "assistant", "id": "msg-a2"}}),
         ]))
         (sub / "notes.txt").write_text("ignored")
-        assert subagent_message_ids(sub) == {"gen-a1", "gen-a2"}
+        assert subagent_message_ids(sub) == {"msg-a1", "msg-a2", "gen-legacy"}
+        assert subagent_generation_ids(sub) == {"gen-a1", "gen-legacy"}
         assert subagent_message_ids(tmp_path / "missing") == set()
+        assert subagent_generation_ids(tmp_path / "missing") == set()
 
-    def test_message_ids_for_run_merges_root_and_subagents(self, tmp_path):
+    def test_ids_for_run_merge_root_and_subagents(self, tmp_path):
         from agent_eval.agent.stream_capture import message_ids_for_run
+        from agent_eval.agent.stream_capture import generation_ids_for_run
 
         sub = tmp_path / "subagents"
         sub.mkdir()
-        (sub / "a.jsonl").write_text(json.dumps({"message": {"role": "assistant", "id": "gen-sub"}}) + "\n")
-        assert message_ids_for_run({"gen-root", "gen-sub"}, sub) == ["gen-root", "gen-sub"]
+        (sub / "a.jsonl").write_text(json.dumps({
+            "requestId": "gen-sub", "message": {"role": "assistant", "id": "msg-sub"}}) + "\n")
+        assert message_ids_for_run({"msg-root", "msg-sub"}, sub) == ["msg-root", "msg-sub"]
+        assert generation_ids_for_run({"gen-root", "gen-sub"}, sub) == ["gen-root", "gen-sub"]
         assert message_ids_for_run(None, tmp_path / "none") == []
+        assert generation_ids_for_run(None, tmp_path / "none") == []
 
 
 class TestProviderView:
@@ -208,9 +299,20 @@ class TestProviderView:
 
     def test_assistant_message_id(self):
         from agent_eval.agent.stream_capture import assistant_message_id
+        from agent_eval.agent.stream_capture import assistant_event_ids
+        from agent_eval.agent.stream_capture import extract_generation_ids
+
+        event = make_assistant("msg-1", model="z-ai/glm-5.2", request_id="gen-1")
+        legacy_event = make_assistant("gen-legacy", model="z-ai/glm-5.2")
         assert assistant_message_id(make_assistant("gen-1", model="z-ai/glm-5.2")) == ("gen-1", "z-ai/glm-5.2")
+        assert assistant_event_ids(event) == ("msg-1", "gen-1", "z-ai/glm-5.2")
+        assert assistant_event_ids(legacy_event) == ("gen-legacy", "gen-legacy", "z-ai/glm-5.2")
+        assert assistant_event_ids(make_assistant("msg-2")) == ("msg-2", None, "claude-sonnet-4-5")
         assert assistant_message_id({"type": "result"}) == (None, None)
         assert assistant_message_id({"type": "assistant", "message": {"id": ""}}) == (None, None)
+        assert extract_generation_ids(
+            [json.dumps(event), json.dumps(make_assistant("msg-2")),
+             json.dumps(legacy_event)]) == {"gen-1", "gen-legacy"}
 
     def test_classify_stream_errors(self):
         from agent_eval.agent.stream_capture import classify_stream_errors

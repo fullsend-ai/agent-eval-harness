@@ -117,6 +117,9 @@ def routing_audit(rows: Iterable[dict], plan, catalog=None, *, policy: str = "st
                 continue
             declared[key] = {k: v for k, v in spec.to_dict().items()
                              if k in ("order", "only", "ignore", "allow_fallbacks", "quantizations")}
+    # A pinned run with zero generation rows means collection or backfill
+    # failed, not that every request was compliant.
+    audit_complete = unattributed == 0 and (audited > 0 or not declared)
     return {
         # Nothing pinned means nothing to enforce, whatever the configured level.
         "enforcement": enforcement if declared else "none",
@@ -131,5 +134,5 @@ def routing_audit(rows: Iterable[dict], plan, catalog=None, *, policy: str = "st
         "degraded": bool(degraded_reason) and policy == "strict",
         "degraded_reason": degraded_reason,
         "served": served,
-        "audit_complete": unattributed == 0,
+        "audit_complete": audit_complete,
     }

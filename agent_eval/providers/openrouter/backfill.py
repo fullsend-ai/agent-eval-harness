@@ -51,14 +51,26 @@ def collect_sightings(run_dir: Path) -> list:
     seen: dict = {}
     for case_file in sorted(run_dir.glob("cases/*/run_result.json")):
         payload = _load(case_file) or {}
-        for gen_id in payload.get("message_ids") or []:
+        for gen_id in _generation_ids(payload):
             if is_generation_id(gen_id):
                 seen.setdefault(gen_id, {"gen_id": gen_id, "case_id": case_file.parent.name})
     run = _load(run_dir / "run_result.json") or {}
-    for gen_id in run.get("message_ids") or []:
+    for gen_id in _generation_ids(run):
         if is_generation_id(gen_id):
             seen.setdefault(gen_id, {"gen_id": gen_id, "case_id": None})
     return list(seen.values())
+
+
+def _generation_ids(payload: dict) -> list:
+    """Current ``generation_ids``, with legacy ``message_ids`` fallback.
+
+    Older run results stored OpenRouter ids in ``message_ids``; current runs
+    keep Claude ids there and OpenRouter ids in ``generation_ids``.
+    """
+    ids = payload.get("generation_ids")
+    if ids is None:
+        ids = payload.get("message_ids") or []
+    return ids if isinstance(ids, list) else []
 
 
 def checked_base_url(url: str, *, explicit: bool) -> str:

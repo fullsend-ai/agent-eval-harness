@@ -498,8 +498,8 @@ def test_malformed_result_event_fields_degrade_to_missing_metrics(tmp_path):
 
 
 def test_parse_trial_collects_assistant_message_ids(tmp_path):
-    """The trial transcript's assistant message ids are the cost-truth key set
-    for Harbor runs (spec 014); duplicates (one per content block) collapse."""
+    """The trial transcript's generation ids are the cost-truth key set for
+    Harbor runs (spec 014); duplicates (one per content block) collapse."""
     job = tmp_path / "job"
     tdir = job / "trial__case-1"
     (tdir / "verifier").mkdir(parents=True)
@@ -507,31 +507,37 @@ def test_parse_trial_collects_assistant_message_ids(tmp_path):
     (tdir / "agent").mkdir()
     (tdir / "agent" / "claude-code.txt").write_text("\n".join([
         json.dumps({"type": "system", "subtype": "init", "claude_code_version": "2.1.280"}),
-        json.dumps({"type": "assistant", "message": {"id": "gen-1", "model": "z-ai/glm-5.2"}}),
-        json.dumps({"type": "assistant", "message": {"id": "gen-1", "model": "z-ai/glm-5.2"}}),
-        json.dumps({"type": "assistant", "message": {"id": "gen-2", "model": "z-ai/glm-5.2"}}),
+        json.dumps({"type": "assistant", "requestId": "gen-1",
+                    "message": {"id": "msg-1", "model": "z-ai/glm-5.2"}}),
+        json.dumps({"type": "assistant", "requestId": "gen-1",
+                    "message": {"id": "msg-1", "model": "z-ai/glm-5.2"}}),
+        json.dumps({"type": "assistant", "requestId": "gen-2",
+                    "message": {"id": "msg-2", "model": "z-ai/glm-5.2"}}),
         json.dumps({"type": "result", "total_cost_usd": 1.2, "num_turns": 2, "duration_ms": 1000,
                     "usage": {"input_tokens": 1, "output_tokens": 1}}),
     ]))
     record = R.parse_trial(tdir)
     assert record is not None
-    assert record["message_ids"] == ["gen-1", "gen-2"]
+    assert record["message_ids"] == ["msg-1", "msg-2"]
+    assert record["generation_ids"] == ["gen-1", "gen-2"]
     assert record["cost_usd"] == 1.2
 
 
 def test_multi_step_trial_unions_message_ids_and_errored_trials_carry_the_field(tmp_path):
     job = tmp_path / "job"
     tdir = job / "trial__case-2"
-    for step, ids in (("create", ["gen-a", "gen-b"]), ("assess", ["gen-b", "gen-c"])):
+    for step, ids in (("create", ["a", "b"]), ("assess", ["b", "c"])):
         sdir = tdir / "steps" / step
         (sdir / "verifier").mkdir(parents=True)
         (sdir / "verifier" / "reward.json").write_text(json.dumps({"reward": 1.0}))
         (sdir / "agent").mkdir()
         (sdir / "agent" / "claude-code.txt").write_text("\n".join(
-            json.dumps({"type": "assistant", "message": {"id": i}}) for i in ids) + "\n")
+            json.dumps({"type": "assistant", "requestId": f"gen-{i}",
+                        "message": {"id": f"msg-{i}"}}) for i in ids) + "\n")
     record = R.parse_trial(tdir)
-    assert record is not None and sorted(record["message_ids"]) == ["gen-a", "gen-b", "gen-c"]
-    assert len(record["message_ids"]) == 3                     # deduplicated across steps
+    assert record is not None and sorted(record["message_ids"]) == ["msg-a", "msg-b", "msg-c"]
+    assert sorted(record["generation_ids"]) == ["gen-a", "gen-b", "gen-c"]
+    assert len(record["generation_ids"]) == 3                  # deduplicated across steps
     errored = job / "trial__case-3"
     errored.mkdir()
     (errored / "exception.txt").write_text("RuntimeError: pod not ready\n")
@@ -545,9 +551,12 @@ def test_price_trials_joins_each_trial_against_its_own_ids():
         {"source": "generation", "status": "backfill_failed", "gen_id": "gen-b1", "cost_usd": None},
     ]
     trials = [
-        {"case_id": "c", "trial_dir": "c__1", "cost_usd": 0.9, "message_ids": ["gen-a1", "gen-a2"]},
-        {"case_id": "c", "trial_dir": "c__2", "cost_usd": 0.8, "message_ids": ["gen-b1"]},
-        {"case_id": "d", "trial_dir": "d__1", "cost_usd": 0.7, "message_ids": []},
+        {"case_id": "c", "trial_dir": "c__1", "cost_usd": 0.9,
+         "message_ids": ["msg-a1", "msg-a2"], "generation_ids": ["gen-a1", "gen-a2"]},
+        {"case_id": "c", "trial_dir": "c__2", "cost_usd": 0.8,
+         "message_ids": ["msg-b1"], "generation_ids": ["gen-b1"]},
+        {"case_id": "d", "trial_dir": "d__1", "cost_usd": 0.7,
+         "message_ids": [], "generation_ids": []},
     ]
     R.price_trials(trials, rows)
     assert trials[0]["cost_usd"] == 0.03 and trials[0]["cost_source"] == "openrouter:generation"

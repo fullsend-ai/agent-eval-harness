@@ -57,11 +57,11 @@ class CaseBinding:
             message_index=message_index, model_requested=self.session.plan.skill.id,
             model_echo=model_echo, routing_sha=self.session.routing_sha)
 
-    def after_run(self, message_ids: Iterable[str]) -> int:
-        """Called once the agent process exited: sight every transcript id
+    def after_run(self, generation_ids: Iterable[str]) -> int:
+        """Called once the agent process exited: sight every generation id
         the stream did not show (subagent transcripts, ``json`` output mode)
         and the hook's own ids. Returns how many new ids were queued."""
-        n = sum(1 for i in (message_ids or []) if self.sight(i))
+        n = sum(1 for i in (generation_ids or []) if self.sight(i))
         for rec in _read_hook_ids(self.hook_ids_path):
             if self.sight(rec.get("id"), model_echo=rec.get("model"), role="hook"):
                 n += 1
@@ -141,9 +141,9 @@ class ProviderSession:
     def bind(self, case_id: Optional[str] = None, step_id: Optional[str] = None) -> CaseBinding:
         return CaseBinding(self, case_id, step_id)
 
-    def sight_trial(self, message_ids: Iterable[str], *, case_id: Optional[str],
+    def sight_trial(self, generation_ids: Iterable[str], *, case_id: Optional[str],
                     step_id: Optional[str] = None) -> int:
-        return self.bind(case_id, step_id).after_run(message_ids)
+        return self.bind(case_id, step_id).after_run(generation_ids)
 
     def pending(self) -> int:
         return self.backfill.pending()

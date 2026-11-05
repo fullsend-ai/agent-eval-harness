@@ -46,8 +46,9 @@ from agent_eval.evalhub.s3_dataset import DatasetInfo, download_dataset
 SESSION_FACTORY = None       # tests inject a ProviderSession subclass with fake timing
 
 # Provenance fields of the reconciled run-level run_result.json that travel
-# back to the client (results_mapper.PROVENANCE_ARTIFACT). The id list itself
-# stays in the pod; its size travels as message_ids_count.
+# back to the client (results_mapper.PROVENANCE_ARTIFACT). The generation-id
+# lists stay in the pod; their sizes travel as message_ids_count and
+# generation_ids_count.
 PROVENANCE_FIELDS = ("cost_usd", "cost_source", "cost_confidence", "cost_usd_estimate",
                      "cost_coverage", "cost_warnings", "cases_priced", "hook_cost_usd",
                      "providers", "routing", "provider", "budget")
@@ -215,6 +216,7 @@ def _case_payload(result: RunResult) -> dict:
         "per_model_turns": result.per_model_turns,
         "permission_denials": result.permission_denials or [],
         "message_ids": result.message_ids or [],
+        "generation_ids": result.generation_ids or [],
         "cost_source": result.cost_source,
         "error_class": result.error_class,
         "budget": result.budget,
@@ -245,6 +247,7 @@ def _finish_provider_plan(session, run_dir: Path, case_results: list) -> dict:
         "exit_code": max((cr["run_result"].exit_code for cr in case_results), default=-1, key=abs),
         "execution_mode": "evalhub", "cost_usd": None, "per_case": per_case,
         "message_ids": sorted({i for cr in case_results for i in (cr["run_result"].message_ids or [])}),
+        "generation_ids": sorted({i for cr in case_results for i in (cr["run_result"].generation_ids or [])}),
     }
     write_run_result(Path(run_dir) / "run_result.json", payload, plan=session.plan, ledger=session.ledger,
                      catalog=session.catalog)
@@ -255,6 +258,7 @@ def _finish_provider_plan(session, run_dir: Path, case_results: list) -> dict:
         final = payload
     provenance = {k: final.get(k) for k in PROVENANCE_FIELDS if k in final}
     provenance["message_ids_count"] = len(final.get("message_ids") or [])
+    provenance["generation_ids_count"] = len(final.get("generation_ids") or [])
     return provenance
 
 

@@ -108,7 +108,7 @@ enforcement levels** for the declared routing pins, one contract for everything 
 
 | Role | Talks to | How | Routing pins | Cost truth | Who holds which key |
 | --- | --- | --- | --- | --- | --- |
-| agent (`skill`/`subagent`/`hook`), local claude-code | `https://openrouter.ai/api` (`/v1/messages`) | env template written into the per-run overlay (`ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, blank `ANTHROPIC_API_KEY`, blank Vertex vars, `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU,FABLE}_MODEL` + `CLAUDE_CODE_SUBAGENT_MODEL` aliases; Direct transport contract) | model-suffix variant in the id (`:exacto` recommended for tool-calling agents — accepted, VERIFIED; `:nitro`/`:floor`) + the enforcement level below; **no request-body pins** (Claude Code cannot send them) | **per request**: `GET /api/v1/generation?id=<gen-…>` backfill keyed on the `assistant.message.id`s in Claude Code's stream-json (`cost_source: openrouter:generation`; probe #12 VERIFIED 2026-09-16) + `GET /api/v1/key` usage delta as cross-check / < 0.8-coverage fallback | agent holds the run's inference key |
+| agent (`skill`/`subagent`/`hook`), local claude-code | `https://openrouter.ai/api` (`/v1/messages`) | env template written into the per-run overlay (`ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, blank `ANTHROPIC_API_KEY`, blank Vertex vars, `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU,FABLE}_MODEL` + `CLAUDE_CODE_SUBAGENT_MODEL` aliases; Direct transport contract) | model-suffix variant in the id (`:exacto` recommended for tool-calling agents — accepted, VERIFIED; `:nitro`/`:floor`) + the enforcement level below; **no request-body pins** (Claude Code cannot send them) | **per request**: `GET /api/v1/generation?id=<gen-…>` backfill keyed on the run's `generation_ids` — top-level `requestId`s from stream-json/persisted transcripts, with the legacy `assistant.message.id` fallback (`cost_source: openrouter:generation`; probe #28 VERIFIED 2026-11-03, probe #12 superseded) + `GET /api/v1/key` usage delta as cross-check / < 0.8-coverage fallback | agent holds the run's inference key |
 | agent, Harbor podman | same | same env block, passed via `--agent-env` (Harbor merges it last, `harbor 0.13.1 agents/base.py:288-291`, VERIFIED; value-free argv via carriers, harbor/run.py:216-233); host Vertex vars **not** forwarded while a plan is active | same | same, gen ids parsed from the trial's captured stream-json (harbor/results.py:80-160 extended; probe #25 UNVERIFIED) + key-usage fallback | same |
 | agent, Harbor Kubernetes / EvalHub | same | credentials Secret carries `OPENROUTER_API_KEY`; the harness maps it to `ANTHROPIC_AUTH_TOKEN` via `secretKeyRef` next to the existing `envFrom` (kubernetes.py:244-246); non-secret plan env in the pod spec; Vertex vars already excluded (kubernetes.py:42-50) | same | same (transcripts come back through the job dir) | same |
 | judges | `https://openrouter.ai/api/v1/chat/completions` | OpenAI SDK, dedicated client (never process-global `OPENAI_*`), `extra_body` routing, `usage.cost` inline | judge pins opt-in (`judge.inherit_pins`), `tool_choice` ladder (Decision 25) — unchanged | `source: judge` ledger records, `judge_cost_usd` in `summary.yaml` | judge client holds `OPENROUTER_API_KEY` in the harness process only |
@@ -152,7 +152,8 @@ Load-bearing facts, by evidence class:
   forced `{type: tool, name}` under pins can 404 `not_found` ("No endpoints found") on a
   model that routes fine unpinned; provider ids match by slug or display name; bare,
   `:variant` and `[1m]` ids all echo the bare slug; keep-alive comments are absent on fast
-  streams; Claude Code's direct-mode stream-json `message.id`s are `gen-…` ids and its
+  streams; Claude Code 2.1.273's direct-mode stream-json `message.id`s were `gen-…` ids,
+  Claude Code 2.1.314 instead exposes `requestId` in its persisted transcript, and
   `modelUsage` keys echo the bare slug.
 - **DOCUMENTED (docs prose, not contradicted by the probes):** keep-alive comments
   `: OPENROUTER PROCESSING` are emitted on slow streams; errors carry a canonical
@@ -188,7 +189,7 @@ Load-bearing facts, by evidence class:
 
 Without a proxy on the HTTP path, every Claude-Code-side behaviour above **is** load-bearing
 for the default mode. PR-5 (MVP) ships with `enforcement: audit`, whose two inputs are
-already VERIFIED: stream-json gen ids (probe #12) and `/generation` `provider_name` +
+already VERIFIED: generation-id collection (probe #28; probe #12 superseded) and `/generation` `provider_name` +
 `total_cost` (probe #6); the open rows #25 and #26 gate only per-request cost on podman and
 `key-guardrail` respectively.
 
@@ -347,7 +348,7 @@ future provider kind writes the same file.
   "provider_kind": "openrouter",       // openrouter | anthropic | openai (anthropic/openai only on judge records)
   "role": "agent",                     // agent | hook | judge | key-usage (run-level delta record, one per run)
   "source": "generation",              // generation (GET /api/v1/generation backfill) | key-usage (GET /api/v1/key delta) | judge (judge-client response, usage.cost inline)
-  "gen_id": "gen-01J…",                // assistant.message.id from stream-json (agent/hook) or response id (judge); null on key-usage
+  "gen_id": "gen-01J…",                // generation id from requestId/legacy message.id/session transcript (agent/hook) or response id (judge); null on key-usage
   "message_index": 17,                 // ordinal of the assistant message in the case's stream-json; ties the row back to the transcript without storing content
   "model_requested": "z-ai/glm-5.2:exacto",      // the id the harness put in --model / the alias env (agent) or the judge request
   "model": "z-ai/glm-5.2",                       // routing_key(model_requested)
@@ -370,10 +371,11 @@ future provider kind writes the same file.
 ```
 
 **Row semantics.** OpenRouter commits and bills a
-generation once it answers 200; the harness learns of it from the `gen-…` id that
-`stream_capture.py` already reads from every `assistant.message.id` (stream_capture.py:106,
-203, 244; probe #12 VERIFIED) and, for a stream Claude Code abandoned mid-way (case
-timeout, killed process), from the same id — the generation is billed either way and
+generation once it answers 200; the harness learns of it from the run's `generation_ids`:
+the top-level `requestId` when Claude Code emits it, the legacy `assistant.message.id`
+fallback when it does not, and the persisted session transcript when stream-json omits the
+id (probe #28 VERIFIED). For a stream Claude Code abandoned mid-way (case timeout, killed
+process), the same collection applies — the generation is billed either way and
 `/generation` still answers for it, so **there is no "truncated" class**: a committed
 generation is one row, `status: ok`, authoritative `cost_usd`, whether or not the client
 read it to the end. The three row states are:
@@ -420,8 +422,8 @@ Adds/normalises these fields (all optional; old files stay readable):
 | `cost_usd` | agent spend. Provider active: when generation coverage ≥ 0.8, Σ ledger `cost_usd` over `role: agent` rows with `status: ok` (6 dp); when coverage < 0.8, the `key-usage` row's delta (the only number that covers the missing ids); `null` when neither landed (no ok rows and no key delta). Provider inactive: unchanged. Never a mix of the two sources and never the estimate. |
 | `cost_usd_estimate` | the runner's own number (Claude Code's Anthropic-priced estimate, 2–60× inflated on OpenRouter); set once, never overwritten (idempotent). |
 | `cost_source` | `<origin>:<method>`: `openrouter:generation` (Σ backfilled rows, coverage ≥ 0.8), `openrouter:key-usage` (key delta, coverage < 0.8), `runner:estimate` (provider active but no truth source landed **and** the operator passed `--allow-estimate`, otherwise `unavailable`; also written **by the Claude Code runner itself, never by reconcile**, when its own env carries an `ANTHROPIC_BASE_URL` whose host is not `api.anthropic.com` — an operator-run Anthropic-compatible endpoint through plain `execution.env`, no plan: the CLI's Anthropic-priced number is an estimate there, and reconcile leaves such a file untouched), `runner:reported` (Claude Code on Anthropic-direct/Vertex, opaque CLI `metrics.json`; legacy default when the field is missing), `harness:estimate` (the codex runner's own price-table estimate), `unavailable`. Legacy literals are recognised by every reader: `openrouter-reconciled` (files patched by `reconcile_cost.py`) reads as real OpenRouter cost, `runner-reported`/`harness-estimate` read as their colon forms. |
-| `cost_confidence` | **by coverage** (`requests_priced / requests`, over the stream-json `message_ids` of the run — the denominator is what the transcript says happened, not what the ledger holds): `high` — coverage ≥ 0.95 (the expected outcome now that probe #12 is VERIFIED) **and** the key-usage cross-check, when available, is within 5 %; `medium` — coverage in [0.8, 0.95), or key-usage-only on a key asserted dedicated (`key-guardrail`'s per-run key, or `budget.dedicated_key: true` under `audit`); `low` — coverage < 0.8 on a non-dedicated key, or coverage ≥ 0.8 with a key-usage deviation > 5 % (something else spent on the key, or ids are missing from the transcript). |
-| `cost_coverage` | `{requests, requests_priced, requests_missing_cost, requests_unattributed, coverage, key_usage_delta_usd, key_usage_settle_s}` — `requests` = distinct `gen-…` ids seen in stream-json (agent + hook), `requests_priced` = `status: ok` rows, `requests_missing_cost` = `backfill_failed`, `requests_unattributed` = rows without `provider_name` (expected 0; `/generation` always carries it). |
+| `cost_confidence` | **by coverage** (`requests_priced / requests`, over the run's `generation_ids` — the denominator is what the transcript says happened, not what the ledger holds): `high` — coverage ≥ 0.95 (the expected outcome now that probe #28 is VERIFIED) **and** the key-usage cross-check, when available, is within 5 %; `medium` — coverage in [0.8, 0.95), or key-usage-only on a key asserted dedicated (`key-guardrail`'s per-run key, or `budget.dedicated_key: true` under `audit`); `low` — coverage < 0.8 on a non-dedicated key, or coverage ≥ 0.8 with a key-usage deviation > 5 % (something else spent on the key, or ids are missing from the transcript). |
+| `cost_coverage` | `{requests, requests_priced, requests_missing_cost, requests_unattributed, coverage, key_usage_delta_usd, key_usage_settle_s}` — `requests` = distinct `gen-…` ids in `generation_ids` (agent + hook; stream-json, legacy `message.id` fallback, and persisted transcript), `requests_priced` = `status: ok` rows, `requests_missing_cost` = `backfill_failed`, `requests_unattributed` = rows without `provider_name` (expected 0; `/generation` always carries it). |
 | `cost_warnings` | list of strings, e.g. `"ledger sum $1.61 differs from key-usage delta $1.67 by 3.6%"`, `"3 of 1341 requests lack provider attribution; routing audit incomplete"`, `"per-model cost: no ledger rows for modelUsage key 'z-ai/glm-5.2-20260616'"`. |
 | `hook_cost_usd` | Σ ledger `cost_usd` for `role: hook`; excluded from `cost_usd` and from `compute_run_metrics`. |
 | `providers` | `{"<provider slug>": {"requests": N, "cost_usd": X}}`; unattributed records under `"unknown"`. |
@@ -850,8 +852,9 @@ of `openrouter.ai` or a pure function over files in `<run_dir>/provider/`.
   | `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` | `"1"` |
 
   `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY` is not set. Cost truth is per request on
-  every target: the `gen-…` ids in Claude Code's stream-json (`RunResult.message_ids`,
-  probe #12 VERIFIED 2026-09-16; the trial transcript on Harbor) are backfilled from
+  every target: the `gen-…` ids in `RunResult.generation_ids` (stream-json, the legacy
+  `message.id` fallback, and the persisted session transcript; probe #28 VERIFIED
+  2026-11-03, with probe #12 superseded; the trial transcript on Harbor) are backfilled from
   `/generation` by `generation.py`, and the `/key` delta is the cross-check (Decision 1).
   **Targets:** `overlay` = the full block with literal secrets; `harbor_carrier` = the
   same block with `secrets="ref"` (the value travels in the harbor child env under a carrier
@@ -971,8 +974,8 @@ of `openrouter.ai` or a pure function over files in `<run_dir>/provider/`.
     **settle max 60 s** — probe #7 observed the update 20.3 s after a request). A delta that
     is zero or smaller than ledgered requests × the minimum endpoint price is inconsistent →
     `cost_warnings` rather than a small positive number. The generation backfill over the
-    stream-json `message_ids` is the primary source (`cost_source: openrouter:generation`,
-    probe #12) and the key delta is compared against Σ generation cost (> 5 % → warning);
+    generation-id backfill is the primary source (`cost_source: openrouter:generation`,
+    probe #28) and the key delta is compared against Σ generation cost (> 5 % → warning);
     only when generation coverage < 0.8 does the key delta become the source
     (`openrouter:key-usage`, `cost_confidence` per Reconcile), and only when both fail is
     `cost_source: unavailable` written.
@@ -1005,8 +1008,10 @@ of `openrouter.ai` or a pure function over files in `<run_dir>/provider/`.
 ### `agent_eval/agent/base.py`
 
 `RunResult` (:15-30) gains, all defaulted to `None`: `cost_source`, `cost_usd_estimate`,
-`providers`, `message_ids: list[str]` (the **cost-truth key set** — probe #12 VERIFIED
-2026-09-16 that on a direct OpenRouter connection these are `gen-…` generation ids),
+`providers`, `message_ids: list[str]` (Claude assistant message ids, used for turn
+accounting) and `generation_ids: list[str]` (OpenRouter generation ids — top-level
+`requestId` values, the legacy `message.id` fallback, and persisted-transcript ids —
+the **cost-truth key set**),
 `error_class` (from the runner's own error output, `errors.py`), `budget` (dict as in
 Reconcile). `execute()`'s signature
 (:56-67) is unchanged: the plan is a constructor argument, not a per-call one.
@@ -1015,10 +1020,11 @@ Reconcile). `execute()`'s signature
 
 `extract_usage` (:65-160) already collects `seen_msg_ids` (:105-112); expose them on
 `RunResult.message_ids` (root stream) merged with ids from `count_subagent_turns`
-(:165) transcripts. On a direct OpenRouter connection every assistant `message.id` is a
-`gen-…` generation id (probe #12: 2 per turn, including the `generate_session_title`
-background call, whose cost is real spend and is therefore included), so each id is handed
-to the `generation.py` worker **as the stream is read** (a per-message callback the
+(:165) transcripts. Current OpenRouter transcripts carry the generation id in the
+assistant event's top-level `requestId` (`gen-…`) and Claude's `message.id` separately;
+collect both, keep the latter for turn counting, and hand every generation id (including
+the legacy `message.id` fallback and persisted-transcript ids) to
+the `generation.py` worker **as the stream is read** (a per-message callback the
 runner installs when a plan is active; `extract_usage` itself stays a pure post-hoc
 function for callers without a plan) — not only at run end — and each id yields one
 ledger record `source: generation`, `role: agent` (or `hook` for the ids the same collector drains from the
@@ -1196,9 +1202,9 @@ reach a subprocess. Nothing else is scrubbed.
 - `results.py` — **gen-id extraction from trial artefacts.** `_extract_transcript_metrics`
   (:80-160; reached through `_agent_transcript_metrics(trial_dir / "agent")`, :161-168,
   :335) already walks the trial's captured stream-json line by line (:87-100) and reads
-  `total_cost_usd` (:114); it now also collects every `assistant` `message.id` (the same
-  rule as stream_capture.py:105-112, shared code) and returns `message_ids` +
-  `model_echo` per id. Because the trial transcript is per trial and the ids are per
+  `total_cost_usd` (:114); it now also collects Claude `message_ids` and OpenRouter
+  `generation_ids` (top-level `requestId`, with the legacy `assistant.message.id`
+  fallback) plus `model_echo` per id. Because the trial transcript is per trial and the ids are per
   request, attribution is **per trial, exact** — no `ts`-window split, no shared-`case_id`
   ambiguity (replications of one case get their own ids). Ids
   are fed to the host-side `generation.py` worker when `run.py` parses the job dir after
@@ -1210,7 +1216,7 @@ reach a subprocess. Nothing else is scrubbed.
   `total_cost_usd`, and per-step records the same by `step_id`; job totals (:583-633) carry
   `cost_source`/`cost_coverage`/`providers`/`routing`/`budget` from one run-level
   `reconcile()`. **Probe #25 (UNVERIFIED, blocks per-request cost on podman in PR-5):**
-  Harbor's captured agent transcript contains the `assistant.message.id`s (it is Claude
+  Harbor's captured agent transcript contains generation ids (it is Claude
   Code's own `--output-format stream-json`, so this is expected, but Harbor 0.13.1's
   `installed/claude_code.py` post-processing has not been checked for id stripping).
   **Fallback if it does not:** the run-level key-usage delta (`GET /api/v1/key` before
@@ -2087,7 +2093,7 @@ env var. CLI: `--model openrouter:/…`, `--judge-model openrouter:/…`, `--str
   no further GETs; concurrency bounded to `min(8, parallelism × 2)`; ids are fed **as
   sighted** by the stream-capture callback (a slow stream with 20 messages produces 20 GETs
   before the process exits) and by `results.py` on Harbor; **coverage math** over
-  `RunResult.message_ids` (denominator = transcript ids, not ledger rows); non-`gen-`
+  `RunResult.generation_ids` (denominator = transcript ids, not ledger rows); non-`gen-`
   ids never queried; `/generation provider_name` display-name → slug via the catalog;
   `key_usage_delta` settle logic (first read at plan build, run-end read after ≥ 20 s,
   polled until stable for two polls, 60 s max); source selection per Reconcile (coverage
@@ -2177,8 +2183,8 @@ env var. CLI: `--model openrouter:/…`, `--judge-model openrouter:/…`, `--str
   next to the call, so a renumbering of line anchors fails the test loudly rather than
   silently; (c) `write_run_result` calls `reconcile(` exactly once; (d) the same filename
   grep over `agent_eval/harbor/run.py` finds only the helper call. Runs without a key.
-- `tests/test_stream_capture.py`: `message_ids` returned for root + subagent transcripts
-  (probe #12 fixture: 2 ids per turn incl. the `generate_session_title` call); the
+- `tests/test_stream_capture.py`: `message_ids` and `generation_ids` returned for root +
+  subagent transcripts (probe #12 legacy shape and probe #28 current shape); the
   per-message callback fires once per id **while the stream is read** (order preserved,
   before `extract_usage` returns) and is a no-op when no plan is installed; non-`gen-` ids
   (Anthropic/Vertex fixture) are collected but never handed to the worker; `error` events
@@ -2230,8 +2236,8 @@ env var. CLI: `--model openrouter:/…`, `--judge-model openrouter:/…`, `--str
   prefix (:541-548); `create_openrouter_secret`/`delete_openrouter_secret` shape and the
   delete being invoked from `plan.close()`; a config with no `openrouter:/` role produces
   today's manifest byte-for-byte.
-- `tests/test_harbor_results.py`: `_extract_transcript_metrics` returns `message_ids` +
-  `model_echo` from a captured Harbor stream-json fixture (the shared id rule with
+- `tests/test_harbor_results.py`: `_extract_transcript_metrics` returns `message_ids`,
+  `generation_ids`, and `model_echo` from a captured Harbor stream-json fixture (the shared id rule with
   stream_capture.py); per-trial ledger join is exact by gen id (two trials of one case never
   share a row; no time-window split); per-step `cost_usd` by `step_id`; job totals carry
   `cost_source`/`cost_coverage`/`providers`/`routing`/`budget` from one run-level reconcile;
@@ -2292,7 +2298,7 @@ env var. CLI: `--model openrouter:/…`, `--judge-model openrouter:/…`, `--str
   the subagent request also reaches the echo server with the same auth and
   `CLAUDE_CODE_SUBAGENT_MODEL` as its `model` (probe 1, subagent half — VERIFIED on
   2.1.273+, kept green here); (c)
-  fixture `basic` replayed → exit 0, text on stdout, `RunResult.message_ids == ["gen-REDACTED-1", …]`
+  fixture `basic` replayed → exit 0, text on stdout, `RunResult.generation_ids == ["gen-REDACTED-1", …]`
   (the fixture ids) and the backfill worker issued one `GET /api/v1/generation?id=` per id
   against the same echo server (which answers 404 once, then 200 — the backoff path with
   the real worker); (d) the three-line `ANTHROPIC_CUSTOM_HEADERS` value (`HTTP-Referer`,
@@ -2533,9 +2539,10 @@ env var. CLI: `--model openrouter:/…`, `--judge-model openrouter:/…`, `--str
    only — Claude Code's env template (`ANTHROPIC_BASE_URL=https://openrouter.ai/api`,
    `ANTHROPIC_AUTH_TOKEN=<key>`, blank `ANTHROPIC_API_KEY`, Vertex vars blanked,
    `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU,FABLE}_MODEL` + `CLAUDE_CODE_SUBAGENT_MODEL`
-   aliases). Choice: (c). Why: the probes make direct *viable*, not merely possible — #12
-   (stream-json `message.id` is the OpenRouter `gen-…` id and `GET /generation` answers for
-   it → per-request cost truth without an in-stream tap), #5 (explicit `order` +
+   aliases). Choice: (c). Why: the probes make direct *viable*, not merely possible — #12/#28
+   (the generation id is recoverable from Claude Code's legacy stream shape or persisted
+   transcript and `GET /generation` answers for it → per-request cost truth without an
+   in-stream tap), #5 (explicit `order` +
    `allow_fallbacks: false` beats Auto Exacto 20/20 under `tool_choice: auto` → pins are
    enforceable *and* auditable from `/generation.provider_name`), #6 (`usage.cost ==
    total_cost`, 8–13 s lag → the backfill is exact, only late), #3/#13/#20 (`/messages`
@@ -2937,7 +2944,7 @@ their PRs.
 | 9 | **VERIFIED (2026-09-16, CLI 2.1.273+, `probes/probe_cli_report_2026-09-16.json`):** a single-header `ANTHROPIC_CUSTOM_HEADERS` (`x-eval-run-id: …`) from the settings env was present on the root requests **and** on the subagent request. Together with row 27 (multi-header form) this puts the whole attribution set (`HTTP-Referer` + `X-OpenRouter-Title` [+ optional `x-eval-run-id`]) in PR-5; the run tag stays optional (`run_id_header`, activity-page tagging only — cost and per-case attribution come from gen ids, Decision 23). | No key: `specs/014-openrouter-provider/probes/probe_claude_cli.py`; inspect the recorded headers across root and subagent requests. Kept green by `test_claude_cli_direct` (d). | PR-5 |
 | 10 | **VERIFIED (2026-09-16, CLI 2.1.273+, `probes/probe_cli_report_2026-09-16.json`):** the PreToolUse hook subprocess inherits the settings-env values Claude Code applied (`ANTHROPIC_BASE_URL`, blanked Vertex vars, `ANTHROPIC_AUTH_TOKEN`), so an Anthropic `models.hook` alongside an OpenRouter agent **would** be redirected to OpenRouter and 404 on its slug — the load-time rejection of a Vertex/Anthropic hook under a plan (Config validation, tools.py) rests on evidence rather than a conditional. The hook's own Anthropic client therefore reaches OpenRouter **directly** with the overlay env; its `gen-…` ids ledger as `role: hook` (`hook_cost_usd`). | No key: `specs/014-openrouter-provider/probes/probe_claude_cli.py` records the hook subprocess env. `test_claude_cli_direct` (i) asserts the hook's request is distinguishable (its own `message.id`) from the agent's. | PR-5 |
 | 11 | **DEFERRED — not executed:** the only podman requirement is **container egress to `openrouter.ai`** (no host-side process, no `host.containers.internal` reachability needed). The podman machine on the dev box was not running, so the check did not run. Public TLS, CA/proxy vars forwarded as today (podman.py:36-49). | No key, when the machine is up: `podman run --rm docker.io/library/python:3.12-alpine python3 -c "import urllib.request;print(urllib.request.urlopen('https://openrouter.ai/api/v1/providers',timeout=20).status)"` → expect `200`. | PR-5 (podman acceptance only; #2 is the full e2e) |
-| 12 | **VERIFIED (2026-09-16, `probes/probe_report_2026-09-16_run2.json`):** direct-mode `claude --print --output-format stream-json` exits 0; assistant `message.id` values ARE `gen-…` ids (2 per turn incl. a `generate_session_title` background call); `assistant.message.model` and `result.modelUsage` keys echo the **bare** slug; `GET /generation` for the CLI's gen id → 200 after 9.4 s with `total_cost 0.00165633` vs Claude Code's `total_cost_usd` estimate 0.1005 (~60× inflated); stderr shows a harmless `[claude-code:unrecognized_model] {"model":"z-ai/glm-5.3-flash","query_source":"generate_session_title"}`. The run went to `openrouter.ai` despite `CLAUDE_CODE_USE_VERTEX=1` in user settings (probe #1, CLI half) and Claude Code's `anthropic-beta` headers were tolerated (probe #20). Claude Code's stream-json `message.id` is OpenRouter's `gen-…` id; `modelUsage` keys echo the bare slug. | **KEY**: direct env template, `claude --print --output-format stream-json --verbose`; grep `"id":"gen-`; record `modelUsage` keys and `message.model`; `GET /generation?id=`. Result: gen-id backfill is the per-request cost truth (`cost_source: openrouter:generation`); the key-usage delta is the cross-check; join-rule fixture = bare-slug echo (see #19). | PR-6, PR-4 |
+| 12 | **SUPERSEDED by #28 (2026-11-03); originally VERIFIED (2026-09-16, `probes/probe_report_2026-09-16_run2.json`):** direct-mode `claude --print --output-format stream-json` exits 0; assistant `message.id` values ARE `gen-…` ids (2 per turn incl. a `generate_session_title` background call); `assistant.message.model` and `result.modelUsage` keys echo the **bare** slug; `GET /generation` for the CLI's gen id → 200 after 9.4 s with `total_cost 0.00165633` vs Claude Code's `total_cost_usd` estimate 0.1005 (~60× inflated); stderr shows a harmless `[claude-code:unrecognized_model] {"model":"z-ai/glm-5.3-flash","query_source":"generate_session_title"}`. The run went to `openrouter.ai` despite `CLAUDE_CODE_USE_VERTEX=1` in user settings (probe #1, CLI half) and Claude Code's `anthropic-beta` headers were tolerated (probe #20). Claude Code's stream-json `message.id` is OpenRouter's `gen-…` id; `modelUsage` keys echo the bare slug. | **KEY**: direct env template, `claude --print --output-format stream-json --verbose`; grep `"id":"gen-`; record `modelUsage` keys and `message.model`; `GET /generation?id=`. Result: gen-id backfill is the per-request cost truth (`cost_source: openrouter:generation`); the key-usage delta is the cross-check; join-rule fixture = bare-slug echo (see #19). The legacy `message.id` shape remains supported as a fallback. | PR-6, PR-4 |
 | 13 | **VERIFIED (2026-09-16, run1):** a VALID key sent as `x-api-key` (i.e. a non-empty `ANTHROPIC_API_KEY`) **works** on `/messages` (200). A valid key sent as `x-api-key` works or fails cleanly. | **KEY**: one request with `x-api-key` only. Result: the blank `ANTHROPIC_API_KEY` is hygiene (do not leak a stale Anthropic key; avoid cached-OAuth confusion), not correctness — validation severity = **warning** (Config validation; Decision 7). | PR-5 |
 | 14 | **VERIFIED on the installed versions (2026-09-16, openai 2.30.0 and 2.46.0):** `OpenAI(default_headers=, max_retries=, timeout=, base_url=)` and `chat.completions.create(extra_body=, extra_headers=, tool_choice=, max_tokens=, max_completion_tokens=)` exist and the response models expose pydantic `model_extra` (→ `usage.cost`/`provider`). These have been part of the v1 client since openai 1.0, so the `>=1.70` floor (pyproject.toml:35) is safe; **PR-1 CI pins/verifies the 1.70 floor** in a scratch venv. | No key: introspection on the installed client (done); PR-1 CI: `pip install openai==1.70` in a scratch venv + the fake-server unit tests; raise the floor (Containerfile + ensure_deps) only if that job fails. | PR-1 (floor re-pinned in CI) |
 | 15 | **Measurement, not an assertion of a winner:** which layer Claude Code applies inside the Harbor container when a baked project settings.json env key and a `--agent-env` process env key overlap (HOME=/workspace, CLAUDE_CONFIG_DIR=/logs/agent/sessions). Probe #1 covers settings-vs-settings; this is the sole settings-vs-process probe. Interception bakes **no** provider env key (there is no per-case header to bake), so the design carries everything via `--agent-env` and this row is a guard against a future baked key, not an MVP gate. | No key: one podman trial against an echo endpoint with a sentinel `ANTHROPIC_CUSTOM_HEADERS` baked and a different one via `--agent-env`; record which arrives, plus `Authorization` (dummy token). | PR-7 (guard; low) |
@@ -2950,9 +2957,10 @@ their PRs.
 | 22 | **RESOLVED for Claude Code 2.1.273+ (2026-09-16, `probes/probe_cli_report_2026-09-16.json`):** the CLI made **zero** calls to `POST /v1/messages/count_tokens` in a 3-turn direct run with a tool call and a subagent; OpenRouter's 404 on that route is moot for this version. **Watch item:** re-run `specs/014-openrouter-provider/probes/probe_claude_cli.py` on CLI upgrades; if `count_tokens` appears, OpenRouter 404s it. | No key: `specs/014-openrouter-provider/probes/probe_claude_cli.py` records every route the CLI hits; `test_claude_cli_direct` (e) asserts zero `count_tokens` calls so an upgrade that starts calling it fails CI. | (watch item) |
 | 23 | **VERIFIED (2026-09-16, CLI 2.1.273+, `probes/probe_cli_report_2026-09-16.json`):** `claude --print --max-budget-usd 0` is **rejected** by the CLI ("--max-budget-usd must be a positive number greater than 0", exit 1, no request). Consequence: execute.py/claude_code.py must **not** pass `0` — a resolved cap `≤ 0`/`None` **omits the flag** (no CLI cap, `cli_cap_usd: null`); the key-guardrail `limit_usd` is unaffected (Budget mapping; Decision 10). | No key: `specs/014-openrouter-provider/probes/probe_claude_cli.py` (done). `test_claude_cli_direct` (f) asserts the flag is omitted for cap ≤ 0 on the recorded argv. | PR-5 |
 | 24 | Claude Code's retry behaviour on a 503/529 with `Retry-After` (honoured? max attempts? backoff ceiling?). Informational — there is no harness cooldown to tune (Decision 11); the answer documents how long a case can stall on an OpenRouter-side provider outage before the case timeout is the only backstop, and feeds the `case timeout < PIPELINE_WAVE_STALL_SECS` guidance. | No key: echo server answers 503 + `Retry-After: 5` to `claude --print "say hi"`; time the attempts. | — (docs; low) |
-| 25 | **UNVERIFIED:** Harbor's captured trial artefacts (`<trial>/agent/claude-code.txt`, read by harbor/results.py:163-168 → `_extract_transcript_metrics` :80-160) contain the assistant `message.id`s (`gen-…`) — it is Claude Code's own `--output-format stream-json`, so this is expected, but harbor 0.13.1's `installed/claude_code.py` post-processing has not been checked for id stripping. Determines whether per-trial cost on podman/K8s is per-request (`openrouter:generation`) or key-usage-only. | No key: one podman trial against the local echo server replaying the `basic` fixture (ids `gen-REDACTED-<n>`); grep the trial dir for `"id":"gen-`; also check `result.modelUsage` keys survive. Fallback if stripped: per-trial `cost_usd: null`, run-level `openrouter:key-usage`, `audit_complete: false` (Known limitations › Harbor podman). | PR-5 |
+| 25 | **UNVERIFIED:** Harbor's captured trial artefacts (`<trial>/agent/claude-code.txt`, read by harbor/results.py:163-168 → `_extract_transcript_metrics` :80-160) contain generation ids (`requestId` or the legacy `message.id`) — it is Claude Code's own `--output-format stream-json`, so this is expected, but harbor 0.13.1's `installed/claude_code.py` post-processing has not been checked for id stripping. Determines whether per-trial cost on podman/K8s is per-request (`openrouter:generation`) or key-usage-only. | No key: one podman trial against the local echo server replaying the `basic` fixture (ids `gen-REDACTED-<n>`); grep the trial dir for generation ids; also check `result.modelUsage` keys survive. Fallback if stripped: per-trial `cost_usd: null`, run-level `openrouter:key-usage`, `audit_complete: false` (Known limitations › Harbor podman). | PR-5 |
 | 26 | **DOCUMENTED / UNVERIFIED:** management-API key guardrail semantics — `POST /api/v1/keys` field names for the allowed-provider list and `limit` (USD), whether the allow-list is per key or account-wide, how it interacts with the account's paid-training / ZDR data policy (the filter that made `deepseek-v4.1-flash` unroutable), whether a request outside the allow-list fails with a routing 404 or is silently re-routed, `limit` semantics (hard 402 vs soft), and that `DELETE /api/v1/keys/{hash}` revokes immediately. Needed for `enforcement: key-guardrail` to be **server-side** enforcement rather than a label. | **KEY (management)**: with `OPENROUTER_MANAGEMENT_KEY` exported, `specs/014-openrouter-provider/probes/probe_openrouter.py --management`: create a key with allow-list `[z-ai]` and `limit: 0.01`; one pinned-compatible request → 200 served by z-ai; one request on a slug z-ai does not serve → record status/body; spend past the limit → record the 402 body; `DELETE` → a follow-up request 401s; never prints key values. | PR-6 (`key-guardrail`) |
 | 27 | **VERIFIED (2026-09-16, CLI 2.1.273+, `probes/probe_cli_report_2026-09-16.json`):** the multi-line value `HTTP-Referer: …\nX-OpenRouter-Title: …\nx-eval-run-id: …` was sent as **three separate headers** (all three observed) on root and subagent requests. Consequence: PR-5 sends Referer + Title (+ the optional run id) together; row 9 is the single-header case. | No key: `specs/014-openrouter-provider/probes/probe_claude_cli.py` (done); `test_claude_cli_direct` (d) asserts each line arrives as its own header on root and subagent requests. | PR-5 |
+| 28 | **VERIFIED (2026-11-03 live run, Claude Code 2.1.314, `z-ai/glm-5.3-flash`, one-case RFE Creator):** the persisted Claude session transcript carried 40 distinct top-level `requestId` values beginning `gen-…`, while stream-json assistant events carried distinct `msg_*` `message.id` values and omitted the top-level `requestId`. The omission is Claude-Code-version/output-shape dependent rather than tied to one request class; the local runner therefore reads the persisted transcript before cleanup and retains probe #12's legacy `message.id` fallback. | Live OpenRouter run with generation backfill enabled; compare assistant `message.id`, top-level `requestId`, and the persisted transcript. Harbor follow-up: because Harbor currently captures stream-json only, it must export persisted transcripts if its Claude Code exhibits the 2.1.314 output shape. | This PR |
 
 ## Rollout plan
 
@@ -3067,7 +3075,7 @@ shippable milestone on its own. PR-6 completes preflight/audit/snapshot and adds
   every 2 s, give up at 60 s, run-end retry, 429 `Retry-After`, coverage math; writes
   `source: generation` records with `provider_name`/`total_cost`/`model` — probe #6/#12
   defaults; plus the key-usage delta reader with the 60 s settle, probe #7), `RunResult`
-  fields (`message_ids`, `cost_source`, `cost_coverage`, `routing`, `provider`, `budget`),
+  fields (`message_ids`, `generation_ids`, `cost_source`, `cost_coverage`, `routing`, `provider`, `budget`),
   reconcile at **all** execute.py `run_result.json` write sites and harbor/run.py:663,
   `--strict-cost`, report rows/banner, compare/anova mixed-source refusal with legacy
   literals, MLflow tags. Nothing writes a ledger yet: with no plan and no ledger file
@@ -3088,8 +3096,9 @@ shippable milestone on its own. PR-6 completes preflight/audit/snapshot and adds
   emitted through the generalised settings overlay (`.eval-overlay.json`, 0600, plan-wins
   merge `{**existing_env, **plan}`, unlinked in a `finally`), managed-key strip in
   `_build_env`, CLI backstop `cap × cli_budget_inflation` (no sentinel, cap ≤ 0 = no
-  CLI cap), `stream_capture.py` collecting every assistant `message.id` (root, subagent,
-  background `generate_session_title`, hook children) into `RunResult.message_ids`,
+  CLI cap), `stream_capture.py` collecting Claude `message_ids` and OpenRouter
+  `generation_ids` (root, subagent, background `generate_session_title`, hook children,
+  and persisted session transcripts),
   `openrouter/errors.py` (`error_type` → `ErrorClass`, the `infra | config | agent` taxonomy)
   classifying the runner's error output into `RunResult.error_class`, and
   `stream_capture.py`/`results.py` detecting OpenRouter's key-limit 402 → `budget.exceeded:
@@ -3138,7 +3147,7 @@ shippable milestone on its own. PR-6 completes preflight/audit/snapshot and adds
   test_claude_cli_direct (local echo server, no key; the CI form of
   `specs/014-openrouter-provider/probes/probe_claude_cli.py`; automates probes 1, 9, 10, 16 (echo-server half), 22, 23,
   24 and checklist row 27 (multi-header `ANTHROPIC_CUSTOM_HEADERS`) — overlay beats user
-  settings, subagent auth, fixture replay → `message_ids` + one `GET /generation` per id,
+  settings, subagent auth, fixture replay → `generation_ids` + one `GET /generation` per id,
   zero `count_tokens` calls, 402/`error` surfacing, `--max-budget-usd` omitted for cap ≤ 0),
   test_stream_capture (id collection incl. background
   and hook ids; `errors.py` classification into `RunResult.error_class`, the key-limit 402
