@@ -1,9 +1,13 @@
-"""Gold-answer scrubbing and outcome-only feedback construction.
+"""Gold-answer scrubbing and bounded feedback construction.
 
 Keeps any optimizer's proposer from ever seeing expected/gold content: the
 workspace a rollout runs in never carries the judges' answer key
-(annotations.yaml), and only pass/fail/numeric outcome labels — never judge
-rationale — reach the returned feedback string. answers.yaml is NOT gold: it is
+(annotations.yaml), and the feedback string carries pass/fail/numeric outcome
+labels. Judge rationale is redacted by default (it can quote gold); the one
+exception is a judge the eval author marked gold-free
+(``feedback_rationale: true``), whose rationale reaches the proposer as a
+bounded, whitespace-collapsed excerpt — a mis-marked judge leaks a fragment,
+not the whole answer key. answers.yaml is NOT gold: it is
 the guidance the AskUserQuestion interceptor reads from the workspace, so it
 stays, exactly as in a plain /eval-run.
 """
