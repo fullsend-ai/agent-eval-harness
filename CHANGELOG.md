@@ -1,3 +1,10 @@
+## [1.62.2](https://github.com/fullsend-ai/agent-eval-harness/compare/v1.62.1...v1.62.2) (2026-11-05)
+
+
+### Bug Fixes
+
+* **provider:** OpenRouter generation ID collection and provider attribution ([#295](https://github.com/fullsend-ai/agent-eval-harness/issues/295)) ([c8687a9](https://github.com/fullsend-ai/agent-eval-harness/commit/c8687a9e5ae90ede4165c8daf3f47048f50d9bb4))
+
 ## [1.62.1](https://github.com/fullsend-ai/agent-eval-harness/compare/v1.62.0...v1.62.1) (2026-11-05)
 
 
