@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Entry point for /eval-optimize's cap-evolve path (the default; --engine
-claude skips this file for the older interactive loop instead).
+"""Entry point for /eval-optimize's opt-in cap-evolve path (--engine
+cap-evolve, alias --engine capevolve; the default interactive loop never
+runs this file).
 
 Runs agent_eval.engines.capevolve (the agent-eval-capevolve CLI) from any
 benchmark checkout: the cwd is the benchmark, while agent_eval resolves through

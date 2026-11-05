@@ -1,7 +1,7 @@
 # Optimize a skill (/eval-optimize)
 
 !!! tip "Looking for statistically validated optimization?"
-    Pass `--engine capevolve` (one-time setup: `/eval-setup --optimize`) for
+    Pass `--engine cap-evolve` (one-time setup: `/eval-setup --optimize`) for
     [cap-evolve](optimize-capevolve.md) instead of the loop on this page: a
     train/val/test split, a significance gate, and a sealed test score. This page
     covers the default interactive loop: quick, single-pass, with no statistical

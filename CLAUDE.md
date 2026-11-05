@@ -159,7 +159,7 @@ skills/eval-mlflow/      # Skill: MLflow integration
     from_traces.py       # Extract inputs from production traces
 
 skills/eval-optimize/    # Skill: automated refinement loop (default), or statistically-gated
-                         # optimization via cap-evolve (--engine capevolve)
+                         # optimization via cap-evolve (--engine cap-evolve)
   SKILL.md               # Composes with /eval-run via Skill tool, or cap-evolve dispatch
 
 skills/eval-compare/     # Skill: cross-model/cross-run comparison report
@@ -241,7 +241,7 @@ The `schema` descriptions are documentation for the LLM agents and judges. Scrip
 /eval-run --model opus                 # Run: execute eval suite
 /eval-review --run-id <id>             # Review: interactive human feedback + changes
 /eval-mlflow --run-id <id>             # MLflow: sync dataset, log results
-/eval-optimize --model opus            # Optimize: automated refinement loop (--engine capevolve for cap-evolve)
+/eval-optimize --model opus            # Optimize: automated refinement loop (--engine cap-evolve for cap-evolve)
 /eval-compare <input-dir>              # Compare: tabbed HTML report across models/runs
 /eval-anova --config eval.yaml         # DoE: matrix of configs → runs → ANOVA + comparison
 ```

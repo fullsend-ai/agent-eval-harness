@@ -21,7 +21,7 @@ Parse `$ARGUMENTS` for:
 | `--skip-mlflow` | no | false | Skip MLflow setup entirely |
 | `--runs-dir <path>` | no | `eval/runs` | Directory where eval runs are stored |
 | `--harbor` | no | false | Install Harbor + Kubernetes for containerized execution (~650 MB) |
-| `--optimize` | no | false | Install cap-evolve-core and fetch its pinned skills tree for `/eval-optimize --engine capevolve` |
+| `--optimize` | no | false | Install cap-evolve-core and fetch its pinned skills tree for `/eval-optimize --engine cap-evolve` |
 
 ## Step 1: Install Dependencies (if needed)
 
@@ -67,7 +67,7 @@ fi
 ```
 
 If `--optimize` was passed, also install cap-evolve for `/eval-optimize
---engine capevolve`. This needs nothing from the user — no cap-evolve
+--engine cap-evolve`. This needs nothing from the user — no cap-evolve
 checkout, no path to provide. cap-evolve-core requires Python 3.11+, so check
 the venv first:
 
@@ -104,7 +104,7 @@ python3 ${CLAUDE_SKILL_DIR}/../eval-optimize/scripts/capevolve.py --setup
 (phases, algorithms, templates — not on PyPI) at exactly the commit
 `pyproject.toml` pins, into the plugin data dir. Report its `skills_dir` and
 `pinned_sha`. A pin bump fetches a fresh copy, so the package and the tree
-never drift; `/eval-optimize --engine capevolve` also fetches it on first use,
+never drift; `/eval-optimize --engine cap-evolve` also fetches it on first use,
 so this step only warms it. An `{"error": "setup_required", ...}` result means
 the install above failed — show its `reason`. A user who keeps their own
 cap-evolve checkout can set `CAPEVOLVE_SKILLS_DIR`; it is used only when it is

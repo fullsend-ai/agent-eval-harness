@@ -1,6 +1,6 @@
 ---
 name: eval-optimize
-description: Automated skill improvement. Default: an interactive loop that runs eval, identifies judge failures, reads traces and rationale, edits the SKILL.md, re-runs, and checks for regressions. Pass --engine capevolve for statistically validated optimization instead (train/val/test splits, a significance gate, sealed test). Use when the user wants to improve a skill based on eval results, fix failing judges, improve scores, or iterate until judges pass. Triggers on "optimize the skill", "make it pass", "auto-fix", "cap-evolve". Works best after /eval-run has produced results.
+description: 'Automated skill improvement. Default: an interactive loop that runs eval, identifies judge failures, reads traces and rationale, edits the SKILL.md, re-runs, and checks for regressions. Pass --engine cap-evolve (alias capevolve) for statistically validated optimization instead (train/val/test splits, a significance gate, sealed test). Use when the user wants to improve a skill based on eval results, fix failing judges, improve scores, or iterate until judges pass. Triggers on "optimize the skill", "make it pass", "auto-fix", "cap-evolve". Works best after /eval-run has produced results.'
 user-invocable: true
 allowed-tools: Read, Write, Edit, Bash, Glob, Grep, Agent, Skill, AskUserQuestion
 ---
@@ -13,22 +13,28 @@ The key difference from `/eval-review`: you act autonomously. You read judge rat
 
 ## Step 0: Parse Arguments
 
-**`--engine capevolve` dispatch.** If `--engine capevolve` is among the
-arguments, this is the automated, statistically-gated cap-evolve path, not
-the interactive loop below — skip every other step in this file. Unlike that
-loop, it splits cases into train/val/test, accepts a candidate only on a
-significance gate over val (a small change comes back "indecisive", never
-banked as progress), and scores test exactly once. Prefer it over the
-default loop below whenever that stronger guarantee is worth the setup.
+**`--engine cap-evolve` dispatch.** If `--engine cap-evolve` (alias:
+`--engine capevolve`) is among the arguments, this is the automated,
+statistically-gated cap-evolve path, not the interactive loop below — skip
+every other step in this file. Unlike that loop, it splits cases into
+train/val/test, accepts a candidate only on a significance gate over val (a
+small change comes back "indecisive", never banked as progress), and scores
+test exactly once. Prefer it over the default loop below whenever that
+stronger guarantee is worth the setup.
+
+If `--engine <value>` names anything else, stop with an error telling the
+user the value is unrecognized (the engines are `cap-evolve` and the default
+interactive loop — there is no `--engine claude` or `--engine builtin`).
+Never fall through to the interactive loop silently: a user who typed a
+misspelled or wrong engine would believe they ran one optimization and get
+the other.
 
 Parse only `--config`, `--max-usd`, `--max-iterations`, `--num-trials`,
-`--dry-run`, `--pilot-case-ids`, `--runner-budget-usd`, `--runner`, `--env`,
-`--image`, `--reintake`, `--optimizer`, `--optimizer-model`, `--skills-dir`,
 `--seed`, `--split-ratios`, `--run`, `--setup`, `--status`, `--stop`, and
 `--apply` from the arguments (ignore `--model`/`--run-id`/`--target-judge`,
 which don't apply here). Note the current scope limits (local or Harbor
 substrate; EvalHub is refused). Do not proceed to Step 1 below for a
-`--engine capevolve` invocation. The underlying command for every mode is
+`--engine cap-evolve` invocation. The underlying command for every mode is
 `python3 ${CLAUDE_SKILL_DIR}/scripts/capevolve.py <flags>`, run from the
 benchmark's root (`--config` defaults to the benchmark's eval config).
 
@@ -99,7 +105,7 @@ the `git checkout` that fixes it.
 
 | Argument | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `--engine <capevolve>` | no | the interactive loop below | Pass `--engine capevolve` for statistically validated optimization instead (see Step 0) |
+| `--engine <cap-evolve>` | no | the interactive loop below | Pass `--engine cap-evolve` (alias: `capevolve`) for statistically validated optimization instead (see Step 0). Any other value is an error, never a silent fall-through |
 | `--config <path>` | no | auto-discover | Path to eval config |
 | `--model <model>` | no | `models.skill` from eval.yaml | Model to use for eval runs (overrides config default) |
 | `--max-iterations <N>` | no | 3 | Stop after N improvement cycles |

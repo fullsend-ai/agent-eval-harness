@@ -1,6 +1,6 @@
 # Statistically validated optimization (cap-evolve)
 
-Pass `--engine capevolve` to `/eval-optimize` to use
+Pass `--engine cap-evolve` to `/eval-optimize` to use
 [cap-evolve](https://github.com/skillberry-ai/cap-evolve) instead of the default
 interactive loop: a train/val/test split, a significance gate on val, and a sealed
 test score computed exactly once. This is the harness's recommended optimization
@@ -31,19 +31,19 @@ it with a newer interpreter if needed.
 
 ```bash
 # See what would happen — no spend, no launch
-/eval-optimize --engine capevolve --dry-run
+/eval-optimize --engine cap-evolve --dry-run
 
 # Launch a campaign, $25 hard cap, up to 10 improvement iterations
-/eval-optimize --engine capevolve --max-usd 25
+/eval-optimize --engine cap-evolve --max-usd 25
 
 # From any later session (the campaign runs detached from the one that launched it)
-/eval-optimize --engine capevolve --status
+/eval-optimize --engine cap-evolve --status
 
 # Stop it (signals the whole process group — rollouts included, not just the launcher)
-/eval-optimize --engine capevolve --stop
+/eval-optimize --engine cap-evolve --stop
 
 # Once finished and a candidate was accepted: apply the winner onto a new git branch
-/eval-optimize --engine capevolve --apply
+/eval-optimize --engine cap-evolve --apply
 ```
 
 `--dry-run` mines your benchmark (the eval config's `execution.skill`/`execution.prompt`,

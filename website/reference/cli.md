@@ -51,7 +51,7 @@ order for a first eval, or invoke individually.
 | `/eval-compare` | Compare results across models/runs into one HTML report | [eval-compare](../guides/eval-compare.md) |
 | `/eval-anova` | Fan a `matrix:` of configurations out over `/eval-run`, then ANOVA + Pareto into `anova.json` and the comparison report | [eval-anova](../guides/eval-anova.md) |
 | `/eval-review` | Interactive human review of a run; propose config changes | [eval-review](../guides/eval-review.md) |
-| `/eval-optimize` | Automated refinement loop (composes with `/eval-run`); `--engine capevolve` for statistically validated optimization (train/val/test, gated accept, sealed test) | [eval-optimize](../guides/eval-optimize.md) / [optimize-capevolve](../guides/optimize-capevolve.md) |
+| `/eval-optimize` | Automated refinement loop (composes with `/eval-run`); `--engine cap-evolve` for statistically validated optimization (train/val/test, gated accept, sealed test) | [eval-optimize](../guides/eval-optimize.md) / [optimize-capevolve](../guides/optimize-capevolve.md) |
 | `/eval-mlflow` | Dataset sync, result logging, trace feedback | [eval-mlflow](../guides/eval-mlflow.md) |
 | `/eval-check` | Full-harness config health check across all skills | [eval-check](../guides/eval-check.md) |
 

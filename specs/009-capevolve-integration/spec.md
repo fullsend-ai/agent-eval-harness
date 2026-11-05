@@ -28,7 +28,7 @@ user-provided `adapter.score()` returning a single scalar reward.
 Connect them: cap-evolve drives the optimization loop (splits, trials, gating,
 memory, the sealed test run); agent-eval-harness does the evaluation (the
 existing workspace/execution/collection/judge/`compose_reward()` pipeline).
-`/eval-optimize` without `--engine capevolve` is unchanged. Local and Harbor
+`/eval-optimize` without `--engine cap-evolve` is unchanged. Local and Harbor
 substrates; project (`.claude/skills`) and plugin-resolved (`runner.plugin_dirs`)
 skills. EvalHub and prompt-mode/multi-step evaluations are out of scope.
 
@@ -185,11 +185,11 @@ the same `compose_reward()`. `--runner evalhub` is refused at argparse.
 
 ```
 /eval-setup --optimize                                 # once: installs cap-evolve + its skills tree
-/eval-optimize --engine capevolve --dry-run             # intake + scaffold + check + estimate; spends nothing
-/eval-optimize --engine capevolve --max-usd 420          # confirms spend, launches detached, exits
+/eval-optimize --engine cap-evolve --dry-run             # intake + scaffold + check + estimate; spends nothing
+/eval-optimize --engine cap-evolve --max-usd 420          # confirms spend, launches detached, exits
 cap-evolve watch .capevolve/run_<ts>                     # optional, the user's own terminal — real upstream command
-/eval-optimize --engine capevolve --status               # any later session; narrates progress, not raw JSON
-/eval-optimize --engine capevolve --apply                # branch + apply the winner + optimistic-bias caveat
+/eval-optimize --engine cap-evolve --status               # any later session; narrates progress, not raw JSON
+/eval-optimize --engine cap-evolve --apply                # branch + apply the winner + optimistic-bias caveat
 ```
 
 The run is detached: a real campaign is ~5h of work against a ~55 min idle
@@ -252,7 +252,7 @@ Claude-driven skill can hold a conversation, so that layer belongs there.
 ## Migration
 
 No breaking change to existing usage, and no existing harness file's code is
-modified: `/eval-optimize` without `--engine capevolve` is untouched, and `optimize:`/`reward:` are new optional
+modified: `/eval-optimize` without `--engine cap-evolve` is untouched, and `optimize:`/`reward:` are new optional
 `eval.yaml` keys. `cap-evolve-core` is an optional extra
 (`pip install -e '.[optimize]'`), deliberately excluded from the `[all]`
 extra (it's 0.x and not on PyPI; pinned to the v0.2.0 tag's commit).
