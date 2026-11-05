@@ -359,11 +359,19 @@ def load_case_record(case_dir, config, run_id=None, runs_dir=None,
         if (annotations_path.is_relative_to(dataset_root)
                 and annotations_path.is_file()
                 and not annotations_path.is_symlink()):
+            # A file that cannot be read or parsed leaves the case unannotated
+            # (untagged, no expectations), as a missing file does. ValueError
+            # covers UnicodeDecodeError: invalid bytes raised through here and
+            # took every judge of the case down before any ran.
             try:
-                with open(annotations_path) as f:
+                with open(annotations_path, encoding="utf-8") as f:
                     record["annotations"] = yaml.safe_load(f) or {}
-            except (yaml.YAMLError, OSError):
+            except (yaml.YAMLError, OSError, ValueError):
                 pass
+            if not isinstance(record["annotations"], dict):
+                # A scalar or list document is not an annotations mapping;
+                # `.items()` below would raise on it.
+                record["annotations"] = {}
             # Load annotation-referenced files into the record.
             # Only treat values as file paths if they look like filenames:
             # - Short enough to be a valid filename (< 256 chars)
