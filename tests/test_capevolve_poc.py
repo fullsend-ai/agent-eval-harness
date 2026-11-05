@@ -2938,6 +2938,10 @@ def test_stop_campaign_kills_the_process_group_not_just_the_leader(tmp_path, mon
     capevolve._write_campaign_manifest(project_dir, {
         "pid": 999, "create_time": "123", "run_dir": str(tmp_path / "run_x"),
     })
+    # astefanutti's follow-up: without this, the guard calls the REAL
+    # _process_create_time(999) — None only because pid 999 happens not to
+    # exist on this host. Pin the dead-leader shape the test is named for.
+    monkeypatch.setattr(capevolve, "_process_create_time", lambda pid: None)
     killed = {}
     monkeypatch.setattr(capevolve.os, "killpg", lambda pid, sig: killed.update(pid=pid, sig=sig))
 
@@ -2959,6 +2963,9 @@ def test_stop_campaign_reports_already_stopped_when_the_group_has_no_members(tmp
     capevolve._write_campaign_manifest(project_dir, {
         "pid": 999, "create_time": "123", "run_dir": str(tmp_path / "run_x"),
     })
+    # Same host-dependence as above: pin the dead leader so the recycled-pid
+    # guard passes through to the killpg the test exercises.
+    monkeypatch.setattr(capevolve, "_process_create_time", lambda pid: None)
 
     def _raise(pid, sig):
         raise ProcessLookupError()
