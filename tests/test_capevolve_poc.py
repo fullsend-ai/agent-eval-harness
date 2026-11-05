@@ -1675,14 +1675,49 @@ def test_dry_run_reports_one_case_per_split_in_pilot_mode(tmp_path, monkeypatch)
     assert "correctly reject marginal gains" not in project_md
 
 
-def test_split_sizes_sum_to_the_case_count():
-    """astefanutti #11: round() per split is not sum-preserving — 6 cases at
-    0.5/0.25/0.25 reported 3/2/2 (7), 10 reported 5/2/2 (9), 2 reported
-    1/0/0."""
+def test_a_small_non_pilot_campaign_gets_the_honest_gate_note_too(tmp_path, monkeypatch):
+    """astefanutti's follow-up on C2: the gate collapses whenever n < 2
+    paired deltas, not only in pilot mode — a 3-case non-pilot campaign
+    (2/1/0 split: one val case, and a sealed test split of ZERO cases) must
+    not get the reassuring 'will correctly reject marginal gains' sentence."""
+    monkeypatch.chdir(tmp_path)
+    _demo_eval_yaml(tmp_path, mode="case")
+    for case_id in ("case-2", "case-3"):
+        case = tmp_path / "cases" / case_id
+        case.mkdir(parents=True, exist_ok=True)
+        (case / "input.yaml").write_text(f"request: {case_id}\n", encoding="utf-8")
+    result = capevolve.prepare_project(max_usd=5, optimizer="mock")
+    assert result["splits"] == {"train": 2, "val": 1, "test": 0}
+    project_md = (Path(result["project_dir"]) / "PROJECT.md").read_text(encoding="utf-8")
+    assert "plumbing check, not a measurement" in project_md
+    assert "correctly reject marginal gains" not in project_md
+
+
+def test_split_sizes_mirror_cap_evolve_s_splitter():
+    """astefanutti's follow-up: the reported splits must be the split
+    cap-evolve will actually build (round train, round val, remainder to
+    test), not merely sum-preserving — a 3-case non-pilot run is 2/1/0, a
+    sealed test split of zero cases, and the numbers must not hide that.
+    10-case runs use banker's rounding on val (round(2.5) == 2)."""
+    assert capevolve._split_sizes(3, (0.5, 0.25, 0.25)) == {"train": 2, "val": 1, "test": 0}
     assert capevolve._split_sizes(6, (0.5, 0.25, 0.25)) == {"train": 3, "val": 2, "test": 1}
-    assert capevolve._split_sizes(10, (0.5, 0.25, 0.25)) == {"train": 5, "val": 3, "test": 2}
-    assert capevolve._split_sizes(2, (0.5, 0.25, 0.25)) == {"train": 1, "val": 1, "test": 0}
+    assert capevolve._split_sizes(10, (0.5, 0.25, 0.25)) == {"train": 5, "val": 2, "test": 3}
+    assert capevolve._split_sizes(2, (0.5, 0.25, 0.25)) == {"train": 1, "val": 0, "test": 1}
     assert capevolve._split_sizes(4, (0.5, 0.25, 0.25)) == {"train": 2, "val": 1, "test": 1}
+
+
+@pytest.mark.skipif(importlib.util.find_spec("cap_evolve") is None,
+                    reason="cap_evolve not installed")
+def test_split_sizes_match_cap_evolve_make_splits():
+    """The mirror is pinned against the real splitter, not against itself:
+    compare against cap_evolve.splits.make_splits at the pinned commit
+    across a range of case counts."""
+    from cap_evolve.splits import make_splits
+    for n in range(1, 30):
+        ids = [f"case-{i}" for i in range(n)]
+        built = make_splits(ids, ratios=(0.5, 0.25, 0.25))
+        assert capevolve._split_sizes(n, (0.5, 0.25, 0.25)) == {
+            "train": len(built.train), "val": len(built.val), "test": len(built.test)}, n
 
 
 def test_workers_is_wired_into_the_generated_spec(tmp_path, monkeypatch):

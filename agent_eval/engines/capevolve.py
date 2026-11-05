@@ -439,18 +439,23 @@ def _project_md(manifest: dict, resolved: dict, spec: dict, substrate: dict) -> 
     credentials = intake.detected_credentials()
     overlay = resolved["overlay"]
     defaulted = resolved["defaulted"]
+    # The honest num_trials note is keyed on the val size cap-evolve will
+    # actually build (mirrored splitter), not on pilot mode: the gate
+    # collapses whenever n < 2 paired deltas, so a small non-pilot campaign
+    # is in the same SE=0 → any-positive-delta-accepted shape as a pilot.
+    val_count = (
+        1 if "split_ids_file" in spec
+        else _split_sizes(len(manifest["task_ids"]),
+                          (spec["split_train"], spec["split_val"], spec["split_test"]))["val"]
+    )
     recommended = [
         f"splits — ratio {spec['split_train']}/{spec['split_val']}/{spec['split_test']} "
         f"(seed {spec['split_seed']})" if "split_ids_file" not in spec
         else "splits — pinned in split_ids.json (pilot: one case per split)",
-        # In pilot mode this sentence inverts: one validation case means
-        # n=1, SE=0, and cap-evolve's strict fallback then accepts ANY
-        # positive delta — a pilot "accept" is one coin flip, and saying so
-        # plainly matters more than the normal-mode caveat.
-        ("num_trials=1 — pilot verdicts are a plumbing check, not a measurement: "
-         "with one validation case the gate cannot reject noise (SE=0 → any "
-         "positive delta is accepted)")
-        if "split_ids_file" in spec and spec["num_trials"] == 1
+        ("num_trials=1 — with fewer than 2 validation cases the verdicts are a "
+         "plumbing check, not a measurement: the gate cannot reject noise "
+         "(SE=0 → any positive delta is accepted)")
+        if spec["num_trials"] == 1 and val_count < 2
         else f"num_trials={spec['num_trials']}" + (
             " — single-trial scores, so the significance gate will correctly reject "
             "marginal gains" if spec["num_trials"] == 1 else ""),
@@ -547,18 +552,25 @@ def _project_md(manifest: dict, resolved: dict, spec: dict, substrate: dict) -> 
 
 
 def _split_sizes(n: int, ratios: tuple[float, float, float]) -> dict:
-    """Case counts per split that sum to *n* (largest-remainder allocation).
+    """Case counts per split, mirroring cap-evolve's own splitter exactly.
 
-    ``round()`` per split is not sum-preserving: 6 cases at 0.5/0.25/0.25
-    reported 3/2/2 (7), 10 reported 5/2/2 (9), 2 reported 1/0/0.
+    These are the numbers SKILL.md tells the agent to quote, so they must be
+    the split cap-evolve will actually build — not merely sum-preserving.
+    Mirrors ``cap_evolve.splits.make_splits`` at the pinned commit: round
+    train, round val, remainder to test (then clamp). A 3-case run at
+    0.5/0.25/0.25 is 2/1/0 — the sealed test split really can be empty, and
+    the reported numbers must not hide that.
     """
-    quotas = [n * r for r in ratios]
-    sizes = [int(q) for q in quotas]
-    remainder = n - sum(sizes)
-    by_fraction = sorted(range(len(sizes)), key=lambda i: quotas[i] - sizes[i], reverse=True)
-    for i in by_fraction[:remainder]:
-        sizes[i] += 1
-    return {"train": sizes[0], "val": sizes[1], "test": sizes[2]}
+    r_tr, r_va, r_te = ratios
+    total = r_tr + r_va + r_te
+    r_tr, r_va, r_te = r_tr / total, r_va / total, r_te / total
+    n_tr = int(round(n * r_tr))
+    n_va = int(round(n * r_va))
+    n_te = n - n_tr - n_va
+    n_tr = max(0, min(n, n_tr))
+    n_va = max(0, min(n - n_tr, n_va))
+    n_te = max(0, n - n_tr - n_va)
+    return {"train": n_tr, "val": n_va, "test": n_te}
 
 
 def prepare_project(
