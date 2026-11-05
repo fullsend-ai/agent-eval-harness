@@ -80,7 +80,11 @@ on `<project>/adapters/adapter.py`, requires a class literally named
   `--resume` days later in a new shell would otherwise inherit whatever
   happens to be exported, silently changing substrate mid-campaign) and
   `adapters/candidate.json` (the task/candidate manifest
-  `_bridge_template.py` reads).
+  `_bridge_template.py` reads; it lives at `../harness/candidate.json`,
+  outside the project tree — it names the eval-config path and every case's
+  inputs, sealed test included, none of which the optimizer should be able to
+  read, and the bridge finds it through substrate.json's absolute
+  `manifest_path`).
 - **Re-instantiated per phase process** — cap-evolve loads the adapter fresh
   in every subprocess (check, baseline, each algorithm step, finalize).
   Nothing is shared between them except files.

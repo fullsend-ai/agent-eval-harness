@@ -587,7 +587,7 @@ optimize:
         runner_budget_usd=0.5,
     )
     project = Path(result["project_dir"])
-    manifest = json.loads((project / "adapters/candidate.json").read_text())
+    manifest = json.loads((project.parent / "harness/candidate.json").read_text())
     substrate = json.loads((project / "adapters/substrate.json").read_text())
     spec = (project / "capevolve.yaml").read_text()
 
@@ -796,7 +796,7 @@ def test_intake_finds_a_plugin_resolved_benchmark_without_any_layout_assumption(
     assert layered["extends"] == "../eval/decompose.yaml"
     assert layered["optimize"]["apply_to"] == "skills"
     assert [c["dest"] for c in layered["optimize"]["candidate"]] == ["decompose", "review"]
-    manifest = json.loads((Path(result["project_dir"]) / "adapters/candidate.json").read_text())
+    manifest = json.loads((Path(result["project_dir"]).parent / "harness/candidate.json").read_text())
     assert manifest["plugin_dir"] == str(tmp_path)
     assert manifest["skill_root"] == str(tmp_path / "skills")
     assert manifest["task_ids"] == ["case-1", "case-2", "case-3", "case-4"]
@@ -807,7 +807,7 @@ def test_plugin_candidate_runs_from_a_private_plugin_copy(tmp_path, monkeypatch)
     monkeypatch.chdir(tmp_path)
     _plugin_benchmark(tmp_path)
     result = capevolve.prepare_project(max_usd=5, optimizer="mock")
-    manifest = json.loads((Path(result["project_dir"]) / "adapters/candidate.json").read_text())
+    manifest = json.loads((Path(result["project_dir"]).parent / "harness/candidate.json").read_text())
     candidate = tmp_path / "candidate"
     for name in ("decompose", "review"):
         (candidate / name).mkdir(parents=True)
@@ -849,7 +849,7 @@ def test_overlay_is_re_pointed_when_the_eval_config_changes(tmp_path, monkeypatc
     # proposed afresh for it (and reported as defaults), never carried over.
     assert layered["reward"]["weights"]["quality"] == 1.0
     assert result["defaulted"] == ["optimize", "reward"]
-    manifest = json.loads((Path(result["project_dir"]) / "adapters/candidate.json").read_text())
+    manifest = json.loads((Path(result["project_dir"]).parent / "harness/candidate.json").read_text())
     assert manifest["target_model"] == "haiku"
 
 
@@ -871,14 +871,63 @@ def test_intake_refuses_to_rewrite_a_live_campaign(tmp_path, monkeypatch):
     _bare_benchmark(tmp_path)
     result = capevolve.prepare_project(max_usd=5, optimizer="mock")
     project = Path(result["project_dir"])
-    before = (project / "adapters/candidate.json").read_text()
+    before = (project.parent / "harness/candidate.json").read_text()
     capevolve._write_campaign_manifest(project, {
         "pid": os.getpid(), "create_time": capevolve._process_create_time(os.getpid()),
         "run_dir": str(tmp_path / ".capevolve/run_x"), "stop_hint": f"kill {os.getpid()}",
     })
     with pytest.raises(RuntimeError, match="campaign is still running"):
         capevolve.prepare_project(max_usd=5, optimizer="mock", max_iterations=3)
-    assert (project / "adapters/candidate.json").read_text() == before
+    assert (project.parent / "harness/candidate.json").read_text() == before
+
+
+def test_candidate_manifest_lives_outside_the_optimizer_visible_tree(tmp_path, monkeypatch):
+    """astefanutti #1 (blocking): adapters/candidate.json carried the
+    eval-config path (judge prompts can hold gold) and every case's inputs —
+    sealed test split included — inside the tree the optimizer reads and edits
+    every iteration."""
+    monkeypatch.chdir(tmp_path)
+    _bare_benchmark(tmp_path)
+    result = capevolve.prepare_project(max_usd=5, optimizer="mock")
+    project = Path(result["project_dir"])
+    manifest_path = project.parent / "harness/candidate.json"
+    assert manifest_path.is_file()
+    assert not (project / "adapters/candidate.json").exists()
+    substrate = json.loads((project / "adapters/substrate.json").read_text())
+    assert substrate["manifest_path"] == str(manifest_path)
+    manifest = json.loads(manifest_path.read_text())
+    assert manifest["eval_config"]
+    assert manifest["task_inputs"]
+    # Nothing the optimizer can read inside the project tree names the eval
+    # config or carries a case input.
+    for path in project.rglob("*"):
+        if path.is_file():
+            content = path.read_text(encoding="utf-8", errors="replace")
+            assert manifest["eval_config"] not in content, path
+            assert "request: case-" not in content, path
+
+
+def test_bridge_resolves_the_manifest_through_substrate_manifest_path(tmp_path):
+    """The bridge follows substrate.json's manifest_path instead of assuming
+    the manifest is a sibling — the sibling fallback covers older scaffolds."""
+    adapters_dir = tmp_path / "project/adapters"
+    adapters_dir.mkdir(parents=True)
+    manifest_dir = tmp_path / "elsewhere"
+    manifest_dir.mkdir()
+    substrate = {"runner": "local", "env": None, "image": None,
+                 "harness_python": sys.executable,
+                 "manifest_path": str(manifest_dir / "candidate.json")}
+    (adapters_dir / "substrate.json").write_text(json.dumps(substrate), encoding="utf-8")
+    # A stale sibling manifest must not be read.
+    (adapters_dir / "candidate.json").write_text("{}", encoding="utf-8")
+    manifest = {"project_root": str(tmp_path), "task_ids": ["case-9"],
+                "task_inputs": {"case-9": {"request": "case-9"}}}
+    (manifest_dir / "candidate.json").write_text(json.dumps(manifest), encoding="utf-8")
+    bridge = bridge_template.Bridge(adapters_dir / "substrate.json")
+    assert bridge.task_ids == ("case-9",)
+    assert bridge.manifest_path == (manifest_dir / "candidate.json").resolve()
+
+
 
 
 def test_launch_stops_a_campaign_that_never_creates_a_run_dir(tmp_path, monkeypatch):
@@ -940,7 +989,7 @@ def _harbor_manifest(tmp_path, monkeypatch):
     (tmp_path / "hooks").mkdir()
     (tmp_path / "hooks/session.sh").write_text("echo hi", encoding="utf-8")
     result = capevolve.prepare_project(max_usd=5, optimizer="mock")
-    manifest = json.loads((Path(result["project_dir"]) / "adapters/candidate.json").read_text())
+    manifest = json.loads((Path(result["project_dir"]).parent / "harness/candidate.json").read_text())
     manifest["runtime_resources"] = ["scripts", "types", "hooks"]
     candidate = tmp_path / "candidate"
     for name in ("pipeline", "create", "review"):
@@ -1096,7 +1145,8 @@ def test_prepare_project_records_the_harbor_substrate(tmp_path, monkeypatch):
     substrate = json.loads((project / "adapters/substrate.json").read_text())
     expected_python = capevolve._venv_python(Path(capevolve.__file__).resolve().parents[2])
     assert substrate == {"runner": "harbor", "env": "podman", "image": "localhost/aeh:latest",
-                         "harness_python": expected_python}
+                         "harness_python": expected_python,
+                         "manifest_path": str(project.parent / "harness/candidate.json")}
     assert "on Harbor (`--env podman`" in (project / "PROJECT.md").read_text()
 
 
@@ -1227,7 +1277,7 @@ def test_prepare_project_runs_intake_on_a_bare_benchmark_without_touching_it(tmp
     }
 
     project = Path(result["project_dir"])
-    manifest = json.loads((project / "adapters/candidate.json").read_text())
+    manifest = json.loads((project.parent / "harness/candidate.json").read_text())
     assert manifest["eval_config"] == str(overlay.resolve())
     assert manifest["base_eval_config"] == str(tmp_path / "eval.yaml")
     assert manifest["eval_name"] == "pipeline"  # skill evals are named after the skill
@@ -1238,7 +1288,10 @@ def test_prepare_project_runs_intake_on_a_bare_benchmark_without_touching_it(tmp
     assert not (project / "seed_capability/unrelated").exists()
     project_md = (project / "PROJECT.md").read_text()
     assert "every judge weighted equally" in project_md
-    assert "(generated: optimize, reward)" in project_md
+    assert "generated: optimize, reward" in project_md
+    # The overlay extends the base eval config, so its path is withheld from
+    # the optimizer-visible PROJECT.md for the same reason the base's is.
+    assert "not printed here either" in project_md
 
 
 def test_prepare_project_reuses_an_existing_overlay(tmp_path, monkeypatch):
@@ -1278,7 +1331,7 @@ def test_blocks_declared_in_eval_yaml_win_over_an_earlier_overlay(tmp_path, monk
     assert result["overlay"] is None and result["defaulted"] == []
     assert not overlay.exists()
     project = Path(result["project_dir"])
-    manifest = json.loads((project / "adapters/candidate.json").read_text())
+    manifest = json.loads((project.parent / "harness/candidate.json").read_text())
     assert manifest["eval_config"] == str(tmp_path / "eval.yaml")
     assert [c["dest"] for c in manifest["candidate"]] == ["create"]
     assert "the eval config already declares optimize: and reward:" in (project / "PROJECT.md").read_text()

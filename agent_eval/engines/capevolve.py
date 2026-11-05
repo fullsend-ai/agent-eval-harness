@@ -488,8 +488,10 @@ def _project_md(manifest: dict, resolved: dict, spec: dict, substrate: dict) -> 
         "- Base: not modified. Its path is deliberately not printed here: it can hold judge "
         "prompts/rubrics with gold answers or rationale, and this file lives inside the "
         "directory the optimizer reads and edits every iteration.",
-        (f"- Overlay: `{overlay}` (" + ("reused as-is" if resolved["reused_overlay"]
-                                         else "generated: " + ", ".join(defaulted)) + ")")
+        (f"- Overlay: " + ("reused as-is" if resolved["reused_overlay"]
+                           else "generated: " + ", ".join(defaulted))
+         + ". Its path is not printed here either: it extends the base config, so it is one"
+           " read away from the same judge prompts.")
         if overlay else "- Overlay: none (the eval config already declares optimize: and reward:)",
         "",
         "## Optimizer + algorithm",
@@ -612,6 +614,15 @@ def prepare_project(
     adapters_dir = project_dir / "adapters"
     adapters_dir.mkdir(parents=True, exist_ok=True)
 
+    # The task/candidate manifest deliberately lives OUTSIDE the project tree:
+    # it carries the eval-config path (judge prompts can hold gold) and every
+    # case's inputs (sealed test split included), and the optimizer reads and
+    # edits the project tree every iteration. The bridge finds it through
+    # substrate.json's absolute manifest_path, which also survives cap-evolve's
+    # copytree probe of the project dir.
+    harness_dir = project_dir.parent / "harness"
+    harness_dir.mkdir(parents=True, exist_ok=True)
+
     seed_dir = project_dir / "seed_capability"
     artifact.snapshot_candidate(components, seed_dir)
 
@@ -624,13 +635,17 @@ def prepare_project(
         "env": harbor_env if runner == "harbor" else None,
         "image": image if runner == "harbor" else None,
         "harness_python": _venv_python(harness_root),
+        # Where the task/candidate manifest lives — outside the project tree
+        # (see the harness_dir comment above). Absolute so it still resolves
+        # when cap-evolve's check phase copies the project dir elsewhere.
+        "manifest_path": str(harness_dir / "candidate.json"),
     }
     (adapters_dir / "substrate.json").write_text(
         json.dumps(substrate, indent=2) + "\n", encoding="utf-8",
     )
     runtime_resources, runtime_resource_warnings = intake.runtime_resources(project_root, config, components)
-    # adapters/candidate.json — the task/candidate manifest the bridge and the
-    # rollout subprocess both read.
+    # .capevolve/harness/candidate.json — the task/candidate manifest the
+    # bridge and the rollout subprocess both read.
     candidate_manifest = {
         "harness_root": str(harness_root),
         "project_root": str(project_root),
@@ -664,7 +679,7 @@ def prepare_project(
         "on_error": optimize.get("on_error", "noise"),
         "engine": "cap-evolve",
     }
-    (adapters_dir / "candidate.json").write_text(
+    (harness_dir / "candidate.json").write_text(
         json.dumps(candidate_manifest, indent=2, default=str) + "\n", encoding="utf-8",
     )
     shutil.copy2(_BRIDGE_TEMPLATE, adapters_dir / "aeh_bridge.py")
@@ -757,8 +772,11 @@ def prepare_project(
         "usd": 0.0, "tokens": 0, "seconds": round(time.time() - started, 3),
         "output_summary": (
             f"agent-eval-harness intake: {len(case_dirs)} cases, "
-            f"{len(components)} candidate component(s), overlay="
-            f"{resolved['overlay'] or 'none'}"
+            f"{len(components)} candidate component(s), "
+            f"overlay={'generated' if resolved['overlay'] else 'none'}"
+            # The overlay's path is deliberately absent: this file is inside
+            # the optimizer-visible tree, and the overlay extends the eval
+            # config, which can hold judge prompts with gold.
         ),
         "implemented": ["tasks", "run_target", "score"],
     }, indent=2) + "\n", encoding="utf-8")
@@ -1426,12 +1444,23 @@ def _cmd_status() -> dict:
     return read_status(_require_project_dir())
 
 
+def _harness_manifest_path(project_dir: Path) -> Path:
+    """The task/candidate manifest: outside the project tree, via substrate.json.
+
+    Older scaffolds kept it next to substrate.json in adapters/; that location
+    is the legacy fallback.
+    """
+    substrate = _read_json(project_dir / "adapters" / "substrate.json") or {}
+    return Path(substrate.get("manifest_path")
+                or (project_dir / "adapters" / "candidate.json"))
+
+
 def _cmd_apply() -> dict:
     project_dir = _require_project_dir()
     campaign_manifest = read_campaign_manifest(project_dir)
     if campaign_manifest is None:
         raise RuntimeError("no campaign has been launched in this project; launch one first")
-    harness_manifest = json.loads((project_dir / "adapters" / "candidate.json").read_text(encoding="utf-8"))
+    harness_manifest = json.loads(_harness_manifest_path(project_dir).read_text(encoding="utf-8"))
     return apply_winner(
         project_root=Path.cwd().resolve(), harness_manifest=harness_manifest, campaign_manifest=campaign_manifest,
     )

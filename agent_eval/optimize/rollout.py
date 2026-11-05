@@ -568,6 +568,8 @@ def run_case(manifest: dict, task_id: str, candidate_dir: Path, seed: int, subst
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", required=True)
+    parser.add_argument("--substrate", default=None,
+                        help="substrate.json path; defaults to a sibling of --manifest")
     parser.add_argument("--task-id", required=True)
     parser.add_argument("--candidate-dir", required=True)
     parser.add_argument("--seed", type=int, default=0)
@@ -575,7 +577,8 @@ def main(argv=None) -> int:
     try:
         manifest_path = Path(args.manifest)
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        substrate_path = manifest_path.with_name("substrate.json")
+        substrate_path = Path(args.substrate) if args.substrate \
+            else manifest_path.with_name("substrate.json")
         substrate = json.loads(substrate_path.read_text(encoding="utf-8")) if substrate_path.is_file() else None
         payload = run_case(manifest, args.task_id, Path(args.candidate_dir), args.seed, substrate)
         print(json.dumps(payload, default=str))

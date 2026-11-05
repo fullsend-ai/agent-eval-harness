@@ -89,9 +89,15 @@ class Bridge(CapabilityAdapter):
     def __init__(self, substrate_path: str | Path):
         self.substrate_path = Path(substrate_path).resolve()
         self.substrate = json.loads(self.substrate_path.read_text(encoding="utf-8"))
-        self.manifest = json.loads(
-            self.substrate_path.with_name("candidate.json").read_text(encoding="utf-8")
-        )
+        # The manifest lives outside the project tree (it carries the
+        # eval-config path and every case's inputs, sealed test included —
+        # nothing the optimizer should be able to read). substrate.json points
+        # at it absolutely; the sibling fallback covers scaffolds older than
+        # that move.
+        manifest_path = self.substrate.get("manifest_path") \
+            or self.substrate_path.with_name("candidate.json")
+        self.manifest_path = Path(manifest_path).resolve()
+        self.manifest = json.loads(self.manifest_path.read_text(encoding="utf-8"))
         self.project_root = Path(self.manifest["project_root"]).resolve()
         self.task_ids = tuple(str(task_id) for task_id in self.manifest["task_ids"])
 
@@ -110,7 +116,8 @@ class Bridge(CapabilityAdapter):
         harness_python = self.substrate.get("harness_python") or sys.executable
         command = [
             harness_python, "-m", "agent_eval.optimize.rollout",
-            "--manifest", str(self.substrate_path.with_name("candidate.json")),
+            "--manifest", str(self.manifest_path),
+            "--substrate", str(self.substrate_path),
             "--task-id", task_id,
             "--candidate-dir", str(candidate_dir),
             "--seed", str(seed),

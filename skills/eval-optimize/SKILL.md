@@ -30,6 +30,8 @@ misspelled or wrong engine would believe they ran one optimization and get
 the other.
 
 Parse only `--config`, `--max-usd`, `--max-iterations`, `--num-trials`,
+`--dry-run`, `--pilot-case-ids`, `--runner-budget-usd`, `--runner`, `--env`,
+`--image`, `--reintake`, `--optimizer`, `--optimizer-model`, `--skills-dir`,
 `--seed`, `--split-ratios`, `--run`, `--setup`, `--status`, `--stop`, and
 `--apply` from the arguments (ignore `--model`/`--run-id`/`--target-judge`,
 which don't apply here). Note the current scope limits (local or Harbor
