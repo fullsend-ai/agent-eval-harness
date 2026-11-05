@@ -1088,6 +1088,27 @@ def test_bridge_resolves_the_manifest_through_substrate_manifest_path(tmp_path, 
     bridge = bridge_template.Bridge(adapters_dir / "substrate.json")
     assert bridge.task_ids == ("case-9",)
 
+def test_re_intake_removes_a_pre_fix_scaffolds_stale_manifest(tmp_path, monkeypatch):
+    """astefanutti's follow-up: nothing cleaned up the manifest's previous
+    location, so a pre-fix scaffold's adapters/candidate.json — carrying the
+    eval-config path and every task_inputs entry — survived a re-intake."""
+    monkeypatch.chdir(tmp_path)
+    _bare_benchmark(tmp_path)
+    result = capevolve.prepare_project(max_usd=5, optimizer="mock")
+    project = Path(result["project_dir"])
+    # Shape a pre-fix scaffold: manifest in adapters/, no manifest_path hint.
+    stale = project / "adapters/candidate.json"
+    shutil.copy2(project.parent / "harness/candidate.json", stale)
+    substrate = json.loads((project / "adapters/substrate.json").read_text())
+    del substrate["manifest_path"]
+    (project / "adapters/substrate.json").write_text(json.dumps(substrate), encoding="utf-8")
+
+    capevolve.prepare_project(max_usd=5, optimizer="mock")
+
+    assert not stale.exists()
+    assert (project.parent / "harness/candidate.json").is_file()
+
+
 
 def test_outer_rollout_timeout_exceeds_the_inner_budgets_it_wraps(tmp_path):
     """astefanutti #3 (blocking): the outer rollout timeout was

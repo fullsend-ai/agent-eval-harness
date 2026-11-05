@@ -844,6 +844,11 @@ def prepare_project(
         # file is confusing to find later — remove it so the project dir only
         # ever reflects the most recent invocation.
         split_ids_path.unlink(missing_ok=True)
+    # Same for a pre-fix scaffold's manifest: it lived in adapters/ and
+    # carries the eval-config path and every case's inputs (sealed test
+    # included) — exactly what the move to ../harness/ took out of the
+    # optimizer-visible tree, so it must not survive a re-intake.
+    (adapters_dir / "candidate.json").unlink(missing_ok=True)
     (project_dir / "capevolve.yaml").write_text(
         yaml.safe_dump(spec, sort_keys=False), encoding="utf-8"
     )
