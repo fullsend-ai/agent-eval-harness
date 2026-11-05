@@ -251,7 +251,20 @@ def validate_optimize_block(raw: dict, config: EvalConfig) -> tuple[dict, list[d
     # naming a judge this config doesn't define (e.g. an overlay carried over
     # from another suite) would silently drop it from every measurement.
     judges = {j.name for j in config.judges}
-    named = set((config.reward.weights or {}) if config.reward.judge is None else {config.reward.judge})
+    # Every judge name the reward can read, per mode: reward.judge names one
+    # directly, `formula: weighted` reads the weights' keys, and an
+    # expression formula reads its free variables. The expression path used
+    # to be skipped, so a typo'd name there passed validation and every
+    # rollout composed a *genuine* 0.0 reward (NameError swallowed by the
+    # formula evaluator) — the campaign burned its whole budget with zero
+    # gradient and a clean-looking report.
+    if config.reward.judge is not None:
+        named = {config.reward.judge}
+    elif (config.reward.formula or "").strip() == "weighted":
+        named = set(config.reward.weights or {})
+    else:
+        from agent_eval.harbor.reward import formula_judge_names
+        named = formula_judge_names(config.reward.formula or "")
     unknown = sorted(named - judges)
     if unknown:
         raise ValueError(

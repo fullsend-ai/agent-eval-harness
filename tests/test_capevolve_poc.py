@@ -342,6 +342,60 @@ def test_run_case_recovers_summary_after_score_script_nonzero_exit(tmp_path, mon
     assert "RuntimeError" not in (result["rollout"]["error"] or "")
 
 
+def test_batch_mode_rollouts_also_scrub_gold_from_the_workspace(tmp_path, monkeypatch):
+    """astefanutti #5: the gold scrub ran only inside the case-mode branch;
+    execution.mode: batch is a supported config and its workspace got no
+    guard. The builders never copy annotations.yaml today — this pins the
+    guard for the day one starts staging more of the case dir."""
+    monkeypatch.chdir(tmp_path)
+    runs_root = tmp_path / "runs"
+    monkeypatch.setenv("AGENT_EVAL_RUNS_DIR", str(runs_root))
+    _demo_eval_yaml(tmp_path)
+
+    manifest = {
+        "harness_root": str(tmp_path),
+        "project_root": str(tmp_path),
+        "eval_config": str(tmp_path / "eval.yaml"),
+        "eval_name": "demo-eval",
+        "execution_mode": "batch",
+        "apply_to": ".claude/skills/demo",
+        "candidate": [{"dest": "SKILL.md", "is_dir": False}],
+        "task_ids": ["case-1"],
+        "runner_budget_usd": None,
+    }
+    candidate_dir = tmp_path / "candidate"
+    candidate_dir.mkdir()
+    (candidate_dir / "SKILL.md").write_text("candidate", encoding="utf-8")
+
+    state = {}
+
+    def _fake_run_script(manifest_, name, *args, allow_nonzero=False, env_overrides=None):
+        if name == "workspace.py":
+            run_id = args[args.index("--run-id") + 1]
+            workspace = rollout._case_workspace(run_id)
+            workspace.mkdir(parents=True, exist_ok=True)
+            state["workspace"] = workspace
+            # A stray gold file in the batch workspace — nothing should
+            # carry it to the agent under test.
+            (workspace / "annotations.yaml").write_text("gold answers", encoding="utf-8")
+        elif name == "collect.py":
+            run_dir = Path(args[args.index("--output") + 1])
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / "run_result.json").write_text(json.dumps({"per_case": {}}), encoding="utf-8")
+            state["run_dir"] = run_dir
+        elif name == "score.py":
+            (state["run_dir"] / "summary.yaml").write_text(
+                "per_case:\n  case-1:\n    quality:\n      value: 1\n", encoding="utf-8",
+            )
+        return None
+
+    monkeypatch.setattr(rollout, "_run_script", _fake_run_script)
+
+    rollout.run_case(manifest, "case-1", candidate_dir, seed=0)
+
+    assert not (state["workspace"] / "annotations.yaml").exists()
+
+
 def test_batch_rollout_returns_the_run_level_transcript(tmp_path, monkeypatch):
     """Caught by the live GLM smoke rollout: batch mode writes stdout.log once
     per run, not under cases/<id>/, so the proposer got an empty trace."""
@@ -863,6 +917,27 @@ def test_reward_naming_an_undefined_judge_is_blocked(tmp_path, monkeypatch):
     with pytest.raises(intake.IntakeBlocked) as excinfo:
         capevolve.prepare_project(max_usd=5, optimizer="mock")
     assert "rfe_quality" in excinfo.value.blocked[0]["why"]
+
+
+@pytest.mark.parametrize("formula", [
+    "files_exist * qulaity",   # typo inside an expression
+    "qulaity",                 # typo'd bare-name formula
+    "mean([files_exist, qulaity])",
+])
+def test_reward_expression_naming_an_undefined_judge_is_blocked(tmp_path, monkeypatch, formula):
+    """astefanutti #7: only reward.weights names were validated, so a typo'd
+    judge name inside an expression formula passed intake and every rollout
+    composed a genuine 0.0 reward (the formula evaluator swallows the
+    NameError into a 0.0, and the judges themselves all succeeded, so it is
+    never recorded as missing data) — the campaign burned its whole budget
+    with zero gradient and a clean-looking completion report."""
+    monkeypatch.chdir(tmp_path)
+    _bare_benchmark(tmp_path)
+    with open(tmp_path / "eval.yaml", "a", encoding="utf-8") as fh:
+        fh.write(f'reward:\n  formula: "{formula}"\n')
+    with pytest.raises(intake.IntakeBlocked) as excinfo:
+        capevolve.prepare_project(max_usd=5, optimizer="mock")
+    assert "qulaity" in excinfo.value.blocked[0]["why"]
 
 
 def test_intake_refuses_to_rewrite_a_live_campaign(tmp_path, monkeypatch):

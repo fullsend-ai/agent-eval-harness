@@ -330,9 +330,13 @@ def _execute_local_steps(
         candidate_workspace = workspace / "cases" / task_id
         if not candidate_workspace.is_dir():
             raise RuntimeError(f"workspace builder did not create case workspace: {candidate_workspace}")
-        redact.remove_gold(candidate_workspace)
     else:
         candidate_workspace = workspace
+    # The gold scrub guards BOTH substrates: the workspace builders never
+    # copy answers.yaml today, but the guard exists precisely for the day
+    # one starts staging more of the case dir — and it must not be the case
+    # branch alone (execution.mode: batch is a supported config).
+    redact.remove_gold(candidate_workspace)
     _materialize_runtime_resources(manifest, candidate_workspace)
     if stage_in_workspace:
         artifact.stage_candidate(
