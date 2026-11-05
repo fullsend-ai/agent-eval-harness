@@ -568,7 +568,7 @@ class ClaudeCodeRunner(EvalRunner):
             # Stop and reap the CLI first: a child left running would keep
             # producing billed generations nobody reads (CWE-772). Drain what
             # it already wrote — those ids are billed too — then keep every
-            # streamed id as the result's cost-truth key set and let the
+            # streamed generation id as the result's cost-truth key set and let the
             # binding finish (subagent transcripts, hook ids), or the partial
             # run's spend would stay unpriced and unaudited.
             if proc is not None:
@@ -833,6 +833,8 @@ class ClaudeCodeRunner(EvalRunner):
             return
         encoded = claude_session_dir_name(workspace)
         session_dir = projects_dir / encoded
+        if session_dir == projects_dir:
+            return
         if session_dir.exists() and session_dir.is_dir():
             shutil.rmtree(session_dir, ignore_errors=True)
 

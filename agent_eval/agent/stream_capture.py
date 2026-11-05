@@ -235,8 +235,8 @@ def subagent_message_ids(subagent_dir):
 
 
 def subagent_generation_ids(subagent_dir):
-    """Every top-level assistant ``requestId`` across captured subagent
-    transcripts (deduplicated). Only OpenRouter ``gen-…`` ids are returned."""
+    """Every OpenRouter generation id across captured subagent transcripts
+    (deduplicated): a top-level ``requestId`` or the legacy ``message.id``."""
     subagent_path = Path(subagent_dir)
     ids = set()
     if not subagent_path.is_dir():
@@ -251,17 +251,17 @@ def subagent_generation_ids(subagent_dir):
                         obj = json.loads(line)
                     except (json.JSONDecodeError, ValueError):
                         continue
-                    request_id = obj.get("requestId") if isinstance(obj, dict) else None
-                    if (isinstance(request_id, str) and request_id.startswith("gen-")):
-                        ids.add(request_id)
+                    generation_id = _event_generation_id(obj)
+                    if generation_id is not None:
+                        ids.add(generation_id)
         except OSError:
             continue
     return ids
 
 
 def message_ids_for_run(stream_ids, subagent_dir):
-    """The run's cost-truth key set: root-stream ids merged with the subagent
-    transcripts' ids, in a stable order."""
+    """The run's Claude message-id set: root-stream ids merged with the
+    subagent transcripts' ids, in a stable order."""
     ids = set(stream_ids or ()) | subagent_message_ids(subagent_dir)
     return sorted(ids)
 
@@ -274,17 +274,28 @@ def generation_ids_for_run(stream_generation_ids, subagent_dir):
 
 
 def extract_session_id(stdout_lines):
-    """The Claude Code session id from the most recent result event."""
+    """The Claude Code session id from the result or system/init event."""
     for line in reversed(list(stdout_lines or ())):
         try:
             obj = json.loads(line)
         except (json.JSONDecodeError, ValueError, TypeError):
             continue
-        if not isinstance(obj, dict) or obj.get("type") != "result":
+        if not isinstance(obj, dict):
             continue
-        session_id = obj.get("session_id")
-        if isinstance(session_id, str) and session_id:
-            return session_id
+        if obj.get("type") == "result":
+            session_id = obj.get("session_id")
+            if isinstance(session_id, str) and session_id:
+                return session_id
+    for line in stdout_lines or ():
+        try:
+            obj = json.loads(line)
+        except (json.JSONDecodeError, ValueError, TypeError):
+            continue
+        if (isinstance(obj, dict) and obj.get("type") == "system"
+                and obj.get("subtype") == "init"):
+            session_id = obj.get("session_id")
+            if isinstance(session_id, str) and session_id:
+                return session_id
     return None
 
 
@@ -297,8 +308,9 @@ def claude_session_generation_ids(workspace, session_id, projects_dir=None):
     """OpenRouter generation ids from Claude Code's persisted session transcript.
 
     Claude Code's stream-json output does not always include the top-level
-    ``requestId``, but its session transcript does. The transcript is removed
-    after a successful run, so callers must read it before cleanup.
+    ``requestId``, but its session transcript does. Older versions echo the
+    generation id as ``message.id``. The transcript is removed after a
+    successful run, so callers must read it before cleanup.
     """
     if not isinstance(session_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", session_id):
         return set()
@@ -341,33 +353,63 @@ def claude_session_generation_ids(workspace, session_id, projects_dir=None):
                         obj = json.loads(line)
                     except (json.JSONDecodeError, ValueError):
                         continue
-                    request_id = obj.get("requestId") if isinstance(obj, dict) else None
-                    if isinstance(request_id, str) and request_id.startswith("gen-"):
-                        ids.add(request_id)
+                    generation_id = _event_generation_id(obj)
+                    if generation_id is not None:
+                        ids.add(generation_id)
         except OSError:
             continue
     return ids
 
 
 def extract_generation_ids(stdout_lines):
-    """Top-level OpenRouter ``requestId`` values from stream-json output."""
+    """OpenRouter generation ids from stream-json output.
+
+    Newer Claude Code emits a top-level ``requestId``. Older versions echo
+    the generation id as ``assistant.message.id``.
+    """
     ids = set()
     for line in stdout_lines:
         try:
             obj = json.loads(line)
         except (json.JSONDecodeError, ValueError, TypeError):
             continue
-        request_id = obj.get("requestId") if isinstance(obj, dict) else None
-        if isinstance(request_id, str) and request_id.startswith("gen-"):
-            ids.add(request_id)
+        generation_id = _event_generation_id(obj)
+        if generation_id is not None:
+            ids.add(generation_id)
     return ids
+
+
+def _event_generation_id(obj):
+    """The OpenRouter generation id carried by a Claude event.
+
+    ``requestId`` is preferred. For the legacy event shape, where Claude Code
+    echoes the OpenRouter generation id as ``assistant.message.id``, that id
+    is returned instead.
+    """
+    if not isinstance(obj, dict):
+        return None
+    request_id = obj.get("requestId")
+    if isinstance(request_id, str) and request_id.startswith("gen-"):
+        return request_id
+    if obj.get("type") is not None and obj.get("type") != "assistant":
+        return None
+    msg = obj.get("message")
+    if not isinstance(msg, dict):
+        return None
+    if obj.get("type") is None and msg.get("role") != "assistant":
+        return None
+    message_id = msg.get("id")
+    if isinstance(message_id, str) and message_id.startswith("gen-"):
+        return message_id
+    return None
 
 
 def assistant_event_ids(obj):
     """``(message id, generation id, model)`` from an assistant event.
 
     Claude's ``message.id`` is retained for turn counting. On an OpenRouter
-    connection the generation id is the newer top-level ``requestId``.
+    connection the generation id is the top-level ``requestId`` or, on older
+    versions, the same legacy ``message.id``.
     """
     if not isinstance(obj, dict) or obj.get("type") != "assistant":
         return None, None, None
@@ -376,9 +418,7 @@ def assistant_event_ids(obj):
         return None, None, None
     message_id = msg.get("id")
     request_id = obj.get("requestId")
-    generation_id = (request_id
-                     if isinstance(request_id, str) and request_id.startswith("gen-")
-                     else None)
+    generation_id = _event_generation_id(obj)
     return message_id, generation_id, msg.get("model")
 
 

@@ -498,8 +498,8 @@ def test_malformed_result_event_fields_degrade_to_missing_metrics(tmp_path):
 
 
 def test_parse_trial_collects_assistant_message_ids(tmp_path):
-    """The trial transcript's assistant message ids are the cost-truth key set
-    for Harbor runs (spec 014); duplicates (one per content block) collapse."""
+    """The trial transcript's generation ids are the cost-truth key set for
+    Harbor runs (spec 014); duplicates (one per content block) collapse."""
     job = tmp_path / "job"
     tdir = job / "trial__case-1"
     (tdir / "verifier").mkdir(parents=True)

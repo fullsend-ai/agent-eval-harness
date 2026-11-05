@@ -48,7 +48,9 @@ class TestClaudeSessionGenerationIds:
         session_dir = projects / encoded
         session_dir.mkdir(parents=True)
         (session_dir / f"{session_id}.jsonl").write_text(
-            json.dumps({"type": "assistant", "requestId": "gen-root"}) + "\n")
+            json.dumps({"type": "assistant", "requestId": "gen-root"}) + "\n" +
+            json.dumps({"type": "assistant",
+                        "message": {"role": "assistant", "id": "gen-legacy"}}) + "\n")
         subagents = session_dir / session_id / "subagents"
         subagents.mkdir(parents=True)
         (subagents / "agent.jsonl").write_text(
@@ -57,7 +59,7 @@ class TestClaudeSessionGenerationIds:
 
         ids = claude_session_generation_ids(workspace, session_id, projects)
 
-        assert ids == {"gen-root", "gen-sub"}
+        assert ids == {"gen-root", "gen-sub", "gen-legacy"}
 
     def test_requires_a_session_id(self, tmp_path):
         assert claude_session_generation_ids(tmp_path, None, tmp_path) == set()
@@ -92,6 +94,13 @@ class TestClaudeSessionGenerationIds:
         ]
 
         assert extract_session_id(lines) == "new"
+
+    def test_falls_back_to_init_session_id_before_result(self):
+        lines = [
+            json.dumps({"type": "system", "subtype": "init", "session_id": "session-123"}),
+        ]
+
+        assert extract_session_id(lines) == "session-123"
 
     def test_includes_subagent_ids_post_2_1_108(self, post_2_1_108_stream):
         """Post-2.1.108: seen_msg_ids includes foreground subagent message IDs."""
@@ -259,14 +268,15 @@ class TestMessageIds:
         (sub / "a.jsonl").write_text("\n".join([
             json.dumps({"requestId": "gen-a1", "message": {"role": "assistant", "id": "msg-a1"}}),
             json.dumps({"requestId": "gen-a1", "message": {"role": "assistant", "id": "msg-a1"}}),
+            json.dumps({"message": {"role": "assistant", "id": "gen-legacy"}}),
             json.dumps({"message": {"role": "user", "id": "u1"}}),
             "not json",
             json.dumps({"requestId": "msg-not-generation", "message": {
                 "role": "assistant", "id": "msg-a2"}}),
         ]))
         (sub / "notes.txt").write_text("ignored")
-        assert subagent_message_ids(sub) == {"msg-a1", "msg-a2"}
-        assert subagent_generation_ids(sub) == {"gen-a1"}
+        assert subagent_message_ids(sub) == {"msg-a1", "msg-a2", "gen-legacy"}
+        assert subagent_generation_ids(sub) == {"gen-a1", "gen-legacy"}
         assert subagent_message_ids(tmp_path / "missing") == set()
         assert subagent_generation_ids(tmp_path / "missing") == set()
 
@@ -293,12 +303,16 @@ class TestProviderView:
         from agent_eval.agent.stream_capture import extract_generation_ids
 
         event = make_assistant("msg-1", model="z-ai/glm-5.2", request_id="gen-1")
+        legacy_event = make_assistant("gen-legacy", model="z-ai/glm-5.2")
         assert assistant_message_id(make_assistant("gen-1", model="z-ai/glm-5.2")) == ("gen-1", "z-ai/glm-5.2")
         assert assistant_event_ids(event) == ("msg-1", "gen-1", "z-ai/glm-5.2")
+        assert assistant_event_ids(legacy_event) == ("gen-legacy", "gen-legacy", "z-ai/glm-5.2")
         assert assistant_event_ids(make_assistant("msg-2")) == ("msg-2", None, "claude-sonnet-4-5")
         assert assistant_message_id({"type": "result"}) == (None, None)
         assert assistant_message_id({"type": "assistant", "message": {"id": ""}}) == (None, None)
-        assert extract_generation_ids([json.dumps(event), json.dumps(make_assistant("msg-2"))]) == {"gen-1"}
+        assert extract_generation_ids(
+            [json.dumps(event), json.dumps(make_assistant("msg-2")),
+             json.dumps(legacy_event)]) == {"gen-1", "gen-legacy"}
 
     def test_classify_stream_errors(self):
         from agent_eval.agent.stream_capture import classify_stream_errors
