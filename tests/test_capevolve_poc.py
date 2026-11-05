@@ -928,6 +928,22 @@ def test_bridge_resolves_the_manifest_through_substrate_manifest_path(tmp_path):
     assert bridge.manifest_path == (manifest_dir / "candidate.json").resolve()
 
 
+def test_outer_rollout_timeout_exceeds_the_inner_budgets_it_wraps(tmp_path):
+    """astefanutti #3 (blocking): the outer rollout timeout was
+    agent_timeout + 600, smaller than the inner budgets it wrapped —
+    5 sequential steps of agent_timeout + 300 each on the local substrate,
+    agent_timeout + 900 on Harbor. Healthy slow rollouts were SIGKILLed and
+    recorded as missing data, biasing the search toward fail-fast
+    candidates; on Harbor the inner cap was unreachable dead code."""
+    bridge = _make_bridge(tmp_path)
+    bridge.manifest["agent_timeout_s"] = 1800
+    bridge.substrate["runner"] = "local"
+    local = bridge._rollout_timeout_s()
+    assert local > 5 * (1800 + 300)  # sum of the per-step budgets, plus margin
+    bridge.substrate["runner"] = "harbor"
+    harbor = bridge._rollout_timeout_s()
+    assert harbor > 1800 + 900       # the in-container cap, plus margin
+    assert harbor < local            # Harbor wraps one budget, not five
 
 
 def test_launch_stops_a_campaign_that_never_creates_a_run_dir(tmp_path, monkeypatch):

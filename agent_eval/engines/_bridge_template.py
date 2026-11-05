@@ -101,6 +101,31 @@ class Bridge(CapabilityAdapter):
         self.project_root = Path(self.manifest["project_root"]).resolve()
         self.task_ids = tuple(str(task_id) for task_id in self.manifest["task_ids"])
 
+    # Must match the sequential step sequence in the harness's
+    # agent_eval/optimize/rollout.py::run_case (workspace/execute/collect/
+    # score/report). The bridge cannot import that module (it is copied into
+    # generated projects and must stay self-contained), so the count is
+    # mirrored here; a stale count only loosens or tightens the outer bound.
+    _ROLLOUT_STEPS = 5
+
+    def _rollout_timeout_s(self) -> int:
+        """The outer rollout bound, derived from the inner budgets it wraps.
+
+        An outer cap smaller than the inner timeouts kills healthy slow
+        rollouts: they come back as missing data (never a low score), which
+        silently biases the search toward candidates that fail fast.
+        """
+        agent_timeout = self.manifest.get("agent_timeout_s") or 1800
+        if self.substrate.get("runner") == "harbor":
+            # rollout.py's Harbor path caps the in-container run at
+            # agent_timeout + 900; the margin covers task-package
+            # generation and upload around it.
+            return agent_timeout + 900 + 600
+        # rollout.py gives each of its _ROLLOUT_STEPS sequential steps its
+        # own budget of agent_timeout + 300, so the outer bound must exceed
+        # their SUM, not the per-step budget.
+        return self._ROLLOUT_STEPS * (agent_timeout + 300) + 600
+
     def _invoke_rollout(self, task_id: str, candidate_dir: Path, seed: int) -> dict:
         env = dict(os.environ)
         # Belt and suspenders: the chosen interpreter (below) should already
@@ -126,7 +151,7 @@ class Bridge(CapabilityAdapter):
         # report, or Harbor generation+execution): without it a hang in any
         # step blocks the campaign forever, since max_usd never gets the
         # chance to trigger if this call never returns.
-        timeout_s = (self.manifest.get("agent_timeout_s") or 1800) + 600
+        timeout_s = self._rollout_timeout_s()
         try:
             proc = subprocess.run(
                 command, cwd=self.project_root, env=env, capture_output=True, text=True,
