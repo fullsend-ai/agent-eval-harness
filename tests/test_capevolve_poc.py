@@ -1428,6 +1428,74 @@ def test_blocks_declared_in_eval_yaml_win_over_an_earlier_overlay(tmp_path, monk
     assert "the eval config already declares optimize: and reward:" in (project / "PROJECT.md").read_text()
 
 
+def test_an_overlay_with_user_overrides_survives_eval_yaml_declaring_both_blocks(tmp_path, monkeypatch):
+    """astefanutti #8: the overlay is the documented place for user
+    overrides (_model_preflight tells users to put models:/providers: there),
+    but the moment eval.yaml declared both optimize: and reward:, intake
+    DELETED the overlay file — the overrides went with it, silently."""
+    import yaml
+    monkeypatch.chdir(tmp_path)
+    _bare_benchmark(tmp_path)
+    capevolve.prepare_project(max_usd=5, optimizer="mock")
+    overlay = intake.overlay_path(tmp_path)
+    # The user follows the preflight's advice.
+    body = yaml.safe_load(overlay.read_text(encoding="utf-8"))
+    body["models"] = {"skill": "claude-haiku-5-5"}
+    body["runner"] = {"type": "claude-code", "env": {"FOO": "bar"}}
+    overlay.write_text(yaml.safe_dump(body, sort_keys=False), encoding="utf-8")
+
+    with open(tmp_path / "eval.yaml", "a", encoding="utf-8") as fh:
+        fh.write(
+            "reward:\n  judge: quality\n  normalize: true\n"
+            "optimize:\n  candidate:\n    - {dest: create, source: .claude/skills/create}\n"
+            "  apply_to: .claude/skills\n"
+        )
+    result = capevolve.prepare_project(max_usd=5, optimizer="mock")
+
+    # The overlay survives, pruned to the user's own overrides; the
+    # benchmark's blocks still win (they come from the base it extends).
+    assert result["overlay"] == str(overlay)
+    kept = yaml.safe_load(overlay.read_text(encoding="utf-8"))
+    assert kept["models"] == {"skill": "claude-haiku-5-5"}
+    assert kept["runner"] == {"type": "claude-code", "env": {"FOO": "bar"}}
+    assert "optimize" not in kept and "reward" not in kept
+    # And the effective config still sees the benchmark's declared blocks.
+    from agent_eval.config import load_raw
+    merged, _chain = load_raw(overlay)
+    assert "optimize" in merged and "reward" in merged
+    assert merged["models"] == {"skill": "claude-haiku-5-5"}
+
+
+def test_an_overlay_with_user_overrides_survives_a_partial_shadows_rewrite(tmp_path, monkeypatch):
+    """astefanutti #8, partial variant: adding only reward: to eval.yaml
+    makes the earlier overlay's reward a shadow, so intake rewrites the
+    overlay — which used to drop the user's models:/providers: overrides
+    along with the shadowed block."""
+    import yaml
+    monkeypatch.chdir(tmp_path)
+    _bare_benchmark(tmp_path)
+    capevolve.prepare_project(max_usd=5, optimizer="mock")
+    overlay = intake.overlay_path(tmp_path)
+    body = yaml.safe_load(overlay.read_text(encoding="utf-8"))
+    body["models"] = {"skill": "claude-haiku-5-5"}
+    overlay.write_text(yaml.safe_dump(body, sort_keys=False), encoding="utf-8")
+
+    with open(tmp_path / "eval.yaml", "a", encoding="utf-8") as fh:
+        fh.write("reward:\n  judge: quality\n  normalize: true\n")
+    result = capevolve.prepare_project(max_usd=5, optimizer="mock")
+
+    assert result["overlay"] == str(overlay)
+    kept = yaml.safe_load(overlay.read_text(encoding="utf-8"))
+    assert kept["models"] == {"skill": "claude-haiku-5-5"}
+    # The shadowed reward is gone from the overlay (the base's wins) but
+    # optimize: is still proposed/kept there.
+    assert "reward" not in kept
+    assert "optimize" in kept
+    from agent_eval.config import load_raw
+    merged, _chain = load_raw(overlay)
+    assert merged["reward"]["judge"] == "quality"
+
+
 def test_overlay_only_supplies_the_block_eval_yaml_still_lacks(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     _bare_benchmark(tmp_path)

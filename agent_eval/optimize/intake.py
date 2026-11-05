@@ -348,22 +348,44 @@ def run_intake(project_root: Path, config_path: Path, *, reintake: bool = False)
     raw, _chain = load_raw(config_path)
     missing = [key for key, present in (("optimize", isinstance(raw.get("optimize"), dict)),
                                         ("reward", raw.get("reward") is not None)) if not present]
+    layered, chain, own = {}, [], {}
+    if overlay.is_file() and not reintake:
+        try:
+            layered, chain = load_raw(overlay)
+            # The overlay's OWN keys, not load_raw's merged view (which folds
+            # in the whole base config): extras are the hand-edits that live
+            # only in this file.
+            own = yaml.safe_load(overlay.read_text(encoding="utf-8")) or {}
+        except (OSError, ValueError):  # its base moved or it no longer parses: regenerate
+            layered, chain, own = {}, [], {}
+    # Hand-edits outside optimize:/reward: (models:, providers:, anything
+    # else) are the documented place for user overrides — _model_preflight
+    # sends users here — so they must survive every automatic rewrite. Only
+    # an explicit --reintake regenerates the overlay wholesale.
+    extras = {key: value for key, value in own.items()
+              if key not in ("extends", "optimize", "reward")}
+    # An overlay layered over a different eval config (e.g. an earlier run
+    # without --config, or another profile) would silently swap the
+    # models, judges, or dataset under test: re-point it, keeping edits.
+    # chain is root first, the overlay last, so its own base is chain[-2].
+    stale_base = not layered or len(chain) < 2 or Path(chain[-2]).resolve() != config_path
+    if stale_base:
+        extras = {}  # those overrides were chosen for another suite's models
     if not missing:
+        if extras:
+            # The eval config now declares both blocks, but the overlay still
+            # carries the user's own overrides: keep it, pruned to those,
+            # rather than deleting the file (which is what used to silently
+            # drop them).
+            written = write_overlay(project_root, config_path, extras)
+            return {"config_path": written.resolve(), "base_config": config_path,
+                    "overlay": str(written), "defaulted": [], "reused_overlay": False}
         overlay.unlink(missing_ok=True)
         return {"config_path": config_path, "base_config": config_path, "overlay": None,
                 "defaulted": [], "reused_overlay": False}
 
     kept = {}
-    if overlay.is_file() and not reintake:
-        try:
-            layered, chain = load_raw(overlay)
-        except (OSError, ValueError):  # its base moved or it no longer parses: regenerate
-            layered, chain = {}, []
-        # An overlay layered over a different eval config (e.g. an earlier run
-        # without --config, or another profile) would silently swap the
-        # models, judges, or dataset under test: re-point it, keeping edits.
-        # chain is root first, the overlay last, so its own base is chain[-2].
-        stale_base = len(chain) < 2 or Path(chain[-2]).resolve() != config_path
+    if layered:
         shadows = any(key not in missing and layered.get(key) != raw.get(key)
                       for key in ("optimize", "reward"))
         if not stale_base and not shadows:
@@ -376,7 +398,7 @@ def run_intake(project_root: Path, config_path: Path, *, reintake: bool = False)
         if not stale_base:
             kept = {key: layered[key] for key in missing if key in layered}
 
-    additions, defaulted = dict(kept), []
+    additions, defaulted = {**extras, **kept}, []
     if "optimize" in missing and "optimize" not in kept:
         entry = ((raw.get("execution") or {}).get("skill") or raw.get("skill") or "")
         if not entry:
