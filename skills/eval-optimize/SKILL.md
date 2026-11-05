@@ -30,8 +30,8 @@ misspelled or wrong engine would believe they ran one optimization and get
 the other.
 
 Parse only `--config`, `--max-usd`, `--max-iterations`, `--num-trials`,
-`--dry-run`, `--pilot-case-ids`, `--runner-budget-usd`, `--runner`, `--env`,
-`--image`, `--reintake`, `--optimizer`, `--optimizer-model`, `--skills-dir`,
+`--workers`, `--dry-run`, `--pilot-case-ids`, `--runner-budget-usd`, `--runner`,
+`--env`, `--image`, `--reintake`, `--optimizer`, `--optimizer-model`, `--skills-dir`,
 `--seed`, `--split-ratios`, `--run`, `--setup`, `--status`, `--stop`, and
 `--apply` from the arguments (ignore `--model`/`--run-id`/`--target-judge`,
 which don't apply here). Note the current scope limits (local or Harbor
@@ -70,7 +70,11 @@ the `git checkout` that fixes it.
   mode and `k_se`, the qualitative point that smaller real gains come back
   "indecisive" rather than "accept" at small val sizes, and the cost estimate
   as a **range**, blended with `observed_cost_per_rollout` when the response
-  includes one (calibrated from this eval's own past runs).
+  includes one (calibrated from this eval's own past runs). Also state
+  `scaffold.workers`: at 1 the campaign is strictly serial (wall-clock =
+  roughly `|val| × num_trials × (iterations + 1)` rollout times — `--max-usd`
+  caps spend, not time), and `--workers N` runs rollouts N-wide if the user
+  wants that shortened (bounded by provider rate limits).
 - **Launch** (no `--dry-run`/`--status`/`--stop`/`--apply`, `--max-usd`
   given): confirm the spend with the user via `AskUserQuestion` first —
   budget, iteration/trial counts, the prior `--dry-run` cost estimate if you

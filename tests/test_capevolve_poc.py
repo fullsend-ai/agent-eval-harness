@@ -1648,6 +1648,29 @@ def test_split_sizes_sum_to_the_case_count():
     assert capevolve._split_sizes(4, (0.5, 0.25, 0.25)) == {"train": 2, "val": 1, "test": 1}
 
 
+def test_workers_is_wired_into_the_generated_spec(tmp_path, monkeypatch):
+    """astefanutti C1: every campaign was strictly serial — the generated
+    capevolve.yaml set no `workers`, so cap-evolve's rollout pool stayed at
+    its default of 1, and max_usd cannot shorten wall-clock (it caps spend,
+    not time). --workers now emits the spec key cap-evolve reads."""
+    import yaml as _yaml
+    monkeypatch.chdir(tmp_path)
+    _bare_benchmark(tmp_path)
+
+    serial = capevolve.prepare_project(max_usd=5, optimizer="mock")
+    spec = _yaml.safe_load((Path(serial["project_dir"]) / "capevolve.yaml").read_text())
+    assert "workers" not in spec          # default keeps the serial shape
+    assert serial["workers"] == 1
+
+    wide = capevolve.prepare_project(max_usd=5, optimizer="mock", workers=4)
+    spec = _yaml.safe_load((Path(wide["project_dir"]) / "capevolve.yaml").read_text())
+    assert spec["workers"] == 4
+    assert wide["workers"] == 4
+
+    with pytest.raises(ValueError, match="--workers must be >= 1"):
+        capevolve.prepare_project(max_usd=5, optimizer="mock", workers=0)
+
+
 def test_optimize_block_redirects_search_controls(tmp_path):
     (tmp_path / "skill.md").write_text("seed", encoding="utf-8")
     config = type("Config", (), {

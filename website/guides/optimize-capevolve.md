@@ -111,6 +111,13 @@ one case is prone to runaway tool-call loops. `--dry-run` gives you a cost-per-r
 estimate, calibrated from this eval's own past runs when it has any, before you
 commit real spend.
 
+Budget caps spend, not time: a campaign runs roughly
+`|val| × num-trials × (iterations + 1)` rollouts, and by default they are
+**strictly serial** — a real campaign is hours of wall-clock regardless of
+budget. Pass `--workers N` to let cap-evolve run rollouts N-wide
+(`--dry-run` reports the effective setting); wall-clock scales roughly 1/N,
+bounded by your provider's rate limits.
+
 ## Stopping and re-applying
 
 `--stop` is the only safe way to end a launched campaign — it signals the whole

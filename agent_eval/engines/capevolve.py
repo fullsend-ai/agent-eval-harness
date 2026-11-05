@@ -574,6 +574,7 @@ def prepare_project(
     image: str | None = None,
     skills_dir: str | None = None,
     reintake: bool = False,
+    workers: int = 1,
 ) -> dict:
     """Run cap-evolve's intake phase against the benchmark in the current directory.
 
@@ -599,6 +600,8 @@ def prepare_project(
         raise ValueError("--runner-budget-usd must be a finite positive number")
     if pilot_case_ids and len(pilot_case_ids) != 3:
         raise ValueError("a pilot run uses exactly three cases (train, val, test)")
+    if workers < 1:
+        raise ValueError("--workers must be >= 1")
     if runner in _UNSUPPORTED_SUBSTRATES:
         raise ValueError(f"--runner {runner}: {_UNSUPPORTED_SUBSTRATES[runner]}")
     if runner == "harbor" and harbor_env not in HARBOR_ENVS:
@@ -763,6 +766,11 @@ def prepare_project(
         "split_val": split_ratios[1],
         "split_test": split_ratios[2],
         "num_trials": num_trials,
+        # Opt-in rollout concurrency (cap-evolve pools run_target() calls;
+        # score() stays serial). Emitted only when > 1 so the generated
+        # spec keeps its default-serial shape — every published number is
+        # a serial measurement unless the user asks otherwise.
+        **({"workers": workers} if workers > 1 else {}),
         "gate_mode": "paired",
         "gate_k_se": 1.0,
         "max_iterations": max_iterations,
@@ -860,8 +868,10 @@ def prepare_project(
         ),
         "gate_mode": spec["gate_mode"],
         "gate_k_se": spec["gate_k_se"],
+        # Rollout concurrency: at workers=1 a campaign is
         # |val| x num_trials x (iterations + 1) sequential rollouts, and
         # max_usd cannot shorten that — the binding constraint is time.
+        "workers": workers,
     }
     if cost_hint is not None:
         result["observed_cost_per_rollout"] = cost_hint
@@ -1606,6 +1616,9 @@ def main(argv=None) -> int:
     parser.add_argument("--max-usd", type=float, help="hard total campaign budget; required for --dry-run/launch")
     parser.add_argument("--max-iterations", type=int, default=10)
     parser.add_argument("--num-trials", type=int, default=1)
+    parser.add_argument("--workers", type=int, default=1,
+                        help="concurrent rollouts cap-evolve may run (default 1 = serial; wall-clock "
+                             "scales roughly 1/N, bounded by provider rate limits)")
     parser.add_argument("--split-ratios", default="0.5,0.25,0.25")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--optimizer", default="claude-code",
@@ -1725,6 +1738,7 @@ def main(argv=None) -> int:
             image=args.image,
             skills_dir=skills["skills_dir"],
             reintake=args.reintake,
+            workers=args.workers,
         )
         generated["warnings"] = skills["warnings"] + generated.get("warnings", [])
         generated["cap_evolve_skills"] = {k: skills[k] for k in ("skills_dir", "source", "pinned_sha", "fetched")}
