@@ -77,8 +77,6 @@ agent_eval/              # Python package (config, runner, state)
     podman.py            # Podman BaseEnvironment (local containers)
     kubernetes.py        # Kubernetes BaseEnvironment (OpenShift, Python client)
     templates/           # task.toml, instruction.md, test.sh templates
-  optimize/              # Engine-agnostic optimization primitives (intake, rollout, ...)
-  engines/capevolve.py   # The only file coupled to cap-evolve (agent-eval-capevolve CLI)
   tools/
     interception.py      # Shared tool interception generation (workspace + Harbor)
   judges/                # Builtin judges (auto-discovered by category)
@@ -158,9 +156,8 @@ skills/eval-mlflow/      # Skill: MLflow integration
     attach_feedback.py   # Push/pull feedback between harness and traces
     from_traces.py       # Extract inputs from production traces
 
-skills/eval-optimize/    # Skill: automated refinement loop (default), or statistically-gated
-                         # optimization via cap-evolve (--engine cap-evolve)
-  SKILL.md               # Composes with /eval-run via Skill tool, or cap-evolve dispatch
+skills/eval-optimize/    # Skill: refinement loop, or --engine cap-evolve
+  SKILL.md               # Composes with /eval-run via Skill tool
 
 skills/eval-compare/     # Skill: cross-model/cross-run comparison report
   SKILL.md               # Discover runs, generate tabbed HTML, LLM analysis sections
@@ -241,7 +238,7 @@ The `schema` descriptions are documentation for the LLM agents and judges. Scrip
 /eval-run --model opus                 # Run: execute eval suite
 /eval-review --run-id <id>             # Review: interactive human feedback + changes
 /eval-mlflow --run-id <id>             # MLflow: sync dataset, log results
-/eval-optimize --model opus            # Optimize: automated refinement loop (--engine cap-evolve for cap-evolve)
+/eval-optimize --model opus            # Optimize: automated refinement loop
 /eval-compare <input-dir>              # Compare: tabbed HTML report across models/runs
 /eval-anova --config eval.yaml         # DoE: matrix of configs → runs → ANOVA + comparison
 ```
