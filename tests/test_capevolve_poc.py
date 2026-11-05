@@ -1628,6 +1628,56 @@ def test_an_overlay_with_user_overrides_survives_a_partial_shadows_rewrite(tmp_p
     assert merged["reward"]["judge"] == "quality"
 
 
+def test_an_overlay_hand_edit_using_the_replace_tag_round_trips(tmp_path, monkeypatch):
+    """astefanutti's follow-up on the overlay prune: the overlay is exactly
+    where someone would use the harness's own `!replace` list tag, and the
+    prune round-tripped extras through safe_load/safe_dump — which raised a
+    ConstructorError traceback on it. The tag now survives the prune."""
+    import yaml as _yaml
+    monkeypatch.chdir(tmp_path)
+    _bare_benchmark(tmp_path)
+    capevolve.prepare_project(max_usd=5, optimizer="mock")
+    overlay = intake.overlay_path(tmp_path)
+    body = _yaml.safe_load(overlay.read_text(encoding="utf-8"))
+    overlay.write_text(
+        _yaml.safe_dump(body, sort_keys=False)
+        + "models:\n  some_list: !replace\n  - a\n",
+        encoding="utf-8")
+
+    with open(tmp_path / "eval.yaml", "a", encoding="utf-8") as fh:
+        fh.write("reward:\n  judge: quality\n  normalize: true\n")
+    result = capevolve.prepare_project(max_usd=5, optimizer="mock")
+
+    assert result["overlay"] == str(overlay)
+    text = overlay.read_text(encoding="utf-8")
+    assert "!replace" in text  # the tag survived the prune verbatim
+    # ...and the pruned overlay still parses with the harness's own loader.
+    from agent_eval.config import _ConfigLoader
+    with open(overlay, encoding="utf-8") as fh:
+        loader = _ConfigLoader(fh)
+        kept = loader.get_single_data()
+        loader.dispose()
+    assert list(kept["models"]["some_list"]) == ["a"]
+
+
+def test_an_overlay_with_an_unknown_tag_fails_loud_not_silently(tmp_path, monkeypatch):
+    """The other half of the follow-up: an overlay construct the harness
+    does not understand must tell the user, not traceback — and must NOT be
+    silently regenerated (which would drop their hand-edits)."""
+    monkeypatch.chdir(tmp_path)
+    _bare_benchmark(tmp_path)
+    capevolve.prepare_project(max_usd=5, optimizer="mock")
+    overlay = intake.overlay_path(tmp_path)
+    body = overlay.read_text(encoding="utf-8")
+    overlay.write_text(body + "mystery: !wat\n  - a\n", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="could not read the overlay") as excinfo:
+        capevolve.prepare_project(max_usd=5, optimizer="mock")
+    assert "!wat" in str(excinfo.value) and "--reintake" in str(excinfo.value)
+    # The user's overlay file is untouched — not regenerated away.
+    assert "!wat" in overlay.read_text(encoding="utf-8")
+
+
 def test_overlay_only_supplies_the_block_eval_yaml_still_lacks(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     _bare_benchmark(tmp_path)

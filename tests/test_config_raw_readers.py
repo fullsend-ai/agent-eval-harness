@@ -34,8 +34,9 @@ ALLOWED_YAML_READERS = {
     "agent_eval/harbor/tasks.py": {"generate_tasks": "case input.yaml"},
     "agent_eval/hooks.py": {"_read_hook_output_file": "hook output YAML"},
     "agent_eval/optimize/rollout.py": {"run_case": "summary.yaml"},
-    "agent_eval/optimize/intake.py": {"run_intake": "the overlay's OWN keys (hand-edit preservation), "
-                                                    "deliberately not load_raw's merged view"},
+    "agent_eval/optimize/intake.py": {"_read_overlay_own": "the overlay's OWN keys (hand-edit "
+                                                                    "preservation, tags intact), "
+                                                                    "deliberately not load_raw's merged view"},
     "agent_eval/state.py": {"main": "tmp/ state files"},
     "agent_eval/tools/interception.py": {"generate_interception": "tool_handlers.yaml"},
     "scripts/ensure_deps.py": {"_read": "stdlib fallback when agent_eval cannot import (follows extends itself)"},
