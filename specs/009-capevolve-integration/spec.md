@@ -86,8 +86,11 @@ on `<project>/adapters/adapter.py`, requires a class literally named
   `_bridge_template.py` reads; it lives at `../harness/candidate.json`,
   outside the project tree — it names the eval-config path and every case's
   inputs, sealed test included, none of which the optimizer should be able to
-  read, and the bridge finds it through substrate.json's absolute
-  `manifest_path`).
+  read, and the bridge finds it through a RELATIVE hint in substrate.json
+  plus the absolute `AGENT_EVAL_CAPEVOLVE_MANIFEST` env var set by the
+  launch/check paths — never an absolute path written into the
+  optimizer-visible tree, which would be a signpost one Read from the
+  manifest).
 - **Re-instantiated per phase process** — cap-evolve loads the adapter fresh
   in every subprocess (check, baseline, each algorithm step, finalize).
   Nothing is shared between them except files.

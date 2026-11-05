@@ -709,9 +709,11 @@ optimize:
     # Tamper seal: omitting this leaves dataset/judge files editable by the
     # optimizer (verified against cap-evolve's own harness.py/integrity.py).
     assert "protected_paths: default" in spec
-    # Absolute, or `cap-evolve run` silently falls back to the generic
-    # template (cap-evolve issue #252).
-    assert f"optimizer_instructions_file: {project / 'optimizer/INSTRUCTIONS.md'}" in spec
+    # Project-relative (cap-evolve resolves it against the project dir —
+    # specfile.resolve_instructions_file at the pin), never absolute:
+    # capevolve.yaml is optimizer-visible and an absolute path would
+    # disclose the checkout root.
+    assert "optimizer_instructions_file: optimizer/INSTRUCTIONS.md" in spec
     # Never the benchmark checkout: it holds gold answers and judge prompts.
     assert "runner_repo_path: ''" in spec
     assert "memory_skill: md-files" in spec
@@ -1004,38 +1006,87 @@ def test_candidate_manifest_lives_outside_the_optimizer_visible_tree(tmp_path, m
     assert manifest_path.is_file()
     assert not (project / "adapters/candidate.json").exists()
     substrate = json.loads((project / "adapters/substrate.json").read_text())
-    assert substrate["manifest_path"] == str(manifest_path)
+    # A RELATIVE hint, never an absolute signpost to the manifest.
+    assert substrate["manifest_path"] == "../../harness/candidate.json"
     manifest = json.loads(manifest_path.read_text())
     assert manifest["eval_config"]
+    assert manifest["base_eval_config"]
+    assert manifest["project_root"]
     assert manifest["task_inputs"]
     # Nothing the optimizer can read inside the project tree names the eval
-    # config or carries a case input.
-    for path in project.rglob("*"):
-        if path.is_file():
-            content = path.read_text(encoding="utf-8", errors="replace")
-            assert manifest["eval_config"] not in content, path
-            assert "request: case-" not in content, path
+    # config, the base config, the checkout root, or carries a case input.
+    # The input needles use the JSON key/value spelling — the values are
+    # serialized into any JSON file that leaks them; the YAML spelling
+    # matched nothing (astefanutti confirmed the old clause could not fire).
+    needles = [manifest["eval_config"], manifest["base_eval_config"],
+               manifest["project_root"]]
+    for task_input in manifest["task_inputs"].values():
+        for key, value in task_input.items():
+            needles.append(f"{json.dumps(key)}: {json.dumps(value)}")
+
+    def _leaks():
+        return [(path, needle) for path in project.rglob("*") if path.is_file()
+                for needle in needles
+                if needle in path.read_text(encoding="utf-8", errors="replace")]
+
+    assert _leaks() == []
+    # The scan must actually guard: a canary carrying the manifest's own
+    # serialization and the eval-config path is caught.
+    canary = project / "leaky.json"
+    canary.write_text(json.dumps(
+        {"eval_config": manifest["eval_config"], "task_inputs": manifest["task_inputs"]}),
+        encoding="utf-8")
+    assert _leaks() != []
+    canary.unlink()
 
 
-def test_bridge_resolves_the_manifest_through_substrate_manifest_path(tmp_path):
+
+def test_bridge_resolves_the_manifest_through_substrate_manifest_path(tmp_path, monkeypatch):
     """The bridge follows substrate.json's manifest_path instead of assuming
-    the manifest is a sibling — the sibling fallback covers older scaffolds."""
+    the manifest is a sibling — covering all three resolution orders: the
+    relative hint (what scaffolds write now — never an absolute signpost in
+    the optimizer-visible tree), the AGENT_EVAL_CAPEVOLVE_MANIFEST env var
+    (what the launch/check paths set; survives cap-evolve's copytree probe),
+    and the legacy absolute hint from pre-fix scaffolds. The sibling
+    fallback covers scaffolds older than the move."""
     adapters_dir = tmp_path / "project/adapters"
     adapters_dir.mkdir(parents=True)
-    manifest_dir = tmp_path / "elsewhere"
+    manifest_dir = tmp_path / "harness"
     manifest_dir.mkdir()
-    substrate = {"runner": "local", "env": None, "image": None,
-                 "harness_python": sys.executable,
-                 "manifest_path": str(manifest_dir / "candidate.json")}
-    (adapters_dir / "substrate.json").write_text(json.dumps(substrate), encoding="utf-8")
-    # A stale sibling manifest must not be read.
-    (adapters_dir / "candidate.json").write_text("{}", encoding="utf-8")
     manifest = {"project_root": str(tmp_path), "task_ids": ["case-9"],
                 "task_inputs": {"case-9": {"request": "case-9"}}}
     (manifest_dir / "candidate.json").write_text(json.dumps(manifest), encoding="utf-8")
+    substrate = {"runner": "local", "env": None, "image": None,
+                 "harness_python": sys.executable,
+                 "manifest_path": "../../harness/candidate.json"}
+    (adapters_dir / "substrate.json").write_text(json.dumps(substrate), encoding="utf-8")
+    # A stale sibling manifest must not be read.
+    (adapters_dir / "candidate.json").write_text("{}", encoding="utf-8")
+
+    # 1. Relative hint (resolved against substrate.json's own location).
+    monkeypatch.delenv("AGENT_EVAL_CAPEVOLVE_MANIFEST", raising=False)
     bridge = bridge_template.Bridge(adapters_dir / "substrate.json")
     assert bridge.task_ids == ("case-9",)
     assert bridge.manifest_path == (manifest_dir / "candidate.json").resolve()
+
+    # 2. Env var wins even when the hint points elsewhere (the copytree
+    # probe's geometry: the copied project's relative hint misses, and the
+    # env var carries the real location).
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "candidate.json").write_text(json.dumps(
+        {"project_root": str(tmp_path), "task_ids": ["case-env"],
+         "task_inputs": {"case-env": {}}}), encoding="utf-8")
+    monkeypatch.setenv("AGENT_EVAL_CAPEVOLVE_MANIFEST", str(elsewhere / "candidate.json"))
+    bridge = bridge_template.Bridge(adapters_dir / "substrate.json")
+    assert bridge.task_ids == ("case-env",)
+
+    # 3. Legacy absolute hint (pre-fix scaffold) still resolves.
+    monkeypatch.delenv("AGENT_EVAL_CAPEVOLVE_MANIFEST")
+    substrate["manifest_path"] = str(manifest_dir / "candidate.json")
+    (adapters_dir / "substrate.json").write_text(json.dumps(substrate), encoding="utf-8")
+    bridge = bridge_template.Bridge(adapters_dir / "substrate.json")
+    assert bridge.task_ids == ("case-9",)
 
 
 def test_outer_rollout_timeout_exceeds_the_inner_budgets_it_wraps(tmp_path):
@@ -1278,7 +1329,7 @@ def test_prepare_project_records_the_harbor_substrate(tmp_path, monkeypatch):
     expected_python = capevolve._venv_python(Path(capevolve.__file__).resolve().parents[2])
     assert substrate == {"runner": "harbor", "env": "podman", "image": "localhost/aeh:latest",
                          "harness_python": expected_python,
-                         "manifest_path": str(project.parent / "harness/candidate.json")}
+                         "manifest_path": "../../harness/candidate.json"}
     assert "on Harbor (`--env podman`" in (project / "PROJECT.md").read_text()
 
 

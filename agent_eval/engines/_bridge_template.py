@@ -91,12 +91,33 @@ class Bridge(CapabilityAdapter):
         self.substrate = json.loads(self.substrate_path.read_text(encoding="utf-8"))
         # The manifest lives outside the project tree (it carries the
         # eval-config path and every case's inputs, sealed test included —
-        # nothing the optimizer should be able to read). substrate.json points
-        # at it absolutely; the sibling fallback covers scaffolds older than
-        # that move.
-        manifest_path = self.substrate.get("manifest_path") \
-            or self.substrate_path.with_name("candidate.json")
-        self.manifest_path = Path(manifest_path).resolve()
+        # nothing the optimizer should be able to read). Resolution order:
+        # the absolute AGENT_EVAL_CAPEVOLVE_MANIFEST env var (set by the
+        # launch/check paths; inherited by every subprocess, so it survives
+        # cap-evolve's copytree probe of the project dir), then the relative
+        # hint in substrate.json (never an absolute path — that file is
+        # optimizer-visible and would be a signpost), then the sibling
+        # fallback for scaffolds older than the move.
+        manifest_path = None
+        for candidate in (
+            os.environ.get("AGENT_EVAL_CAPEVOLVE_MANIFEST"),
+            self.substrate.get("manifest_path"),
+            str(self.substrate_path.with_name("candidate.json")),
+        ):
+            if not candidate:
+                continue
+            resolved = Path(candidate)
+            if not resolved.is_absolute():
+                resolved = self.substrate_path.parent / resolved
+            if resolved.is_file():
+                manifest_path = resolved
+                break
+        if manifest_path is None:
+            raise FileNotFoundError(
+                "task/candidate manifest not found (tried $AGENT_EVAL_CAPEVOLVE_MANIFEST, "
+                "substrate.json's manifest_path, and a sibling of substrate.json); "
+                "re-run /eval-optimize --engine cap-evolve --dry-run to re-scaffold")
+        self.manifest_path = manifest_path.resolve()
         self.manifest = json.loads(self.manifest_path.read_text(encoding="utf-8"))
         self.project_root = Path(self.manifest["project_root"]).resolve()
         self.task_ids = tuple(str(task_id) for task_id in self.manifest["task_ids"])

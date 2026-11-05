@@ -486,7 +486,12 @@ def _project_md(manifest: dict, resolved: dict, spec: dict, substrate: dict) -> 
         "",
         "## What we're optimizing",
         "- Capability: skill-package",
-        "- Artifact: " + ", ".join(f"`{c['source']}`" for c in manifest["candidate"]),
+        # Relative, not absolute: this file lives inside the directory the
+        # optimizer reads, and an absolute source path discloses the
+        # checkout root it is told not to go looking in.
+        "- Artifact: " + ", ".join(
+            f"`{os.path.relpath(c['source'], manifest['project_root'])}`"
+            for c in manifest["candidate"]),
         f"- Live at: `{manifest['apply_to']}/` inside each rollout workspace",
         "- Allowed edits: edit",
         "",
@@ -684,9 +689,13 @@ def prepare_project(
     # The task/candidate manifest deliberately lives OUTSIDE the project tree:
     # it carries the eval-config path (judge prompts can hold gold) and every
     # case's inputs (sealed test split included), and the optimizer reads and
-    # edits the project tree every iteration. The bridge finds it through
-    # substrate.json's absolute manifest_path, which also survives cap-evolve's
-    # copytree probe of the project dir.
+    # edits the project tree every iteration. The bridge finds it through a
+    # RELATIVE hint in substrate.json (resolved against substrate.json's own
+    # location) plus the AGENT_EVAL_CAPEVOLVE_MANIFEST env var, which the
+    # launch/check paths set absolutely and which survives cap-evolve's
+    # copytree probe of the project dir. No absolute path is written into the
+    # optimizer-visible tree: it would be a signpost one Read away from the
+    # eval-config path and the sealed test inputs.
     harness_dir = project_dir.parent / "harness"
     harness_dir.mkdir(parents=True, exist_ok=True)
 
@@ -703,9 +712,9 @@ def prepare_project(
         "image": image if runner == "harbor" else None,
         "harness_python": _venv_python(harness_root),
         # Where the task/candidate manifest lives — outside the project tree
-        # (see the harness_dir comment above). Absolute so it still resolves
-        # when cap-evolve's check phase copies the project dir elsewhere.
-        "manifest_path": str(harness_dir / "candidate.json"),
+        # (see the harness_dir comment above), as a path RELATIVE to this
+        # substrate.json file (never absolute: this file is optimizer-visible).
+        "manifest_path": os.path.relpath(harness_dir / "candidate.json", adapters_dir),
     }
     (adapters_dir / "substrate.json").write_text(
         json.dumps(substrate, indent=2) + "\n", encoding="utf-8",
@@ -796,7 +805,10 @@ def prepare_project(
         # Absolute: a relative value resolves project-relative under `check`
         # but cwd-relative under `run`, which then silently falls back to the
         # generic template (cap-evolve issue #252).
-        "optimizer_instructions_file": str(instructions_path),
+        # Relative, never absolute: capevolve.yaml is optimizer-visible,
+        # and cap-evolve resolves this key against the project dir
+        # (specfile.resolve_instructions_file at the pinned commit).
+        "optimizer_instructions_file": instructions_path.relative_to(project_dir).as_posix(),
         # Deliberately empty: the benchmark checkout holds the dataset (gold
         # answers) and the eval config's judge prompts, and the proposer must
         # never read either (optimize.feedback: redacted).
@@ -946,7 +958,8 @@ def _venv_python(harness_root: Path) -> str:
     return venv_python or sys.executable
 
 
-def _child_env(harness_root: Path, skills_dir: str | None = None) -> dict:
+def _child_env(harness_root: Path, skills_dir: str | None = None,
+               manifest_path: str | None = None) -> dict:
     env = dict(os.environ)
     old_path = env.get("PYTHONPATH", "")
     env["PYTHONPATH"] = str(harness_root) + (os.pathsep + old_path if old_path else "")
@@ -955,15 +968,24 @@ def _child_env(harness_root: Path, skills_dir: str | None = None) -> dict:
         # cap-evolve's own lookup otherwise falls back to ./.claude/skills,
         # i.e. the benchmark's skills, not cap-evolve's.
         env["CAPEVOLVE_SKILLS_DIR"] = skills_dir
+    if manifest_path:
+        # The bridge's absolute fallback for the task/candidate manifest:
+        # env is inherited by every subprocess (including cap-evolve's
+        # copytree probe of the project dir), but is not a file in the
+        # optimizer-visible tree the way an absolute path in substrate.json
+        # would be.
+        env["AGENT_EVAL_CAPEVOLVE_MANIFEST"] = manifest_path
     return env
 
 
 def _cap_evolve(args: list[str], *, cwd: Path, harness_root: Path, stream_stderr: bool = False,
                 skills_dir: str | None = None) -> dict:
+    manifest = cwd / ".capevolve" / "harness" / "candidate.json"
     proc = subprocess.run(
         [_venv_python(harness_root), "-m", "cap_evolve.cli", *args],
         cwd=cwd,
-        env=_child_env(harness_root, skills_dir),
+        env=_child_env(harness_root, skills_dir,
+                       manifest_path=str(manifest) if manifest.is_file() else None),
         stdout=subprocess.PIPE,
         stderr=None if stream_stderr else subprocess.PIPE,
         text=True,
@@ -1104,7 +1126,8 @@ def launch_detached(
         proc = subprocess.Popen(
             command,
             cwd=project_root,
-            env=_child_env(harness_root, skills_dir),
+            env=_child_env(harness_root, skills_dir,
+                           manifest_path=str(project_dir.parent / "harness" / "candidate.json")),
             stdout=log_handle,
             stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
@@ -1599,12 +1622,17 @@ def _cmd_status() -> dict:
 def _harness_manifest_path(project_dir: Path) -> Path:
     """The task/candidate manifest: outside the project tree, via substrate.json.
 
-    Older scaffolds kept it next to substrate.json in adapters/; that location
-    is the legacy fallback.
+    The hint is relative to substrate.json's own location (never absolute —
+    that file is optimizer-visible). Older scaffolds kept the manifest next
+    to substrate.json in adapters/ (absolute key or none); both are legacy
+    fallbacks.
     """
     substrate = _read_json(project_dir / "adapters" / "substrate.json") or {}
-    return Path(substrate.get("manifest_path")
-                or (project_dir / "adapters" / "candidate.json"))
+    hint = substrate.get("manifest_path")
+    if hint:
+        path = Path(hint)
+        return path if path.is_absolute() else (project_dir / "adapters" / path)
+    return project_dir / "adapters" / "candidate.json"
 
 
 def _cmd_apply() -> dict:
