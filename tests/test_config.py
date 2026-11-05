@@ -1825,6 +1825,22 @@ class TestSharedHelpers:
         terminate_process_group(proc, grace_s=1)
         assert time.monotonic() - start < 10
 
+    def test_terminate_process_group_without_capture_leaves_the_pipes_to_the_caller(self):
+        from agent_eval.agent.base import terminate_process_group
+        proc = subprocess.Popen(
+            [sys.executable, "-c",
+             "import sys, time; print('held'); sys.stdout.flush(); time.sleep(60)"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            start_new_session=True)
+        assert proc.stdout.readline() == "held\n"
+        assert terminate_process_group(proc, grace_s=1, capture_output=False) == ("", "")
+        assert proc.poll() is not None
+        # Not communicate()d: the caller's readers still own the open pipes.
+        assert not proc.stdout.closed and not proc.stderr.closed
+        assert proc.stdout.read() == ""
+        proc.stdout.close()
+        proc.stderr.close()
+
     def test_failed_link_copy_leaves_the_link(self, tmp_path, monkeypatch):
         from agent_eval.agent import fullsend as fullsend_mod
         from agent_eval.agent.fullsend import materialize_symlinks

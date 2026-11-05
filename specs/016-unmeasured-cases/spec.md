@@ -1,0 +1,472 @@
+# 016 — One field for "this case produced no measurement"
+
+Status: proposed. No code in this PR — it is the schema decision that #264 and #276
+both need and that neither should make alone.
+Base: harness 1.59.0 (`ac46692`). Related: #259, #264 (open), #260 (merged), #276 (open),
+#277 (the tracking issue).
+
+All `file:line` references are against `ac46692` unless stated otherwise.
+
+## Problem
+
+The harness has no way to say *this case is not a measurement of the agent*. Every
+layer that discovers it invents its own spelling, and each one is a separate thing for
+judges, thresholds, reports and reward composition to know about.
+
+| Spelling | Where | Added by | Says |
+| --- | --- | --- | --- |
+| `incomplete_cases` | `summary.yaml`, per judge | #260, #276 | evidence was withheld from the judge |
+| `hooks` + `hook_failures` | `run_result.json`, per case | #264 | an `after_each` hook crashed or timed out |
+| `output/infrastructure-failure.json` | an eval's own output tree | fullsend-ai/agents#1622 | the capture hook could not run |
+
+The third is the telling one. It is not harness code at all: an eval wrote a marker
+file, its runner script counted it, and four judges checked for it before scoring. Six
+review rounds each found one more exit path where the marker was not written. None of
+that logic was specific to the eval — it was the harness's own knowledge, written down
+by hand because the harness does not write it down.
+
+And the count is still rising. #277 lists two more sites that lose a case silently
+(`collect.py:201`'s `rglob`, which skips an unlistable directory without raising) and
+two execution paths that drop the counters entirely (`harbor/run.py::build_summary` and
+`evalhub/runner.py::_metrics_to_summary` rebuild the aggregate as `{mean, pass_rate}`,
+so the same `eval.yaml` fails locally and passes in a container).
+
+### Why it keeps happening
+
+Two different questions are being answered by one set of fields:
+
+- **Did the agent do well?** — a measurement. Low score, failed gate, wrong answer.
+- **Did we obtain a measurement at all?** — a precondition. Setup hook crashed, artifact
+  unreadable, judge API 500, container OOM.
+
+The harness records the *phase* in which something went wrong, in a field shaped for
+that phase. It has no field for the second question, so every consumer re-derives it,
+differently, from whatever phase-specific fields it happens to know about.
+
+### Where it does damage, not just mess
+
+`compose_reward` (`agent_eval/harbor/reward.py:362`). A case where every scoring judge
+errored composes to **reward 0.0**. The comment there reasons carefully about why `0.0`
+and not `1.0`, and is right on its own terms — but the option it does not have is *drop
+the sample*. For GRPO a `0.0` teaches the policy that what it did was bad, when the
+truth is that the harness broke. That is poisoned training data, not a reporting wart.
+
+The same gap in the other direction: #276's case is an agent making its own artifact
+unreadable. If that merely dropped the sample, suppressing evidence would be a reliable
+way to escape a bad reward. So the two causes genuinely need opposite treatment, and
+nothing in the current data model can tell them apart.
+
+## Proposal
+
+One case-level list. Presence is the signal; cause is detail inside it.
+
+Entries are written by the stage that discovers them, into that stage's own
+artifact:
+
+| Phase | Artifact |
+| --- | --- |
+| `provision`, `before_each`, `agent`, `after_each`, `collect` | `run_result.json`, under `per_case.<id>.unmeasured` |
+| `score` | `summary.yaml`, under a **top-level** `unmeasured: {case_id: [...]}` |
+
+Splitting the writers is forced: `score.py` never writes `run_result.json`, and the
+execution stages finish before scoring starts. Readers should not have to know that —
+`score.py` already reads `run_result.json` and produces `summary.yaml`, so it folds the
+execution-phase entries in and `summary.yaml` is the one list a reader consults.
+`unmeasured_cases` counts a case once however many entries it has.
+
+Two things that complicate the "one list" story and are **implementation scope**, not
+decisions — see #277: the Harbor verifier composes its reward in-container where no
+`summary.yaml` exists, and `compare_runs` discovers evidence loss of its own, after
+scoring and on the baseline side. Both need a transport; neither changes the rules
+below.
+
+**A sibling mapping, NOT a key inside `per_case.<case>`.** That is a pure
+judge-name → record map today, and every consumer iterates its members
+expecting a record: `compose_reward` does `rec.get("value")` on each
+(`harbor/reward.py:241,317`), so a list would raise `AttributeError`;
+eval-anova's `_judge_columns` would emit a spurious `judge:unmeasured`
+observation column; and the key would collide with a judge a project actually
+named `unmeasured`. A top-level sibling needs no migration of any judge-map
+consumer and cannot collide with a judge name. `run_result.json`'s `per_case`
+is not a judge map, so the nested key is safe there.
+
+```json
+// run_result.json per_case.<id>.unmeasured — same entry shape as
+// summary.yaml's top-level unmeasured[case_id]
+"unmeasured": [
+  {"phase": "after_each", "kind": "hook_timeout",  "attribution": "harness",
+   "detail": "after_each[1]: Save the PR diff", "log": "hooks/after_each.c0.1.log"},
+  {"phase": "score",      "kind": "evidence_lost", "attribution": "agent",
+   "detail": "content not staged: out/bad.txt"}
+]
+```
+
+Absent or empty ⇒ the case is a valid measurement. A list, not a scalar, because more
+than one thing can go wrong in a case and #276 already had to record two at once
+(a hardlinked file *and* unreadable content).
+
+| Field | Meaning |
+| --- | --- |
+| `phase` | `provision` \| `before_each` \| `agent` \| `after_each` \| `collect` \| `score` |
+| `kind` | stable slug for the cause; the set grows, consumers must tolerate unknown values |
+| `attribution` | `harness` \| `agent` — decides BOTH the reward treatment and whether the case blocks a score threshold, below |
+| `judge` | optional judge name — the **scope** of the entry. Absent ⇒ the entry is about the case and applies to every judge. Set only by the judge-error contributor, to the judge that produced no verdict. |
+| `detail` | one line for a human |
+| `log` | optional pointer, relative to the run directory |
+
+**Scope is an explicit field, not derived from `phase`.** `phase: score` also covers
+evidence loss found while scoring (the example above: content not staged), which is a
+property of the case and charges every judge. Absent means unscoped, so a writer that
+forgets the field errs toward over-counting a case, never toward hiding one.
+
+### `attribution` drives both consumers, in opposite directions
+
+| | reward | score thresholds |
+| --- | --- | --- |
+| `agent` — the graded skill withheld or corrupted its own evidence | `0.0` | **blocks**, on top of being counted |
+| `harness` — a positively identified, agent-independent infrastructure fault | **drop the sample** | no extra block (coverage counts it, like every unmeasured case) |
+
+This table is what an entry does **to a consumer it applies to**. Which entries apply
+is a separate question, answered under mixed attribution below: an unscoped entry
+applies everywhere, a judge-scoped one only where that judge is involved.
+
+`max_error_rate` has to be widened for that to mean anything. Today its
+numerator is the judge aggregate's `errored_cases`, which increments only when
+a judge returns no value (`score.py:3680-3685`). A hook or collect failure
+where the judges still returned values never reaches it — so a
+`harness`-attributed case would be exempt from the score gate AND absent from
+the coverage gate, i.e. gated by nothing, even with `max_error_rate: 0`.
+
+The coverage gate therefore counts, **per judge**, the **cases that produced no
+valid measurement for that judge**: the union of that judge's `errored_cases` and
+every `unmeasured` case that has an entry applying to it — an unscoped entry
+(evidence loss) applies to every judge; a judge-scoped entry (a judge error)
+applies only to the judge it names. Counted once per case, over a denominator
+that includes them. The same accounting is required locally, in Harbor and in
+EvalHub — otherwise this repeats the split #277 already complains about.
+
+**Why a judge error is scoped.** The two causes differ in whom they leave without a
+measurement. Evidence loss (staging, record-build, collect, hooks) means the case has
+no valid material, so no judge measured it and every judge is charged — as #276
+established when a case record that cannot be built marks every judge. A judge error
+means judge A produced no verdict while judge B measured the same case on complete
+material; charging B would make B's coverage gate fail because of A's error, and says
+the run covered less of the dataset than it did. The entry stays in the case's list,
+so reward and the report still see it; only the per-judge coverage numerator (and the
+other per-judge consumers in the table below) honour the scope. When *every* scoring
+judge errored, every judge has its own scoped entry, so each is charged — the
+spec's motivating example needs no special case.
+
+**Attribution-independent, deliberately.** An earlier draft counted only
+`harness`-attributed cases here, which left the `agent`-attributed ones in no
+gate at all: excluded from the aggregates, present in the denominator, absent
+from the numerator, and reached by the blocking rule only when a score
+threshold or baseline happens to be configured. Nine valid cases plus one
+agent-induced hook failure, with `max_error_rate: 0` as the only threshold,
+passed. Coverage asks *how many cases failed to produce a measurement*, which
+is a question about the measurement and not about whose fault it was.
+Attribution governs the two things that are about fault — the reward
+disposition, and the **additional** automatic block on score thresholds and
+baselines — and nothing else.
+
+The two consumers are asking different questions, and the same entry answers
+them differently. Reward asks *should this episode train the policy* — a
+provider 500 should not. Thresholds ask *did the suite meet the author's bar* —
+and the author already has `max_error_rate` to price judge flakiness, so
+auto-blocking on it would make one flaky provider fail every run.
+
+This is what keeps the rule compatible with what #260 and #276 already shipped.
+A case artifact that cannot be read is `agent`-attributed — the case directory
+is the graded skill's own output, which is the whole argument of those PRs — so
+it still blocks.
+
+A judge that errored is **usually** `harness`-attributed, so it usually does not —
+which is today's behaviour. Not blanket, though, and an earlier draft said it was:
+`score_cases` catches arbitrary scorer exceptions, so an inline `check:` judge that
+raises on malformed agent output is an agent-induced failure wearing a judge error's
+clothes. Dropping that sample is the reward escape again. The judge-error contributor
+classifies the cause — a provider 5xx or a transport fault is `harness`; a scorer
+raising while reading agent content is `agent`; anything it cannot tell apart is
+`agent`, per the default in Open Question 2. **A timeout is not automatically
+`harness`**: agent-controlled output can make a scorer hang or exhaust its budget, so
+a timeout is `harness` only when positively shown to be independent of agent content
+and agent resource use — a provider or transport timeout. A scorer timeout is `agent`. Acceptance case: malformed agent output
+makes a scorer raise, and the sample scores `0.0` rather than being dropped.
+
+An `agent`-attributed judge-error entry blocks only the thresholds and baseline
+comparison of the judge it names, for the same reason coverage is scoped: the other
+judges' verdicts were reached over complete material.
+
+**Mixed attribution resolves to `agent` — after scope filtering, per consumer.**
+A case can carry entries of both kinds. The rule is order-independent and
+deliberately asymmetric: if any *applicable* entry is attributed to the agent, the
+outcome is `0.0`-and-block rather than dropped. Dropping is what removes a case from
+training, so it is the outcome an agent could profit from; a harness fault that
+happens to coincide with the agent suppressing evidence must not launder the
+suppression into a dropped sample.
+
+"Applicable" is what scoping added, and it has to be resolved first or the two rules
+disagree. Each consumer filters before it resolves:
+
+| Consumer | Entries it resolves over |
+| --- | --- |
+| reward | unscoped entries, plus entries naming a judge that contributes to the composed reward |
+| a judge's score thresholds and baseline | unscoped entries, plus entries naming that judge |
+| coverage (`max_error_rate`) for a judge | the same set as that judge's thresholds |
+| `unmeasured_cases`, the report | every entry — these describe the case, not a gate |
+
+Worked example. Judge A's scorer hit a provider 5xx (`harness`, scoped to A); unrelated
+judge B's scorer raised on malformed agent output (`agent`, scoped to B); neither
+contributes to the composed reward:
+
+- **reward** — no applicable entry, so the sample is scored normally. Resolving over
+  *any* entry would have forced `0.0` because B's is `agent`-attributed, punishing a
+  reward that neither judge fed.
+- **A's gates** — A's entry applies and is `harness`: A's coverage counts it, A's score
+  thresholds are not blocked.
+- **B's gates** — B's entry applies and is `agent`: B is blocked.
+- **C, which scored the case cleanly** — no applicable entry; unaffected.
+
+An unscoped entry — evidence loss — is applicable everywhere, so a case that lost its
+material still resolves to `0.0`-and-block for every consumer, which is the #260/#276
+behaviour this must not weaken.
+
+### Case-level, not judge-level
+
+`incomplete_cases` is per judge today, and that is already strained: in #276, when the
+case record could not be built, the fix had to stamp **every** judge, because the
+condition is not a property of any judge — it is a property of the case. At case level
+the stamping loop disappears and per-judge counts derive by counting — an unscoped
+entry counts for every judge, a judge-scoped one for the judge it names.
+
+The case-level list is therefore the home for both causes, but it is not uniformly
+"the case is void for everyone": a judge-error entry says only that one judge has no
+verdict. What *is* case-level is `unmeasured_cases` and the reward disposition (below); the
+reward considers a judge-scoped entry only when the named judge contributes to the
+composed reward, and always considers an unscoped one.
+
+### What changes for each consumer
+
+| Consumer | Today | With `unmeasured` |
+| --- | --- | --- |
+| judges | `outputs["hook_failures"]`, a marker file, `staging_skips` | `outputs["unmeasured"]` (evidence-loss entries; judge-error entries are written after the judges ran) |
+| thresholds | the `incomplete_staging` special case in `detect_regressions` | per judge: every unmeasured case with an **applicable** entry (unscoped, or scoped to that judge) enters the widened `max_error_rate` numerator; an applicable **`agent`-attributed** entry additionally blocks that judge's score thresholds and baselines |
+| `summary.yaml` | `incomplete_cases` stamped by each layer | `unmeasured_cases`, derived by counting (case-level: one per case whatever the scope) |
+| **aggregates** | every non-None judge value joins `mean`/`pass_rate` | per judge: an observation is **excluded** when an applicable entry exists for its case |
+| reward | errored ⇒ `0.0` | over the entries applicable to the judges the reward composes: `attribution: harness` ⇒ drop the sample; `agent` ⇒ `0.0` |
+| Harbor / EvalHub | counters dropped | one field to carry |
+
+**An unmeasured case's judge values are not measurements either.** A case can be
+unmeasured and still carry verdicts — a hook failed, or collection lost an artifact,
+while the judges ran and returned something. `score.py` appends every non-None value
+to the sample, so without this rule:
+
+- nine passes plus one harness-failed case that returned `False` gives `pass_rate 0.9`,
+  failing `min_pass_rate: 0.95` even though `max_error_rate: 0.1` was set to tolerate
+  exactly that one case; and
+- the same case returning `True` **inflates** the score with a verdict reached over
+  material the harness knows was incomplete.
+
+So: exclude an unmeasured case's observations from `mean`, `pass_rate` and the baseline
+comparison, whatever the attribution — the verdict is not evidence about the agent
+either way. The exclusion follows the entry's scope: evidence loss removes every
+judge's observation for the case; a judge-error entry removes only the named judge's,
+which has no value to remove, so judge B's verdict over complete material stays. Keep the case in the coverage denominator (it was attempted) and keep its
+raw verdict in `per_case` for diagnostics. Counting a case as unscored while still
+scoring it is the inconsistency this whole document exists to remove.
+
+The threshold rule **replaces** `incomplete_staging` rather than sitting beside it.
+`max_error_rate` still never auto-fails, for the reason #260 gave: that gate is the
+author pricing how much of the dataset may go unscored, and auto-failing it would make
+a tolerant error budget impossible. What changes is only what it counts — see the
+coverage-gate note above.
+
+### What stays
+
+`hooks` (#264) stays exactly as it is. It is per-hook diagnostic detail — exit code,
+timeout, duration, log path — and is useful whatever sits above it. `errored_cases`
+stays too: "the judge itself failed" is a different fact from "the case was never
+measurable", and conflating them is how we got here.
+
+What goes is the *derived verdict* each layer publishes next to its detail:
+`hook_failures` (never shipped — #264 drops it on this spec's account) and
+`incomplete_cases` (shipped in 1.58; needs a deprecation window).
+
+**`incomplete_cases` has two producers, not one.** Besides the judge aggregate,
+`compare_runs` publishes a `pairwise.incomplete_cases` of its own (#276), which
+`_pairwise_regressions` turns into the `incomplete_staging` that blocks
+`min_win_rate` (#282). Deprecating the name and replacing that rule must not quietly
+drop a protection shipped three releases ago. Pairwise is in scope: its losses become
+`unmeasured` entries like any other, and `min_win_rate` keeps refusing to pass over
+them. It also discovers losses the scoring pass cannot — after `score_cases` has
+finished, and on the **baseline** side, which is not the run being scored at all. How
+those reach the canonical list is implementation scope (#277).
+
+## Migration
+
+1. Write `unmeasured` from the staging and record-build paths, alongside
+   `incomplete_cases`. Derive `incomplete_cases` from the **pre-existing contributors**
+   — staging skips and record-build failures — and from nothing else. Until step 3
+   switches the gate to read `unmeasured`, the field keeps meaning exactly what it
+   means today, whatever contributors later steps add and whatever those are
+   attributed to. The existing threshold rule and docs keep working unchanged.
+
+   The derivation is restricted, and it is restricted by **contributor**, not by
+   attribution. The legacy gate blocks a score threshold on *any* non-zero
+   `incomplete_cases` and has no notion of attribution. If the field were derived from
+   every `unmeasured` entry, then the moment step 2 adds contributors, cases that today
+   only show up as an errored judge, or not at all, would start blocking score
+   thresholds — in the release *before* step 3 gives the gate its attribution rules.
+
+   Attribution is the wrong axis because it only coincides with the pre-existing
+   contributor set today: staging and record-build happen to be the only contributors,
+   and both are `agent`-attributed. The two diverge as soon as step 2 adds members. A
+   `harness` filter would exclude a provider 500 correctly, but an `agent`-attributed
+   scorer error, scorer timeout, unclassifiable judge error or hook failure would pass
+   straight through it and make `incomplete_cases` non-zero for a failure that today
+   is only an `errored_cases` increment. Keying on the contributor keeps the field's
+   meaning fixed however step 2 grows the list, so every step below behaves as its
+   release-impact note says, instead of only the end state being right.
+2. Add the hook contributor (#264, merged) and the `collect.py` contributor (#277).
+   Add the **judge-error** contributor at the same time: a judge that fails
+   terminally after its retries emits a `phase: score` entry, scoped to that judge
+   (`judge: <name>`). Without it the
+   example this spec opens with — every scoring judge errored, reward `0.0` —
+   stays unfixed, because the case's `unmeasured` list would be empty and the
+   spec defines that as a valid measurement. `errored_cases` still records
+   "the judge itself failed"; the two are not redundant, because a judge can
+   error on one case out of ten and the run is still a measurement of the
+   agent on the other nine. The `unmeasured` entry is for the case — so reward and
+   the report see it — and carries the judge it came from; the `errored_cases` count
+   is for the judge.
+3. Switch `detect_regressions` to read `unmeasured`; keep `incomplete_staging` as the
+   regression metric name so CI output does not churn. Widen the `max_error_rate`
+   numerator, per judge, to "cases that produced no valid measurement for that judge" —
+   its `errored_cases` union every `unmeasured` case with an entry **applicable** to it
+   (unscoped, or scoped to that judge), counted once per case, whatever its attribution —
+   so every lost case lands in a gate and not only the ones with a score threshold. An
+   applicable `agent`-attributed entry additionally blocks that judge's score thresholds
+   and baselines, whichever contributor wrote it. And exclude the observations of a
+   case with an applicable entry from `mean`, `pass_rate` and the baseline comparison,
+   per the rule above.
+4. Make the gate substrate-independent. Harbor and EvalHub rebuild their summaries
+   from scratch and carry none of this today, so the same `eval.yaml` would fail
+   locally and pass in a container — the split #277 already complains about. The
+   hops each backend needs are implementation scope (#277); the requirement here is
+   that a case unmeasured on one substrate is unmeasured on all three. Acceptance
+   cases on both backends for a `harness`-only case and a mixed-attribution one.
+5. Teach `compose_reward` to drop a `harness`-attributed sample. Two constraints that
+   are decisions rather than mechanics:
+
+   - **Not a `None` sentinel.** `compose_reward` returns a float that is written to
+     the Harbor reward file and `float()`-ed by eval-anova, so `None` is not
+     available. Carry the disposition beside the float —
+     `{"reward_disposition": "scored" | "dropped"}` — with the value left at `0.0`
+     when dropped. Reports keep showing the case; the training consumer filters.
+   - **Every channel, or fail loudly.** A consumer that reads only the scalar sees
+     `0.0` and cannot tell a dropped sample from a real zero, which is exactly the
+     silent training-on-a-harness-fault this section exists to prevent. The
+     disposition reaches every channel a reward is published on, and a consumer that
+     cannot honour a drop must fail rather than treat it as a zero. A disposition
+     that is merely *available* is not a contract.
+
+6. Deprecate `incomplete_cases` one minor release later.
+
+### Release impact, step by step
+
+In step order, which four drafts of this section failed to keep. Each note is written
+against the step list above rather than from memory.
+
+| Step | Behaviour change | Release note |
+| --- | --- | --- |
+| 1 — write `unmeasured`; derive `incomplete_cases` from the staging and record-build contributors only | none | no |
+| 2 — add the hook, `collect.py` and judge-error contributors | none **because** step 1 derives `incomplete_cases` from the pre-existing contributors, not from `unmeasured` | no |
+| 3 — gate reads `unmeasured`; widen `max_error_rate`; `agent` entries block from any contributor; exclude unmeasured observations | **yes** | yes |
+| 4 — carry it on Harbor and EvalHub | **yes** | yes |
+| 5 — reward disposition | **yes**, training data | yes, and land alone |
+| 6 — deprecate `incomplete_cases` | none | deprecation notice |
+
+**Step 2 is behaviour-preserving because `incomplete_cases` does not follow the new
+contributors.** The legacy gate blocks a score threshold on any non-zero
+`incomplete_cases` and knows nothing about attribution. Step 2 adds entries to
+`unmeasured`, but the legacy field is still derived from staging and record-build alone,
+so nothing the gate reads has changed — whether the new entry is a `harness` provider
+500 or an `agent`-attributed scorer error. Nine scored cases plus one failed judge
+behaves exactly as it does today: an `errored_cases` increment and no block. Attribution
+plays no part in why this holds.
+
+**Step 3 is where the local behaviour changes.** Three things change at once. The
+gate stops reading `incomplete_cases`. The `max_error_rate` numerator widens to count
+unmeasured cases whose judges still returned values — a hook failure that previously
+counted toward nothing now counts toward the author's declared error budget. And an
+`agent`-attributed case now blocks score thresholds whichever contributor wrote it, so
+an agent-induced hook failure or scorer error, which never blocked before, starts to.
+Unmeasured observations also leave `mean`/`pass_rate`. For a judge error the numerator
+change is a no-op **because the entry is scoped to the judge that errored**, and
+`errored_cases` already counted it for that judge; another judge that scored the same
+case is not charged. What changes for a judge error is the blocking — an
+`agent`-attributed one blocks the named judge's thresholds — and the reward, which now
+sees the entry.
+
+**Step 4 makes containerised runs start failing where they silently passed**, which is
+the point. **Step 5** changes RL training data and should land on its own.
+
+## Open questions
+
+1. **The name, and a collision.** `unmeasured` is the author's pick. `void`, `invalid`,
+   `unjudgeable` were considered; `infra_failures` was rejected because the
+   agent-suppressed-evidence case is not infrastructure failing, and the unifying
+   property is that the measurement is void rather than whose fault it was.
+
+   But the word is **already spent on a different referent** in PR #200
+   (measurement-validity, open since 2026-08-21): `_VALIDITY_LAYER_NAMES` /
+   `unmeasured_layers` / `"status": "unmeasured"` describe validity **layers**, not
+   cases — and both write into `summary.yaml`. If both land as drafted,
+   `validity.v_total.unmeasured_layers` and a case-level `unmeasured` list sit one key
+   apart meaning different things. One of the two should move. Since #200 is 204
+   commits behind and will be re-landed in slices, whichever lands second should
+   rename; this spec is the cheaper one to change while nothing writes it.
+2. **Is `attribution` binary?** A judge-provider 500 is `harness`; an agent hiding an
+   artifact is `agent`. A hook that fails *because* the agent left the repo dirty is
+   neither cleanly. Proposal: keep it binary, let `kind` carry the nuance, and make
+   the rules about who may set what:
+
+   - **`harness` is the narrow case, not the default.** It may be set only by harness
+     code that has positive evidence the fault was **independent of the graded
+     agent** — a provider 5xx, a control-plane failure, the harness's own crash.
+     Anything else, including a missing or unrecognised value, resolves to `agent`.
+   - **Agent-inducible faults are `agent`, however they surface.** An OOM kill, a
+     resource-limit termination, a disk-quota failure and an ambiguous container
+     exit are all reachable by the graded agent, so "a container failure" is NOT
+     by itself evidence of agent-independent causation. Classify them `agent`
+     unless independent causation is established. Without this the escape the
+     Problem section forbids is open at one remove: an agent that induces an OOM
+     produces a single `harness` entry, mixed-attribution precedence never
+     applies because there is no `agent` entry to mix, and the sample is dropped
+     instead of scoring `0.0`.
+   - **Acceptance criterion.** The implementation ships with a case that induces
+     each of those failures and asserts the sample is scored `0.0`, not dropped.
+   - **Attribution is never read out of workspace content.** Only harness code sets it;
+     no file an agent can write contributes to it.
+
+   This inverts the draft's original "default `harness`". Defaulting to the
+   sample-dropping side meant every ambiguous or agent-influenced failure landed in the
+   reward-escaping direction, which is the thing the Problem section says must not be
+   possible. The cost of the safer default is that a genuine harness fault we failed to
+   classify scores `0.0` instead of being dropped — unfair to one sample, where the other
+   way round is exploitable.
+3. **Does a `kind` need to be registered?** Argues for a module-level tuple and a test
+   that every writer uses a known one; argues against for the same reason
+   `_CASE_OUTPUT_SKIP_REASONS` is a prefix match — new causes appear faster than the
+   enumeration is updated. Proposal: no registry, consumers tolerate unknown `kind`.
+4. **Should an unmeasured case still be reported in `num_cases`?** It executed. It just
+   did not produce a measurement. Proposal: yes, with `unmeasured_cases` beside it,
+   because the denominator shrinking silently is the whole bug.
+
+## Why now
+
+Not speculation about future contributors: there are four concrete ones already
+(`hooks`, staging/record, `collect.py`, judge errors) and two consumers that already get
+it wrong (reward composition, the containerised summary builders). Generalising after
+the third instance is the right moment — the first would have been guessing, the fifth
+is a deprecation.

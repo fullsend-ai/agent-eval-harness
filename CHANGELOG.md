@@ -1,3 +1,31 @@
+# [1.62.0](https://github.com/fullsend-ai/agent-eval-harness/compare/v1.61.5...v1.62.0) (2026-11-04)
+
+
+### Features
+
+* **runner:** stream fullsend's console live under the progress prefix ([#286](https://github.com/fullsend-ai/agent-eval-harness/issues/286)) ([d87a7ab](https://github.com/fullsend-ai/agent-eval-harness/commit/d87a7abf80263d381a33e5194d186d3d158991d4))
+
+## [1.61.5](https://github.com/fullsend-ai/agent-eval-harness/compare/v1.61.4...v1.61.5) (2026-11-03)
+
+
+### Bug Fixes
+
+* **collect:** a directory collection cannot list is evidence lost, not silence ([#291](https://github.com/fullsend-ai/agent-eval-harness/issues/291)) ([77a0ce8](https://github.com/fullsend-ai/agent-eval-harness/commit/77a0ce81f7da9b91a79d7598fa25e0f88578c8e4)), closes [#277](https://github.com/fullsend-ai/agent-eval-harness/issues/277) [#276](https://github.com/fullsend-ai/agent-eval-harness/issues/276) [#264](https://github.com/fullsend-ai/agent-eval-harness/issues/264)
+
+## [1.61.4](https://github.com/fullsend-ai/agent-eval-harness/compare/v1.61.3...v1.61.4) (2026-11-02)
+
+
+### Bug Fixes
+
+* **score:** learn a json_schema refusal before the tool request ([#290](https://github.com/fullsend-ai/agent-eval-harness/issues/290)) ([4619d36](https://github.com/fullsend-ai/agent-eval-harness/commit/4619d36fbf847ddfa5f82f9619652aab68390ac1)), closes [#289](https://github.com/fullsend-ai/agent-eval-harness/issues/289)
+
+## [1.61.3](https://github.com/fullsend-ai/agent-eval-harness/compare/v1.61.2...v1.61.3) (2026-10-29)
+
+
+### Bug Fixes
+
+* **runner:** follow a child harness's base: chain for the image pin ([#284](https://github.com/fullsend-ai/agent-eval-harness/issues/284)) ([61ba194](https://github.com/fullsend-ai/agent-eval-harness/commit/61ba1948720a5f53a1afeea2da160f7ca7b48674)), closes [#283](https://github.com/fullsend-ai/agent-eval-harness/issues/283)
+
 ## [1.61.2](https://github.com/fullsend-ai/agent-eval-harness/compare/v1.61.1...v1.61.2) (2026-10-28)
 
 
