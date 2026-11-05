@@ -2590,6 +2590,32 @@ def test_stop_campaign_reports_already_stopped_when_the_group_has_no_members(tmp
     assert result == {"status": "already_stopped", "pid": 999}
 
 
+def test_stop_campaign_refuses_a_recycled_pid(tmp_path, monkeypatch):
+    """astefanutti #6: campaign.json outlives its campaign (nothing deletes
+    it), and once the group's last member exits the pid is reusable — a
+    later --stop must not SIGTERM whatever unrelated process-group leader
+    now owns that pid. The manifest's create_time marker distinguishes a
+    recycled pid from a live campaign, and unlike an _is_alive pre-check it
+    does not break the leader-exited-children-alive case above (a dead
+    leader has no create_time to read)."""
+    project_dir = tmp_path / ".capevolve" / "project"
+    project_dir.mkdir(parents=True)
+    capevolve._write_campaign_manifest(project_dir, {
+        "pid": os.getpid(), "create_time": "recorded-at-launch",
+        "run_dir": str(tmp_path / "run_x"),
+    })
+    # The pid is alive but its create_time no longer matches: recycled.
+    monkeypatch.setattr(capevolve, "_process_create_time",
+                        lambda pid: "a-different-process-now")
+    killed = []
+    monkeypatch.setattr(capevolve.os, "killpg", lambda pid, sig: killed.append((pid, sig)))
+
+    result = capevolve.stop_campaign(project_dir)
+
+    assert result == {"status": "already_stopped", "pid": os.getpid()}
+    assert killed == []
+
+
 def test_cap_evolve_children_get_the_resolved_skills_dir(tmp_path):
     env = capevolve._child_env(tmp_path, "/data/cap-evolve/sha/skills")
     assert env["CAPEVOLVE_SKILLS_DIR"] == "/data/cap-evolve/sha/skills"

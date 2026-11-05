@@ -1090,11 +1090,25 @@ def stop_campaign(project_dir: Path) -> dict:
     attempting the kill directly — rather than pre-checking the leader — is
     both simpler and correct: ``ProcessLookupError`` from ``killpg`` itself
     means no process is left in that group.
+
+    One narrow pre-check IS needed: pid recycling. Once the group's last
+    member exits, the pgid is freed and the pid becomes reusable; if the OS
+    later hands it to some other process-group leader, ``killpg`` would
+    SIGTERM an unrelated group. The campaign manifest's ``create_time``
+    marker distinguishes the two — a recycled pid has a different one —
+    without breaking the leader-exited-children-alive case (a dead leader
+    has no create_time to read, so the kill proceeds).
     """
     manifest = read_campaign_manifest(project_dir)
     if manifest is None:
         return {"status": "not_launched"}
     pid = manifest["pid"]
+    recorded = manifest.get("create_time")
+    current = _process_create_time(pid)
+    if recorded and current and current != recorded:
+        # The pid was recycled; the original group is gone and this one
+        # isn't ours — never signal it.
+        return {"status": "already_stopped", "pid": pid}
     try:
         os.killpg(pid, signal.SIGTERM)
     except ProcessLookupError:
