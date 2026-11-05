@@ -1109,6 +1109,25 @@ def test_re_intake_removes_a_pre_fix_scaffolds_stale_manifest(tmp_path, monkeypa
     assert (project.parent / "harness/candidate.json").is_file()
 
 
+def test_run_dir_timeout_override_parses_defensively(monkeypatch, capsys):
+    """astefanutti's follow-up: an unset-but-exported env var is the empty
+    string in CI env blocks (float("") raises at launch), and 0/negative
+    would turn the watchdog into an immediate kill — both must fall back or
+    clamp instead."""
+    monkeypatch.delenv("AGENT_EVAL_RUN_DIR_TIMEOUT_S", raising=False)
+    assert capevolve._run_dir_timeout_s() == capevolve._RUN_DIR_POLL_TIMEOUT_S
+    monkeypatch.setenv("AGENT_EVAL_RUN_DIR_TIMEOUT_S", "")
+    assert capevolve._run_dir_timeout_s() == capevolve._RUN_DIR_POLL_TIMEOUT_S
+    monkeypatch.setenv("AGENT_EVAL_RUN_DIR_TIMEOUT_S", "not-a-number")
+    assert capevolve._run_dir_timeout_s() == capevolve._RUN_DIR_POLL_TIMEOUT_S
+    assert "ignoring non-numeric" in capsys.readouterr().err
+    monkeypatch.setenv("AGENT_EVAL_RUN_DIR_TIMEOUT_S", "0")
+    assert capevolve._run_dir_timeout_s() == 1.0
+    monkeypatch.setenv("AGENT_EVAL_RUN_DIR_TIMEOUT_S", "-5")
+    assert capevolve._run_dir_timeout_s() == 1.0
+    monkeypatch.setenv("AGENT_EVAL_RUN_DIR_TIMEOUT_S", "120")
+    assert capevolve._run_dir_timeout_s() == 120.0
+
 
 def test_outer_rollout_timeout_exceeds_the_inner_budgets_it_wraps(tmp_path):
     """astefanutti #3 (blocking): the outer rollout timeout was

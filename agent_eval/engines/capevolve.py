@@ -1104,6 +1104,25 @@ def _wait_for_new_run_dir(
     )
 
 
+def _run_dir_timeout_s() -> float:
+    """The run-dir watchdog timeout, honoring AGENT_EVAL_RUN_DIR_TIMEOUT_S.
+
+    Parsed defensively: an unset-but-exported variable is the empty string
+    in CI env blocks (float("") raises), and 0/negative would turn the
+    watchdog into an immediate kill — both fall back to the default with a
+    warning instead of raising at launch.
+    """
+    raw = os.environ.get("AGENT_EVAL_RUN_DIR_TIMEOUT_S")
+    if not raw:
+        return _RUN_DIR_POLL_TIMEOUT_S
+    try:
+        return max(1.0, float(raw))
+    except ValueError:
+        print(f"warning: ignoring non-numeric AGENT_EVAL_RUN_DIR_TIMEOUT_S={raw!r}; "
+              f"using the default {_RUN_DIR_POLL_TIMEOUT_S}s", file=sys.stderr)
+        return _RUN_DIR_POLL_TIMEOUT_S
+
+
 def launch_detached(
     *, project_root: Path, project_dir: Path, spec_path: str, max_usd: float,
     max_iterations: int, skills_dir: str | None, harness_root: Path,
@@ -1144,11 +1163,14 @@ def launch_detached(
     try:
         # Read at call time (not a def-time default) so the module attribute
         # is honored — and can be lowered by tests — and so
-        # AGENT_EVAL_RUN_DIR_TIMEOUT_S can raise it for slow machines.
+        # AGENT_EVAL_RUN_DIR_TIMEOUT_S can raise it for slow machines. The
+        # override parses defensively: an unset-but-exported variable is the
+        # empty string in CI env blocks, and 0/negative would turn the
+        # watchdog into an immediate kill — both fall back to the default
+        # with a warning instead of raising at launch.
         run_dir = _wait_for_new_run_dir(
             runs_root, before, proc, log_file,
-            timeout_s=float(os.environ.get("AGENT_EVAL_RUN_DIR_TIMEOUT_S",
-                                           _RUN_DIR_POLL_TIMEOUT_S)),
+            timeout_s=_run_dir_timeout_s(),
         )
     except RuntimeError:
         # Without a run dir there is no campaign record, so --status could not
