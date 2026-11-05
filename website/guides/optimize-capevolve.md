@@ -116,7 +116,9 @@ Budget caps spend, not time: a campaign runs roughly
 **strictly serial** — a real campaign is hours of wall-clock regardless of
 budget. Pass `--workers N` to let cap-evolve run rollouts N-wide
 (`--dry-run` reports the effective setting); wall-clock scales roughly 1/N,
-bounded by your provider's rate limits.
+bounded by your provider's rate limits. On the Harbor substrate each worker
+runs a container, so `--workers N` means N concurrent containers against one
+podman socket — start small there.
 
 ## Stopping and re-applying
 

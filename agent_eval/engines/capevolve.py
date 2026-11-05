@@ -886,15 +886,19 @@ def prepare_project(
         # overlay's optimize.candidate list is how a user narrows the scope.
         "candidate_sources": [os.path.relpath(item["source"], project_root) for item in components],
         "models": models,
-        "warnings": model_warnings + runtime_resource_warnings,
+        "warnings": (
+            model_warnings + runtime_resource_warnings
+            + ([f"--workers {workers} on the Harbor substrate runs {workers} concurrent "
+               f"containers against one {'podman socket' if harbor_env == 'podman' else harbor_env + ' cluster'} "
+               "— each rollout is a full container; start small and watch the substrate"]
+               if workers > 1 and runner == "harbor" else [])
+        ),
         "runtime_resources": candidate_manifest["runtime_resources"],
         "cap_evolve_templates": str(template_dir) if template_dir else None,
         # Pilot mode pins one case per split (split_ids.json); the ratios
-        # don't apply. Otherwise largest-remainder allocation, so the three
-        # counts sum to len(case_dirs) — round() alone reported 3/2/2 for
-        # 6 cases and 1/0/0 for 2, and these are the numbers SKILL.md tells
-        # the agent to quote when explaining whether the gate can decide
-        # anything.
+        # don't apply. Otherwise mirror cap-evolve's own splitter exactly —
+        # these are the numbers SKILL.md tells the agent to quote when
+        # explaining whether the gate can decide anything.
         "splits": (
             {"train": 1, "val": 1, "test": 1} if pilot_case_ids
             else _split_sizes(len(case_dirs), split_ratios)
