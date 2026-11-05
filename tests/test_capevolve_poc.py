@@ -2313,6 +2313,45 @@ def test_apply_winner_tolerates_a_runs_dir_inside_the_repo_but_outside_the_bench
     assert tracked == ""
 
 
+def test_a_failing_post_checkout_hook_does_not_hide_a_successful_apply(tmp_path, monkeypatch):
+    """astefanutti #9: a post-checkout hook (git-lfs installs one; it exits
+    non-zero when `git lfs` is missing, and git makes its status the
+    checkout's status even though the switch worked) used to surface as a
+    bare CalledProcessError after the winner was already committed — an
+    opaque failure that dropped the whole result. The error must say the
+    apply succeeded, name the branch, and tell the user how to get back."""
+    project_root, harness_manifest, campaign_manifest, skill_path = _apply_fixture(
+        tmp_path, winning_skill_content="improved skill"
+    )
+    real_git = capevolve._git
+    original_branch = capevolve._git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=project_root).stdout.strip()
+
+    def _fake_git(args, cwd, **kwargs):
+        if args == ["checkout", original_branch]:
+            raise subprocess.CalledProcessError(
+                1, args, output="", stderr="post-checkout hook exited 3")
+        return real_git(args, cwd=cwd, **kwargs)
+
+    monkeypatch.setattr(capevolve, "_git", _fake_git)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        capevolve.apply_winner(
+            project_root=project_root,
+            harness_manifest=harness_manifest, campaign_manifest=campaign_manifest,
+        )
+    message = str(exc_info.value)
+    assert "applied candidate cand_1" in message
+    assert "capevolve/run_20260101_000000" in message
+    assert f"git checkout {original_branch}" in message
+    assert "post-checkout hook exited 3" in message
+    # The winner really did land on the branch.
+    shown = subprocess.run(
+        ["git", "show", "capevolve/run_20260101_000000:skills/demo/SKILL.md"], cwd=project_root,
+        capture_output=True, text=True, check=True,
+    ).stdout
+    assert shown == "improved skill"
+
+
 def test_apply_winner_chains_the_original_error_when_rollback_also_fails(tmp_path, monkeypatch):
     """A `finally` block that raises replaces whatever was propagating from
     the try body (CPython: the original is not even in __context__ unless

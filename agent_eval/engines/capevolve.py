@@ -1277,6 +1277,18 @@ def _git(args: list[str], cwd: Path, **kwargs) -> subprocess.CompletedProcess:
     return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, check=True, **kwargs)
 
 
+def _git_or_raise(args: list[str], cwd: Path, context: str) -> subprocess.CompletedProcess:
+    """``_git``, but a failure surfaces git's own stderr instead of a bare
+    ``CalledProcessError`` (whose str() is only the exit status — the actual
+    message, e.g. "fatal: not a git repository", was swallowed)."""
+    try:
+        return _git(args, cwd=cwd)
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(
+            f"{context}: {(exc.stderr or exc.stdout or '').strip()}"
+        ) from exc
+
+
 def _replace_tracked_dir(src: Path, dest: Path, repo_root: Path) -> None:
     """Make ``dest`` match the winner without ever deleting a file git cannot
     restore: tracked files the winner dropped are removed, the winner's files
@@ -1327,7 +1339,10 @@ def apply_winner(*, project_root: Path, harness_manifest: dict, campaign_manifes
     # Validate every destination before anything is touched: only paths inside
     # this repository (never the repository root or .git) can be restored by
     # the git rollback below.
-    repo_root = Path(_git(["rev-parse", "--show-toplevel"], cwd=project_root).stdout.strip()).resolve()
+    repo_root = Path(_git_or_raise(
+        ["rev-parse", "--show-toplevel"], cwd=project_root,
+        context="could not find the git repository the benchmark lives in",
+    ).stdout.strip()).resolve()
     targets = []
     for component in harness_manifest["candidate"]:
         rel = artifact.relative_path(str(component["dest"]).rstrip("/"), "candidate dest")
@@ -1368,14 +1383,23 @@ def apply_winner(*, project_root: Path, harness_manifest: dict, campaign_manifes
     runs_dir = runs_dir.resolve()
     if runs_dir.is_relative_to(repo_root):
         pathspecs.append(f":(exclude,top){runs_dir.relative_to(repo_root)}")
-    dirty = _git(["status", "--porcelain", "--", *pathspecs], cwd=project_root).stdout.strip()
+    dirty = _git_or_raise(
+        ["status", "--porcelain", "--", *pathspecs], cwd=project_root,
+        context="could not check whether the working tree is clean",
+    ).stdout.strip()
     if dirty:
         raise RuntimeError("repository working tree is not clean; commit or stash your changes before --apply")
-    current_branch = _git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=project_root).stdout.strip()
+    current_branch = _git_or_raise(
+        ["rev-parse", "--abbrev-ref", "HEAD"], cwd=project_root,
+        context="could not determine the current branch",
+    ).stdout.strip()
     if current_branch == "HEAD":
         # Detached HEAD: return to the exact commit, not to "HEAD" (which
         # would by then name the new branch).
-        current_branch = _git(["rev-parse", "HEAD"], cwd=project_root).stdout.strip()
+        current_branch = _git_or_raise(
+            ["rev-parse", "HEAD"], cwd=project_root,
+            context="could not determine the current commit",
+        ).stdout.strip()
 
     branch = f"capevolve/{run_dir.name}"
     try:
@@ -1436,7 +1460,20 @@ def apply_winner(*, project_root: Path, harness_manifest: dict, campaign_manifes
                 "to recover by hand"
             ) from exc
         raise apply_error from exc
-    _git(["checkout", current_branch], cwd=project_root)
+    # The apply itself has fully succeeded at this point — the winner is
+    # committed on `branch`. A failing post-checkout hook (git-lfs installs
+    # one; it exits non-zero when `git lfs` is not on PATH, and git makes
+    # its status the checkout's status even though the switch worked) must
+    # not turn that success into an opaque error that drops the whole
+    # result dict.
+    try:
+        _git(["checkout", current_branch], cwd=project_root)
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(
+            f"applied candidate {best_id} on branch {branch!r}, but could not switch back to "
+            f"{current_branch!r} ({(exc.stderr or exc.stdout or '').strip()}); "
+            f"run `git checkout {current_branch}` to return"
+        ) from exc
 
     # The optimistic-bias caveat needs real split sizes. cap-evolve freezes
     # the split to run_dir/splits.json (confirmed on-disk file, not a
