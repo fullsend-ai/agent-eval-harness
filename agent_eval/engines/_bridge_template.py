@@ -117,10 +117,11 @@ class Bridge(CapabilityAdapter):
         """
         agent_timeout = self.manifest.get("agent_timeout_s") or 1800
         if self.substrate.get("runner") == "harbor":
-            # rollout.py's Harbor path caps the in-container run at
-            # agent_timeout + 900; the margin covers task-package
-            # generation and upload around it.
-            return agent_timeout + 900 + 600
+            # rollout.py's Harbor path makes TWO sequential _run_harness
+            # calls, each capped at agent_timeout + 900 (task-package
+            # generation via harbor.py, then agent_eval.harbor.run); the
+            # margin covers upload around them.
+            return 2 * (agent_timeout + 900) + 600
         # rollout.py gives each of its _ROLLOUT_STEPS sequential steps its
         # own budget of agent_timeout + 300, so the outer bound must exceed
         # their SUM, not the per-step budget.

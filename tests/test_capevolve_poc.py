@@ -1052,8 +1052,10 @@ def test_outer_rollout_timeout_exceeds_the_inner_budgets_it_wraps(tmp_path):
     assert local > 5 * (1800 + 300)  # sum of the per-step budgets, plus margin
     bridge.substrate["runner"] = "harbor"
     harbor = bridge._rollout_timeout_s()
-    assert harbor > 1800 + 900       # the in-container cap, plus margin
-    assert harbor < local            # Harbor wraps one budget, not five
+    # Harbor wraps TWO sequential inner budgets (task generation + run),
+    # each capped at agent_timeout + 900.
+    assert harbor > 2 * (1800 + 900)
+    assert harbor < local            # two budgets, not five
 
 
 def test_launch_stops_a_campaign_that_never_creates_a_run_dir(tmp_path, monkeypatch):
