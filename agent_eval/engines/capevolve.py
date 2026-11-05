@@ -62,7 +62,12 @@ _UNSUPPORTED_SUBSTRATES = {
 # three cases again.
 _MAX_PILOT_ITERATIONS = 2
 
-_RUN_DIR_POLL_TIMEOUT_S = 10.0
+# Before creating its run directory, cap-evolve boots its CLI interpreter,
+# runs a full run_check() (importlib-exec of the bridge, tasks/score probes,
+# a copytree of the whole project tree), then boots a SECOND interpreter for
+# the baseline phase script that runs run_check() again — serialized. 10s
+# killed healthy slow launches; 60s comfortably covers two checks.
+_RUN_DIR_POLL_TIMEOUT_S = 60.0
 _RUN_DIR_POLL_INTERVAL_S = 0.2
 _STEP_EVENT_KINDS = ("step", "step_indecisive", "finalize")
 _MARKER = ".agent-eval-generated.json"
@@ -1005,7 +1010,7 @@ def _wait_for_new_run_dir(
         time.sleep(interval_s)
     raise RuntimeError(
         f"cap-evolve did not create a run directory within {timeout_s}s; "
-        f"it may still be starting — see {log_file}"
+        f"stopped it to avoid an untracked, spending campaign — see {log_file}"
     )
 
 
@@ -1046,7 +1051,14 @@ def launch_detached(
         # copy when this `with` block exits does not affect the child's output.
 
     try:
-        run_dir = _wait_for_new_run_dir(runs_root, before, proc, log_file)
+        # Read at call time (not a def-time default) so the module attribute
+        # is honored — and can be lowered by tests — and so
+        # AGENT_EVAL_RUN_DIR_TIMEOUT_S can raise it for slow machines.
+        run_dir = _wait_for_new_run_dir(
+            runs_root, before, proc, log_file,
+            timeout_s=float(os.environ.get("AGENT_EVAL_RUN_DIR_TIMEOUT_S",
+                                           _RUN_DIR_POLL_TIMEOUT_S)),
+        )
     except RuntimeError:
         # Without a run dir there is no campaign record, so --status could not
         # see it and a retry would start a second one: stop it instead.

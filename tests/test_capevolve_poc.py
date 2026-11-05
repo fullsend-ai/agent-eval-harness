@@ -1035,7 +1035,11 @@ def test_launch_stops_a_campaign_that_never_creates_a_run_dir(tmp_path, monkeypa
         return seen["proc"]
 
     monkeypatch.setattr(capevolve.subprocess, "Popen", _popen)
-    with pytest.raises(RuntimeError, match="did not create a run directory"):
+    # astefanutti #10: the message must say the campaign was stopped, not
+    # that it "may still be starting" — it was just SIGTERMed. And the
+    # timeout monkeypatch above must be honored at call time (this test
+    # would otherwise sleep the real default of 60s).
+    with pytest.raises(RuntimeError, match="did not create a run directory.*stopped it to avoid an untracked"):
         capevolve.launch_detached(project_root=tmp_path, project_dir=project_dir, spec_path="s.yaml",
                                   max_usd=1, max_iterations=1, skills_dir=None, harness_root=tmp_path)
     assert seen["proc"].wait(timeout=5) is not None
