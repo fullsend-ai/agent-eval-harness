@@ -1615,6 +1615,39 @@ def test_pilot_rejects_more_than_two_iterations(tmp_path, monkeypatch, capsys):
     assert "between 1 and 2" in capsys.readouterr().err
 
 
+def test_dry_run_reports_one_case_per_split_in_pilot_mode(tmp_path, monkeypatch):
+    """astefanutti #11: scaffold.splits derived from the ratios even in
+    pilot mode, so a 3-case pilot reported a 2/1/1 split (4 cases out of 3)
+    while split_ids.json pinned 1/1/1 — and SKILL.md tells the agent to
+    quote exactly these numbers."""
+    monkeypatch.chdir(tmp_path)
+    _demo_eval_yaml(tmp_path, mode="case")
+    for case_id in ("case-2", "case-3"):
+        case = tmp_path / "cases" / case_id
+        case.mkdir(parents=True, exist_ok=True)
+        (case / "input.yaml").write_text(f"request: {case_id}\n", encoding="utf-8")
+    result = capevolve.prepare_project(
+        max_usd=5, optimizer="mock", pilot_case_ids=("case-1", "case-2", "case-3"),
+    )
+    assert result["splits"] == {"train": 1, "val": 1, "test": 1}
+    # astefanutti C2: with one validation case the gate cannot reject
+    # anything (SE=0 → any positive delta accepted), so PROJECT.md must not
+    # claim it "will correctly reject marginal gains".
+    project_md = (Path(result["project_dir"]) / "PROJECT.md").read_text(encoding="utf-8")
+    assert "plumbing check, not a measurement" in project_md
+    assert "correctly reject marginal gains" not in project_md
+
+
+def test_split_sizes_sum_to_the_case_count():
+    """astefanutti #11: round() per split is not sum-preserving — 6 cases at
+    0.5/0.25/0.25 reported 3/2/2 (7), 10 reported 5/2/2 (9), 2 reported
+    1/0/0."""
+    assert capevolve._split_sizes(6, (0.5, 0.25, 0.25)) == {"train": 3, "val": 2, "test": 1}
+    assert capevolve._split_sizes(10, (0.5, 0.25, 0.25)) == {"train": 5, "val": 3, "test": 2}
+    assert capevolve._split_sizes(2, (0.5, 0.25, 0.25)) == {"train": 1, "val": 1, "test": 0}
+    assert capevolve._split_sizes(4, (0.5, 0.25, 0.25)) == {"train": 2, "val": 1, "test": 1}
+
+
 def test_optimize_block_redirects_search_controls(tmp_path):
     (tmp_path / "skill.md").write_text("seed", encoding="utf-8")
     config = type("Config", (), {

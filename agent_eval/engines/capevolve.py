@@ -420,7 +420,14 @@ def _benchmark_facts(manifest: dict) -> str:
         "per-case judge results are composed into one reward by the harness's "
         "`compose_reward()` over the `reward:` block. Feedback carries judge labels "
         "(pass/fail, scores), never judge rationale, which can quote gold content.\n"
-        "- Each rollout's transcript is in `./trajectories/`.\n"
+        # No trajectories line: the bridge implements no trajectories() and no
+        # ./trajectories/ dir exists — telling the proposer to look there made
+        # it spend optimizer-model iterations hunting for signal that isn't
+        # there. The only per-rollout signal is the redacted outcome labels.
+        "- Rollout transcripts are NOT available to you. The only per-rollout "
+        "signal is each rollout's feedback string: per-judge outcome labels "
+        "(pass/fail, numeric scores). Do not look for transcripts or "
+        "trajectories anywhere.\n"
         f"- The skills' scripts resolve these project paths at run time: "
         f"{', '.join(f'`{r}`' for r in manifest['runtime_resources']) or 'none'}.\n"
     )
@@ -434,7 +441,15 @@ def _project_md(manifest: dict, resolved: dict, spec: dict, substrate: dict) -> 
         f"splits — ratio {spec['split_train']}/{spec['split_val']}/{spec['split_test']} "
         f"(seed {spec['split_seed']})" if "split_ids_file" not in spec
         else "splits — pinned in split_ids.json (pilot: one case per split)",
-        f"num_trials={spec['num_trials']}" + (
+        # In pilot mode this sentence inverts: one validation case means
+        # n=1, SE=0, and cap-evolve's strict fallback then accepts ANY
+        # positive delta — a pilot "accept" is one coin flip, and saying so
+        # plainly matters more than the normal-mode caveat.
+        ("num_trials=1 — pilot verdicts are a plumbing check, not a measurement: "
+         "with one validation case the gate cannot reject noise (SE=0 → any "
+         "positive delta is accepted)")
+        if "split_ids_file" in spec and spec["num_trials"] == 1
+        else f"num_trials={spec['num_trials']}" + (
             " — single-trial scores, so the significance gate will correctly reject "
             "marginal gains" if spec["num_trials"] == 1 else ""),
         f"budget — max_usd={spec['max_usd']}, max_iterations={spec['max_iterations']}, stall={spec['stall']}",
@@ -525,6 +540,21 @@ def _project_md(manifest: dict, resolved: dict, spec: dict, substrate: dict) -> 
         "",
     ]
     return "\n".join(lines)
+
+
+def _split_sizes(n: int, ratios: tuple[float, float, float]) -> dict:
+    """Case counts per split that sum to *n* (largest-remainder allocation).
+
+    ``round()`` per split is not sum-preserving: 6 cases at 0.5/0.25/0.25
+    reported 3/2/2 (7), 10 reported 5/2/2 (9), 2 reported 1/0/0.
+    """
+    quotas = [n * r for r in ratios]
+    sizes = [int(q) for q in quotas]
+    remainder = n - sum(sizes)
+    by_fraction = sorted(range(len(sizes)), key=lambda i: quotas[i] - sizes[i], reverse=True)
+    for i in by_fraction[:remainder]:
+        sizes[i] += 1
+    return {"train": sizes[0], "val": sizes[1], "test": sizes[2]}
 
 
 def prepare_project(
@@ -818,13 +848,20 @@ def prepare_project(
         "warnings": model_warnings + runtime_resource_warnings,
         "runtime_resources": candidate_manifest["runtime_resources"],
         "cap_evolve_templates": str(template_dir) if template_dir else None,
-        "splits": {
-            "train": round(len(case_dirs) * split_ratios[0]),
-            "val": round(len(case_dirs) * split_ratios[1]),
-            "test": round(len(case_dirs) * split_ratios[2]),
-        },
+        # Pilot mode pins one case per split (split_ids.json); the ratios
+        # don't apply. Otherwise largest-remainder allocation, so the three
+        # counts sum to len(case_dirs) — round() alone reported 3/2/2 for
+        # 6 cases and 1/0/0 for 2, and these are the numbers SKILL.md tells
+        # the agent to quote when explaining whether the gate can decide
+        # anything.
+        "splits": (
+            {"train": 1, "val": 1, "test": 1} if pilot_case_ids
+            else _split_sizes(len(case_dirs), split_ratios)
+        ),
         "gate_mode": spec["gate_mode"],
         "gate_k_se": spec["gate_k_se"],
+        # |val| x num_trials x (iterations + 1) sequential rollouts, and
+        # max_usd cannot shorten that — the binding constraint is time.
     }
     if cost_hint is not None:
         result["observed_cost_per_rollout"] = cost_hint
