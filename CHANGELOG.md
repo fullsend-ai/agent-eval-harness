@@ -1,3 +1,10 @@
+## [1.62.1](https://github.com/fullsend-ai/agent-eval-harness/compare/v1.62.0...v1.62.1) (2026-11-05)
+
+
+### Bug Fixes
+
+* **eval-run:** tolerate an unreadable annotations.yaml in load_case_record ([#297](https://github.com/fullsend-ai/agent-eval-harness/issues/297)) ([0d0ce59](https://github.com/fullsend-ai/agent-eval-harness/commit/0d0ce59bd581c89b236ece0d6737e5ae9c568914)), closes [fullsend-ai/rfe-creator#295](https://github.com/fullsend-ai/rfe-creator/issues/295)
+
 # [1.62.0](https://github.com/fullsend-ai/agent-eval-harness/compare/v1.61.5...v1.62.0) (2026-11-04)
 
 
