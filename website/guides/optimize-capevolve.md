@@ -17,8 +17,8 @@ path for anything you'd act on — prefer it over the default loop (documented a
     so the number you report was never visible during the search.
 
 Everything on this page — every command, every number, every screenshot — comes
-from one real campaign run against a small toy skill while writing this guide.
-Nothing here is simulated.
+from one real campaign run (`run_20261106_174921`) against a small toy skill while
+writing this guide. Nothing here is simulated.
 
 ## What actually happens, in plain words
 
@@ -102,7 +102,11 @@ This mines the benchmark — the skill, the dataset, the judges — and tells yo
 exactly what a real campaign would do: a 3/2/1 split, one candidate component
 (`SKILL.md`), the models each rollout will use, and a cost estimate. No spend yet,
 and your `eval.yaml` is never touched (missing `optimize:`/`reward:` blocks get
-proposed into a separate `.capevolve/eval.optimize.yaml` overlay instead).
+proposed into a separate `.capevolve/eval.optimize.yaml` overlay instead). The
+`check.notes` line `tasks('val') -> 6 task(s)` isn't a second, bigger val split —
+the adapter's `tasks()` always returns the full dataset by design (cap-evolve does
+its own splitting on top of it); `estimate.spec_summary.val_tasks` (`2` here) is
+the number that actually matters.
 
 ### Step 2 — launch a real campaign
 
@@ -122,11 +126,9 @@ the optimizer, score its candidate, and — only if it clears the significance g
 accept it and move to the sealed test.
 
 In our run, the seed skill passed the train case but **failed the val case**: asked
-to greet "Dr. Chen" formally, it wrote *"I hope this message finds you well, Dr.
-Chen"* — stylistically formal, but with no word the judge's substring check
-recognized as a formal marker (and, amusingly, the word "you" contains "yo", which
-the judge's own casual-marker list matched — a bug the optimizer later diagnosed in
-its own write-up).
+to greet "Dr. Chen" formally, it wrote *"I look forward to our conversation, Dr.
+Chen."* — plausible-sounding, but it has no formal greeting opener and reads as
+casual small talk. The judge caught it.
 
 ### Step 3 — the optimizer reads the failure and proposes a fix
 
@@ -137,12 +139,26 @@ explanation of what's being optimized) and edits `SKILL.md` directly. Here is th
 
 ![the optimizer's real diff](../assets/images/optimize-capevolve/04-skill-diff.png)
 
-It correctly diagnosed that the judge checks for specific marker words ("Dear",
-"Greetings", "Hey", "Hi", ...) and taught the skill to use them explicitly, with a
-worked example per tone — a generalizable rule, not a hack for the one failing
-case. This candidate then re-ran on the val split and scored a perfect 1.0 — though
-with a single val case the gate is in its strict fallback (accept any positive
-delta), so this is a plumbing demonstration, not a significance result.
+It added a decision table — must-include/never-include words per tone, with a
+worked example for each — covering five tones, not just the two val/test cases it
+had seen. That generality is the point: a model deciding its own "must
+include"/"never include" criteria per tone is a real description of how to write
+in that register, not a hardcoded answer to one prompt. This candidate then re-ran
+on the val split and scored a perfect 1.0 — though with a single val case the gate
+is in its strict fallback (accept any positive delta), so this is a plumbing
+demonstration, not a significance result.
+
+!!! warning "A weaker judge would have bought a worse edit here"
+    `tone_match`'s real check is a plain substring match against a short, fixed
+    word list (see the eval config above) — good enough to catch the seed's
+    specific failure, but exploitable: an edit that just repeated the judge's own
+    marker words verbatim back at it would also have scored 1.0, without any real
+    improvement in how the skill reasons about tone. That is reward hacking — the
+    optimizer finding the judge's blind spot instead of the task — and a weak judge
+    is exactly what makes it possible. The campaign's sealed test score is only
+    as trustworthy as the judge measuring it; see "When not to trust a campaign"
+    below before you act on a result from a judge you haven't scrutinized this
+    closely.
 
 ### Step 4 — `--status`: what happened, honestly
 
@@ -155,9 +171,10 @@ delta), so this is a plumbing demonstration, not a significance result.
 `best_id: cand_0001`, one accepted iteration, `best_val: 1.0` versus the seed's
 `0.0` on val. The sealed test case scored 1.0 for **both** the winner and the seed
 baseline in this particular pilot run — with only one test case, that's expected
-variance, not a contradiction; the honest caveat text (see Step 5) says so plainly.
-A full campaign with real split sizes would use more test cases and resolve this
-kind of coin-flip.
+variance, not a contradiction. The `warnings` field spells out exactly why: fewer
+than 2 validation cases means the significance gate had no way to tell noise from
+signal, so what you're looking at is a plumbing check, not a measurement. A full
+campaign with real split sizes resolves this.
 
 ### Step 5 — `--apply`: land the winner on a branch
 
