@@ -47,12 +47,15 @@ only if the user names their own checkout.
   or scorer — then re-run. With no `optimize:`/`reward:` configured
   (`scaffold.defaulted` non-empty), state intake's defaults
   (`scaffold.candidate_components`, judges weighted equally with no gate)
-  rather than asking to change them; edit the overlay only on request, then
-  re-run. Narrate the result instead of printing raw JSON: what will be
-  optimized (`scaffold.candidate_sources`) and the models every rollout uses
-  (`scaffold.models`). Quote every `scaffold.warnings` entry and resolve it
-  first — an unservable model errors every rollout and spends the budget on
-  nothing. State the train/val/test split sizes, the gate mode and `k_se`,
+  rather than asking to change them; edit the overlay only on request
+  (an edited overlay is reused as-is; `--reintake` regenerates it from
+  scratch), then re-run. Narrate the result instead of printing raw JSON:
+  what will be optimized — `scaffold.candidate_sources` are the skills the
+  optimizer may edit (trimming `optimize.candidate` in the overlay narrows
+  it) — and the models every rollout uses (`scaffold.models`). Quote every
+  `scaffold.warnings` entry and resolve it first — an unservable model
+  errors every rollout and spends the budget on nothing. State the
+  train/val/test split sizes, the gate mode and `k_se`,
   that small real gains come back "indecisive" at small val sizes, and the
   cost estimate as a range (blended with `observed_cost_per_rollout` when
   present). State `scaffold.workers`: at 1 the campaign is strictly serial
@@ -63,18 +66,22 @@ only if the user names their own checkout.
   detached and returns immediately — give the user the printed
   `run_dir`/`pid`/`log_file`; `--stop` ends it (signals the whole process
   group — never tell the user to `kill <pid>` themselves), and
-  `cap-evolve dashboard --base <benchmark>/.capevolve` watches it live. Point
-  them at `--status`/`--apply` once it finishes.
+  `cap-evolve dashboard --base <benchmark>/.capevolve` watches it live
+  (needs the dashboard backend installed — see the cap-evolve guide).
+  Point them at `--status`/`--apply` once it finishes.
 - **`--stop`**: run it, report `status` plainly (stopped / already stopped /
   could not be stopped).
-- **`--status`**: run it, then interpret in prose, not raw JSON. If
-  `warnings` is non-empty, quote it first: `measurements.n_scored: 0` means
-  no result at all — find the error in `log_file` or an `opt-*` run dir
-  instead of suggesting `--apply`. Otherwise report accepted/rejected/
+- **`--status`**: run it, then interpret in prose, not raw JSON: report
+  `status` plainly (not launched / running / finished / stopped — if
+  stopped, say to check `log_file`). If `warnings` is non-empty, quote it
+  first: `measurements.n_scored: 0` means no result at all — find the error
+  in `log_file` or an `opt-*` run dir instead of suggesting `--apply`.
+  Otherwise report accepted/rejected/
   indecisive counts, spend vs. budget, and an honest caveat on the error
   bars. If `final` is present, `git diff --no-index` the seed capability
-  against `<run_dir>/candidates/<best_id>/` and describe the change,
-  grounded in the diff.
+  (`.capevolve/project/seed_capability/`) against
+  `<run_dir>/candidates/<best_id>/` and describe the change, grounded in
+  the diff.
 - **`--apply`**: run it, report the branch and changed files, then surface
   the response's `caveat` and `suggested_next_step` verbatim — the
   optimistic-bias warning and its suggested confirmation run.

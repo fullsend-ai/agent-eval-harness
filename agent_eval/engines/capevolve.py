@@ -1604,10 +1604,12 @@ def apply_winner(*, project_root: Path, harness_manifest: dict, campaign_manifes
             f"run `git checkout {current_branch}` to return"
         ) from exc
 
-    # The optimistic-bias caveat needs real split sizes. cap-evolve freezes
-    # the split to run_dir/splits.json (confirmed on-disk file, not a
-    # final.json field) as {"train": [ids], "val": [ids], "test": [ids]}.
-    caveat = None
+    # The optimistic-bias caveat is most informative with real split sizes.
+    # cap-evolve freezes the split to run_dir/splits.json (confirmed on-disk
+    # file, not a final.json field) as {"train": [ids], "val": [ids], "test":
+    # [ids]}. When that file is missing (an older cap-evolve, or a run that
+    # never got that far), the warning itself must still reach the user —
+    # dropping it silently is worse than a caveat without exact counts.
     splits = _read_json(run_dir / "splits.json") or {}
     train_ids = splits.get("train") or []
     val_ids = splits.get("val") or []
@@ -1619,6 +1621,13 @@ def apply_winner(*, project_root: Path, harness_manifest: dict, campaign_manifes
             f"The sealed test delta ({final.get('test_delta')}) is the honest number. "
             f"A full /eval-run over the whole dataset will look better than that, because "
             f"{seen} of those {total} cases were seen during the search."
+        )
+    else:
+        caveat = (
+            f"The sealed test delta ({final.get('test_delta')}) is the honest number. "
+            f"A full /eval-run over the whole dataset will look better than that, because "
+            f"some of those cases were seen during the search ({run_dir / 'splits.json'} "
+            f"was not found, so the exact count is unavailable)."
         )
     return {
         "branch": branch,

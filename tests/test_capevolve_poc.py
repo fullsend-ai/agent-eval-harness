@@ -1012,14 +1012,16 @@ def test_candidate_manifest_lives_outside_the_optimizer_visible_tree(tmp_path, m
     assert manifest["eval_config"]
     assert manifest["base_eval_config"]
     assert manifest["project_root"]
+    assert manifest["harness_root"]
     assert manifest["task_inputs"]
     # Nothing the optimizer can read inside the project tree names the eval
-    # config, the base config, the checkout root, or carries a case input.
-    # The input needles use the JSON key/value spelling — the values are
-    # serialized into any JSON file that leaks them; the YAML spelling
-    # matched nothing (astefanutti confirmed the old clause could not fire).
+    # config, the base config, the checkout root, the harness install root,
+    # or carries a case input. The input needles use the JSON key/value
+    # spelling — the values are serialized into any JSON file that leaks
+    # them; the YAML spelling matched nothing (astefanutti confirmed the old
+    # clause could not fire).
     needles = [manifest["eval_config"], manifest["base_eval_config"],
-               manifest["project_root"]]
+               manifest["project_root"], manifest["harness_root"]]
     for task_input in manifest["task_inputs"].values():
         for key, value in task_input.items():
             needles.append(f"{json.dumps(key)}: {json.dumps(value)}")
@@ -1147,6 +1149,30 @@ def test_outer_rollout_timeout_exceeds_the_inner_budgets_it_wraps(tmp_path):
     # each capped at agent_timeout + 900.
     assert harbor > 2 * (1800 + 900)
     assert harbor < local            # two budgets, not five
+
+
+def test_rollout_step_counts_match_the_bridges_mirrored_constants(tmp_path):
+    """astefanutti: the bridge mirrors rollout.py's step counts as literals
+    (it is copied into generated projects and cannot import that module),
+    so neither _ROLLOUT_STEPS nor _HARBOR_CALLS is tied to the real call
+    count by anything but this test — a third sequential _run_harness call,
+    or a sixth _run_script, would otherwise silently reopen the timeout
+    gap. Counts calls via ast rather than trusting the source comments."""
+    import ast
+    import inspect
+
+    local_steps = sum(
+        1 for node in ast.walk(ast.parse(inspect.getsource(rollout._execute_local_steps)))
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        and node.func.id == "_run_script"
+    )
+    harbor_calls = sum(
+        1 for node in ast.walk(ast.parse(inspect.getsource(rollout._execute_harbor)))
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        and node.func.id == "_run_harness"
+    )
+    assert local_steps == bridge_template.Bridge._ROLLOUT_STEPS
+    assert harbor_calls == bridge_template.Bridge._HARBOR_CALLS
 
 
 def test_launch_stops_a_campaign_that_never_creates_a_run_dir(tmp_path, monkeypatch):
@@ -1884,6 +1910,27 @@ def test_workers_is_wired_into_the_generated_spec(tmp_path, monkeypatch):
         capevolve.prepare_project(max_usd=5, optimizer="mock", workers=0)
 
 
+def test_workers_above_one_warns_on_the_harbor_substrate(tmp_path, monkeypatch):
+    """astefanutti's follow-up: N workers on the Harbor substrate means N
+    concurrent containers against one podman socket (or cluster) — nothing
+    caps that today, so --dry-run must at least warn about it."""
+    monkeypatch.chdir(tmp_path)
+    _bare_benchmark(tmp_path)
+    real_find_spec = capevolve.importlib.util.find_spec
+    monkeypatch.setattr(capevolve.importlib.util, "find_spec",
+                        lambda name: object() if name == "harbor" else real_find_spec(name))
+    monkeypatch.setattr(capevolve.shutil, "which", lambda name: "/usr/bin/" + name)
+
+    result = capevolve.prepare_project(max_usd=5, optimizer="mock", runner="harbor",
+                                       harbor_env="podman", image="localhost/aeh:latest",
+                                       workers=4)
+    assert any("4 concurrent" in w and "podman socket" in w for w in result["warnings"])
+
+    serial = capevolve.prepare_project(max_usd=5, optimizer="mock", runner="harbor",
+                                       harbor_env="podman", image="localhost/aeh:latest")
+    assert not any("concurrent" in w for w in serial["warnings"])
+
+
 def test_optimize_block_redirects_search_controls(tmp_path):
     (tmp_path / "skill.md").write_text("seed", encoding="utf-8")
     config = type("Config", (), {
@@ -2298,6 +2345,24 @@ def test_apply_winner_creates_branch_and_restores_original_branch(tmp_path):
         capture_output=True, text=True, check=True,
     ).stdout
     assert shown == "improved skill"
+
+
+def test_apply_winner_still_warns_when_splits_json_is_missing(tmp_path):
+    """astefanutti: the trim that dropped the exact-count caveat wording for
+    a missing splits.json left the whole caveat as None — silently dropping
+    the optimistic-bias warning instead of degrading it. The warning itself
+    must survive even without exact split counts."""
+    project_root, harness_manifest, campaign_manifest, _ = _apply_fixture(tmp_path)
+    (Path(campaign_manifest["run_dir"]) / "splits.json").unlink()
+
+    result = capevolve.apply_winner(
+        project_root=project_root,
+        harness_manifest=harness_manifest, campaign_manifest=campaign_manifest,
+    )
+
+    assert result["caveat"] is not None
+    assert "honest number" in result["caveat"]
+    assert "A full /eval-run" in result["caveat"]
 
 
 def test_apply_winner_restores_clean_tree_after_a_mid_apply_failure(tmp_path):

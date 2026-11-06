@@ -128,6 +128,12 @@ class Bridge(CapabilityAdapter):
     # generated projects and must stay self-contained), so the count is
     # mirrored here; a stale count only loosens or tightens the outer bound.
     _ROLLOUT_STEPS = 5
+    # rollout.py's Harbor path makes this many sequential _run_harness calls
+    # (task-package generation via harbor.py, then agent_eval.harbor.run),
+    # each capped at agent_timeout + 900. Mirrored the same way as
+    # _ROLLOUT_STEPS, for the same reason — a third sequential call would
+    # silently reopen the timeout gap unless this count is bumped too.
+    _HARBOR_CALLS = 2
 
     def _rollout_timeout_s(self) -> int:
         """The outer rollout bound, derived from the inner budgets it wraps.
@@ -138,11 +144,8 @@ class Bridge(CapabilityAdapter):
         """
         agent_timeout = self.manifest.get("agent_timeout_s") or 1800
         if self.substrate.get("runner") == "harbor":
-            # rollout.py's Harbor path makes TWO sequential _run_harness
-            # calls, each capped at agent_timeout + 900 (task-package
-            # generation via harbor.py, then agent_eval.harbor.run); the
-            # margin covers upload around them.
-            return 2 * (agent_timeout + 900) + 600
+            # The margin covers upload around the two calls.
+            return self._HARBOR_CALLS * (agent_timeout + 900) + 600
         # rollout.py gives each of its _ROLLOUT_STEPS sequential steps its
         # own budget of agent_timeout + 300, so the outer bound must exceed
         # their SUM, not the per-step budget.
