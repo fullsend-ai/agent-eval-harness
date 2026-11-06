@@ -27,7 +27,7 @@ some test cases with a pass/fail judge. The interactive loop is a human watching
 intern edit and re-test, one case at a time, trusting their gut on whether it got
 better. cap-evolve is the same intern, except:
 
-1. It never looks at a third of your cases (the **test** split) until the very end.
+1. It never looks at your **test** split until the very end.
 2. It only keeps an edit if the improvement on the cases it *can* see (the **val**
    split) is bigger than what you'd expect from noise alone.
 3. At the end, it scores the winner on the cases it never saw, once, and tells you
@@ -90,8 +90,11 @@ optimize:
 ### Step 1 — `--dry-run`: see the plan before spending anything
 
 ```bash
-agent-eval-capevolve --max-usd 5 --dry-run
+/eval-optimize --engine cap-evolve --max-usd 5 --dry-run
 ```
+
+(Outside Claude Code, activate the harness venv and use
+`agent-eval-capevolve --max-usd 5 --dry-run` directly.)
 
 ![dry-run output](../assets/images/optimize-capevolve/01-dry-run.png)
 
@@ -104,7 +107,7 @@ proposed into a separate `.capevolve/eval.optimize.yaml` overlay instead).
 ### Step 2 — launch a real campaign
 
 ```bash
-agent-eval-capevolve --max-usd 5 --max-iterations 1 --num-trials 1 \
+/eval-optimize --engine cap-evolve --max-usd 5 --max-iterations 1 --num-trials 1 \
   --pilot-case-ids case-1 case-3 case-5 --run
 ```
 
@@ -137,13 +140,14 @@ explanation of what's being optimized) and edits `SKILL.md` directly. Here is th
 It correctly diagnosed that the judge checks for specific marker words ("Dear",
 "Greetings", "Hey", "Hi", ...) and taught the skill to use them explicitly, with a
 worked example per tone — a generalizable rule, not a hack for the one failing
-case. This candidate then re-ran on the val split and scored a perfect 1.0, clearing
-the significance gate, so cap-evolve accepted it.
+case. This candidate then re-ran on the val split and scored a perfect 1.0 — though
+with a single val case the gate is in its strict fallback (accept any positive
+delta), so this is a plumbing demonstration, not a significance result.
 
 ### Step 4 — `--status`: what happened, honestly
 
 ```bash
-agent-eval-capevolve --status
+/eval-optimize --engine cap-evolve --status
 ```
 
 ![status output](../assets/images/optimize-capevolve/02-status.png)
@@ -158,7 +162,7 @@ kind of coin-flip.
 ### Step 5 — `--apply`: land the winner on a branch
 
 ```bash
-agent-eval-capevolve --apply
+/eval-optimize --engine cap-evolve --apply
 ```
 
 ![apply output](../assets/images/optimize-capevolve/03-apply.png)
@@ -177,9 +181,9 @@ the default) at `http://127.0.0.1:7878` and prints the URL. You don't have to as
 for it:
 
 ```bash
-agent-eval-capevolve --max-usd 25                    # dashboard starts with it
-agent-eval-capevolve --max-usd 25 --dashboard off    # explicitly skip it
-agent-eval-capevolve --max-usd 25 --dashboard-port 9001
+/eval-optimize --engine cap-evolve --max-usd 25                    # dashboard starts with it
+/eval-optimize --engine cap-evolve --max-usd 25 --dashboard off    # explicitly skip it
+/eval-optimize --engine cap-evolve --max-usd 25 --dashboard-port 9001
 ```
 
 `--dry-run` reports whether it can actually launch — `dashboard_available` is
@@ -245,9 +249,9 @@ Reach for `--engine cap-evolve` instead of the interactive loop when:
   other people, report a number to someone — and being wrong costs more than the
   campaign does.
 - Your dataset is big enough to split three ways and still have a meaningful val
-  size (the honesty note in `--status`/`--apply` tells you plainly when it isn't:
-  with `val < 2` the gate degrades to "any positive delta is accepted", which is a
-  coin flip, not a measurement).
+  size (`--status` and `--apply` both warn you when it isn't: with `val < 2` the
+  gate degrades to "any positive delta is accepted", which is a coin flip, not a
+  measurement).
 - You want a **paper-trail**: every accepted/rejected candidate, its diff, and why,
   recorded in the run directory — useful when someone asks "why did the skill
   change" six months later.
@@ -255,6 +259,20 @@ Reach for `--engine cap-evolve` instead of the interactive loop when:
 Stick with the interactive `/eval-optimize` loop when you're iterating quickly on a
 handful of cases and just want a fast, good-enough fix — the statistical machinery
 is overhead you don't need yet.
+
+!!! warning "When not to trust a campaign"
+    A campaign's sealed test delta is only as good as its coverage. Watch for:
+
+    - **Too few val cases** (`--status` warns): with `val < 2`, the significance
+      gate accepts any positive delta — noise and signal look the same.
+    - **High error rate** (rollouts that failed before scoring): missing data
+      shrinks the sample the gate sees, making it easier to clear by chance.
+    - **A weak judge**: if the judge measures a proxy (substring matching, keyword
+      counting) rather than the capability, the optimizer will find and exploit the
+      proxy — a perfect val score on a bad judge is reward hacking, not improvement.
+
+    The `--status` output reports measurement coverage and val-size warnings;
+    read them before trusting `--apply`.
 
 ## Substrates
 

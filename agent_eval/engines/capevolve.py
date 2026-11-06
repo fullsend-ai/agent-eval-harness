@@ -1388,6 +1388,30 @@ def _coverage_warnings(coverage: dict | None, log_file: str | None) -> list[str]
     return []
 
 
+def _val_size_warnings(run_dir: Path, state: dict) -> list[str]:
+    """Warn when the validation split is too small for the significance gate.
+
+    With fewer than 2 validation cases the gate degenerates to "accept any
+    positive delta" (SE=0), which is a coin flip, not a measurement. This is
+    the same honesty note ``_project_md`` writes into PROJECT.md, surfaced
+    in ``--status`` and ``--apply`` where users actually look.
+    """
+    num_trials = (state.get("spec") or {}).get("num_trials", 1)
+    if num_trials != 1:
+        return []
+    splits = _read_json(run_dir / "splits.json")
+    if not splits:
+        return []  # no split data yet — too early to warn
+    val_ids = splits.get("val") or []
+    if len(val_ids) < 2:
+        return [
+            "fewer than 2 validation cases: the significance gate cannot reject noise "
+            "(SE=0 — any positive delta is accepted); this is a plumbing check, not a "
+            "measurement"
+        ]
+    return []
+
+
 def read_status(project_dir: Path) -> dict:
     """Report progress of the campaign launched in *project_dir*, if any.
 
@@ -1415,6 +1439,8 @@ def read_status(project_dir: Path) -> dict:
     else:
         status = "stopped"
     coverage = _measurement_coverage(final) if final else None
+    warnings = _coverage_warnings(coverage, manifest.get("log_file"))
+    warnings.extend(_val_size_warnings(run_dir, state))
 
     return {
         "status": status,
@@ -1435,7 +1461,7 @@ def read_status(project_dir: Path) -> dict:
         "latest_event": latest_event,
         "final": final,
         "measurements": coverage,
-        "warnings": _coverage_warnings(coverage, manifest.get("log_file")),
+        "warnings": warnings,
     }
 
 
@@ -1667,6 +1693,12 @@ def apply_winner(*, project_root: Path, harness_manifest: dict, campaign_manifes
             f"A full /eval-run over the whole dataset will look better than that, because "
             f"some of those cases were seen during the search (no usable split "
             f"record at {run_dir / 'splits.json'}, so the exact count is unavailable)."
+        )
+    if total and len(val_ids) < 2:
+        caveat += (
+            " Note: fewer than 2 validation cases — the significance gate could not "
+            "reject noise (SE=0 — any positive delta was accepted); treat this as a "
+            "plumbing check, not a significance result."
         )
     return {
         "branch": branch,

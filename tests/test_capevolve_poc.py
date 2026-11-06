@@ -2972,6 +2972,9 @@ def test_fetch_without_network_names_the_offline_fix(tmp_path, monkeypatch):
 
 
 def test_missing_cap_evolve_core_is_a_setup_step(monkeypatch):
+    # Pin Python >= 3.11 so the version guard doesn't fire first (on a 3.10
+    # host the version check raises before find_spec is ever called).
+    monkeypatch.setattr(capevolve.sys, "version_info", (3, 11, 0))
     monkeypatch.setattr(capevolve.importlib.util, "find_spec", lambda name: None)
     with pytest.raises(capevolve.SetupRequired, match="cap-evolve-core is not installed"):
         _REAL_REQUIRE_CAP_EVOLVE()
@@ -3244,6 +3247,43 @@ def test_status_is_quiet_when_every_evaluation_measured(tmp_path):
 
     assert status["measurements"] == {"n_tasks": 6, "n_scored": 6}
     assert status["warnings"] == []
+
+
+def test_status_warns_when_val_split_is_too_small_for_the_gate(tmp_path):
+    """With fewer than 2 val cases the significance gate degenerates to
+    'accept any positive delta' (SE=0). --status must surface this."""
+    project_dir = _finished_campaign(tmp_path, {
+        "seed": _split_summary(1, 1), "best": _split_summary(1, 1)})
+    run_dir = tmp_path / ".capevolve" / "run_1"
+    # state.json with num_trials=1 and splits.json with only one val case
+    (run_dir / "state.json").write_text(
+        json.dumps({"spec": {"num_trials": 1}}), encoding="utf-8")
+    (run_dir / "splits.json").write_text(
+        json.dumps({"train": ["c1", "c2"], "val": ["c3"], "test": ["c4"]}),
+        encoding="utf-8")
+
+    status = capevolve.read_status(project_dir)
+
+    val_warnings = [w for w in status["warnings"] if "significance gate" in w]
+    assert val_warnings, f"expected a val-size warning, got: {status['warnings']}"
+    assert "SE=0" in val_warnings[0]
+
+
+def test_status_is_quiet_about_val_size_with_enough_cases(tmp_path):
+    """With >= 2 val cases the gate is meaningful; no extra warning."""
+    project_dir = _finished_campaign(tmp_path, {
+        "seed": _split_summary(1, 1), "best": _split_summary(1, 1)})
+    run_dir = tmp_path / ".capevolve" / "run_1"
+    (run_dir / "state.json").write_text(
+        json.dumps({"spec": {"num_trials": 1}}), encoding="utf-8")
+    (run_dir / "splits.json").write_text(
+        json.dumps({"train": ["c1", "c2"], "val": ["c3", "c4"], "test": ["c5"]}),
+        encoding="utf-8")
+
+    status = capevolve.read_status(project_dir)
+
+    val_warnings = [w for w in status["warnings"] if "significance gate" in w]
+    assert not val_warnings, f"unexpected val-size warning: {val_warnings}"
 
 
 def test_override_inside_an_unrelated_repo_is_not_misjudged(tmp_path):
