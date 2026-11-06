@@ -163,7 +163,7 @@ class Bridge(CapabilityAdapter):
         # The bootstrap sentinel belongs to this process only. Pop it after all
         # other environment edits so each child can activate its own venv.
         env.pop("_AGENT_EVAL_BOOTSTRAP_DONE", None)
-        harness_python = self.substrate.get("harness_python") or sys.executable
+        harness_python = self.manifest.get("harness_python") or sys.executable
         command = [
             harness_python, "-m", "agent_eval.optimize.rollout",
             "--manifest", str(self.manifest_path),

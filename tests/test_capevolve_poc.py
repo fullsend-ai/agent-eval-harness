@@ -66,10 +66,11 @@ def _make_bridge(tmp_path, task_ids=("case-1",)):
     no real rollout subprocess is ever invoked by these tests."""
     adapters_dir = tmp_path / "adapters"
     adapters_dir.mkdir()
-    substrate = {"runner": "local", "env": None, "image": None, "harness_python": sys.executable}
+    substrate = {"runner": "local", "env": None, "image": None}
     (adapters_dir / "substrate.json").write_text(json.dumps(substrate), encoding="utf-8")
     manifest = {
         "harness_root": str(tmp_path / "harness"),
+        "harness_python": sys.executable,
         "project_root": str(tmp_path / "project"),
         "eval_config": str(tmp_path / "project" / "eval.yaml"),
         "eval_name": "demo",
@@ -698,8 +699,10 @@ optimize:
     assert substrate["runner"] == "local"
     # The venv's own interpreter when one exists (it must be able to import
     # cap_evolve, which sys.executable is not guaranteed to), else a safe
-    # fallback to sys.executable (no venv to speak of).
-    assert substrate["harness_python"] == capevolve._venv_python(
+    # fallback to sys.executable (no venv to speak of). Lives in the manifest,
+    # not substrate.json: it embeds harness_root, and substrate.json is
+    # optimizer-visible.
+    assert manifest["harness_python"] == capevolve._venv_python(
         Path(capevolve.__file__).resolve().parents[2]
     )
     assert "dataset_source: adapter" in spec
@@ -1056,10 +1059,10 @@ def test_bridge_resolves_the_manifest_through_substrate_manifest_path(tmp_path, 
     manifest_dir = tmp_path / "harness"
     manifest_dir.mkdir()
     manifest = {"project_root": str(tmp_path), "task_ids": ["case-9"],
-                "task_inputs": {"case-9": {"request": "case-9"}}}
+                "task_inputs": {"case-9": {"request": "case-9"}},
+                "harness_python": sys.executable}
     (manifest_dir / "candidate.json").write_text(json.dumps(manifest), encoding="utf-8")
     substrate = {"runner": "local", "env": None, "image": None,
-                 "harness_python": sys.executable,
                  "manifest_path": "../../harness/candidate.json"}
     (adapters_dir / "substrate.json").write_text(json.dumps(substrate), encoding="utf-8")
     # A stale sibling manifest must not be read.
@@ -1392,10 +1395,11 @@ def test_prepare_project_records_the_harbor_substrate(tmp_path, monkeypatch):
 
     project = Path(result["project_dir"])
     substrate = json.loads((project / "adapters/substrate.json").read_text())
+    manifest = json.loads((project.parent / "harness/candidate.json").read_text())
     expected_python = capevolve._venv_python(Path(capevolve.__file__).resolve().parents[2])
     assert substrate == {"runner": "harbor", "env": "podman", "image": "localhost/aeh:latest",
-                         "harness_python": expected_python,
                          "manifest_path": "../../harness/candidate.json"}
+    assert manifest["harness_python"] == expected_python
     assert "on Harbor (`--env podman`" in (project / "PROJECT.md").read_text()
 
 

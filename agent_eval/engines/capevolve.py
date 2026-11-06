@@ -710,7 +710,6 @@ def prepare_project(
         "runner": runner,
         "env": harbor_env if runner == "harbor" else None,
         "image": image if runner == "harbor" else None,
-        "harness_python": _venv_python(harness_root),
         # Where the task/candidate manifest lives — outside the project tree
         # (see the harness_dir comment above), as a path RELATIVE to this
         # substrate.json file (never absolute: this file is optimizer-visible).
@@ -724,6 +723,10 @@ def prepare_project(
     # bridge and the rollout subprocess both read.
     candidate_manifest = {
         "harness_root": str(harness_root),
+        # The interpreter the rollout subprocess runs under. Here rather than
+        # in substrate.json because it embeds harness_root, and that file is
+        # optimizer-visible.
+        "harness_python": _venv_python(harness_root),
         "project_root": str(project_root),
         "eval_config": str(config_path),
         "base_eval_config": str(resolved["base_config"]),
@@ -1626,8 +1629,8 @@ def apply_winner(*, project_root: Path, harness_manifest: dict, campaign_manifes
         caveat = (
             f"The sealed test delta ({final.get('test_delta')}) is the honest number. "
             f"A full /eval-run over the whole dataset will look better than that, because "
-            f"some of those cases were seen during the search ({run_dir / 'splits.json'} "
-            f"was not found, so the exact count is unavailable)."
+            f"some of those cases were seen during the search (no usable split "
+            f"record at {run_dir / 'splits.json'}, so the exact count is unavailable)."
         )
     return {
         "branch": branch,
