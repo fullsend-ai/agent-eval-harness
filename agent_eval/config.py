@@ -2020,6 +2020,12 @@ class JudgeConfig:
     # Verdict transport override for this judge (spec 015): "" inherits
     # `models.judge_verdict`; `auto` | `json_schema` | `tool` otherwise.
     verdict: str = ""
+    # Optimization feedback opt-in (default off): the eval AUTHOR asserts this
+    # judge's rationale is gold-free, so cap-evolve's proposer may see a
+    # bounded excerpt of it alongside the outcome label. Rationale can quote
+    # gold answers, which is why it is redacted by default — this flag is a
+    # claim about the judge's prompt, owned by whoever wrote the eval config.
+    feedback_rationale: bool = False
 
 
 @dataclass
@@ -2761,6 +2767,7 @@ class EvalConfig:
                     verdict=_check_verdict_policy(
                         j.get("verdict"), f"Judge '{j.get('name', '')}': 'verdict'",
                         default=""),
+                    feedback_rationale=bool(j.get("feedback_rationale", False)),
                 )
             )
 

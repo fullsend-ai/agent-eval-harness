@@ -39,7 +39,10 @@ Same config on your laptop, Harbor containers, or EvalHub.
   (including agentic documentation checks).
 - **Robust scoring.** LLM + code judges, pairwise A/B, thresholds, and HTML reports.
 - **MLflow-native traces.** Opt-in experiments, datasets, and hierarchical GenAI traces.
-- **Close the loop.** `/eval-optimize` proposes skill fixes from failures and re-runs.
+- **Close the loop.** `/eval-optimize` proposes skill fixes from failures and re-runs,
+  or, with `--engine cap-evolve` (`/eval-setup --optimize`), runs a statistically
+  validated search instead: train/val/test splits, a significance gate, a sealed
+  test score.
 
 ## Execution Model
 
@@ -730,6 +733,22 @@ Automated refinement loop: run eval, identify failures, read traces + judge rati
 
 ```
 /eval-optimize --model opus --max-iterations 3
+```
+
+With `--engine cap-evolve` (one-time setup: `/eval-setup --optimize`), runs a
+statistically validated search instead: train/val/test splits, a significance gate
+on validation (`Δ > k·SE`), and a sealed test split scored exactly once. A
+real coding agent reads the failing cases and proposes the fix; only a candidate
+that clears the significance gate gets accepted. See
+[Statistically validated optimization](website/guides/optimize-capevolve.md) for a
+full walkthrough with real screenshots from an actual run, including the live
+dashboard.
+
+```bash
+/eval-optimize --engine cap-evolve --max-usd 25   # launch, $25 hard cap
+/eval-optimize --engine cap-evolve --status       # from any later session
+/eval-optimize --engine cap-evolve --stop         # stop the whole campaign, not just its launcher
+/eval-optimize --engine cap-evolve --apply        # winner onto a new git branch
 ```
 
 ### /eval-check

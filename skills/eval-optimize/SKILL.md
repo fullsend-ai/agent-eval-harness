@@ -1,6 +1,6 @@
 ---
 name: eval-optimize
-description: Automated skill improvement loop. Runs eval, identifies judge failures, reads traces and rationale, edits the SKILL.md to fix issues, re-runs to verify, and checks for regressions. Use when the user wants to automatically improve a skill based on eval results, fix failing judges, make the skill better, auto-fix quality issues, improve scores, or iterate until all judges pass. Triggers on "optimize the skill", "make it pass", "auto-fix", "improve the scores", "why is it failing". Works best after /eval-run has produced results to learn from.
+description: 'Automated skill improvement. Default: an interactive loop that runs eval, identifies judge failures, reads traces and rationale, edits the SKILL.md, re-runs, and checks for regressions. Pass --engine cap-evolve (alias capevolve) for statistically validated optimization instead (train/val/test splits, a significance gate, sealed test). Use when the user wants to improve a skill based on eval results, fix failing judges, improve scores, or iterate until judges pass. Triggers on "optimize the skill", "make it pass", "auto-fix", "cap-evolve". Works best after /eval-run has produced results.'
 user-invocable: true
 allowed-tools: Read, Write, Edit, Bash, Glob, Grep, Agent, Skill, AskUserQuestion
 ---
@@ -13,8 +13,92 @@ The key difference from `/eval-review`: you act autonomously. You read judge rat
 
 ## Step 0: Parse Arguments
 
+**`--engine cap-evolve` dispatch.** If `--engine cap-evolve` (alias:
+`--engine capevolve`) is among the arguments, this is the automated,
+statistically-gated cap-evolve path, not the interactive loop below — skip
+every other step in this file. Unlike that loop, it splits cases into
+train/val/test, accepts a candidate only on a significance gate over val (a
+small change comes back "indecisive", never banked as progress), and scores
+test exactly once. Prefer it whenever that stronger guarantee is worth the
+setup. Any other `--engine <value>` is an error — never fall through to the
+interactive loop silently.
+
+Parse only `--config`, `--max-usd`, `--max-iterations`, `--num-trials`,
+`--workers`, `--dashboard`, `--dashboard-port`, `--dry-run`, `--pilot-case-ids`,
+`--runner-budget-usd`, `--runner`, `--env`, `--image`, `--reintake`, `--optimizer`,
+`--optimizer-model`, `--skills-dir`, `--seed`, `--split-ratios`, `--run`,
+`--setup`, `--status`, `--stop`, and `--apply` from the arguments (ignore
+`--model`/`--run-id`/`--target-judge`).
+Scope is local or Harbor substrate only (EvalHub is refused). Do not proceed
+to Step 1 for a `--engine cap-evolve` invocation. Every mode runs
+`python3 ${CLAUDE_SKILL_DIR}/scripts/capevolve.py <flags>` from the
+benchmark's root.
+
+Setup is self-healing — never ask the user for a cap-evolve path; the command
+fetches cap-evolve's skills tree at the pinned commit on first use. If any
+mode returns `{"error": "setup_required", ...}` (exit 2), tell the user in
+one line, invoke `/eval-setup --optimize`, then re-run. Pass `--skills-dir`
+only if the user names their own checkout.
+
+- **`--dry-run`**: run it. It performs cap-evolve's intake phase itself and
+  never edits the benchmark: missing `optimize:`/`reward:` blocks are
+  proposed into `.capevolve/eval.optimize.yaml` (an `extends:` overlay). If
+  the result is `{"blocked": [...]}` (exit 1), quote each entry's `input`,
+  `why`, `how` and resolve it with the user — never invent a dataset, skill,
+  or scorer — then re-run. With no `optimize:`/`reward:` configured
+  (`scaffold.defaulted` non-empty), state intake's defaults
+  (`scaffold.candidate_components`, judges weighted equally with no gate)
+  rather than asking to change them; edit the overlay only on request
+  (an edited overlay is reused as-is; `--reintake` regenerates it from
+  scratch), then re-run. Narrate the result instead of printing raw JSON:
+  what will be optimized — `scaffold.candidate_sources` are the skills the
+  optimizer may edit (trimming `optimize.candidate` in the overlay narrows
+  it) — and the models every rollout uses (`scaffold.models`). Quote every
+  `scaffold.warnings` entry and resolve it first — an unservable model
+  errors every rollout and spends the budget on nothing. State the
+  train/val/test split sizes, the gate mode and `k_se`,
+  that small real gains come back "indecisive" at small val sizes, and the
+  cost estimate as a range (blended with `observed_cost_per_rollout` when
+  present). State `scaffold.workers`: at 1 the campaign is strictly serial
+  (wall-clock ≈ `|val| × num_trials × (iterations + 1)` rollout times —
+  `--max-usd` caps spend, not time); `--workers N` runs N-wide instead. State
+  `scaffold.dashboard_url` (the live view the campaign will open at launch,
+  on by default) and, if `scaffold.dashboard_available` is false, that it
+  will run with no live view until `capevolve-dashboard` is installed.
+- **Launch** (no `--dry-run`/`--status`/`--stop`/`--apply`, `--max-usd`
+  given): confirm the spend with `AskUserQuestion` first. It launches
+  detached and returns immediately — give the user the printed
+  `run_dir`/`pid`/`log_file`; `--stop` ends it (signals the whole process
+  group — never tell the user to `kill <pid>` themselves). A live dashboard
+  starts automatically with the campaign (`--dashboard auto`, the default) —
+  give the user `scaffold.dashboard_url` from the prior `--dry-run` (or this
+  launch's own output) to open it. If `scaffold.dashboard_available` was
+  false, say plainly that the campaign runs fine but with no live view
+  until `capevolve-dashboard` is installed (`/eval-setup --optimize`); pass
+  `--dashboard off` only if the user explicitly doesn't want it. Point them
+  at `--status`/`--apply` once it finishes.
+- **`--stop`**: run it, report `status` plainly (stopped / already stopped /
+  could not be stopped).
+- **`--status`**: run it, then interpret in prose, not raw JSON: report
+  `status` plainly (not launched / running / finished / stopped — if
+  stopped, say to check `log_file`). If `warnings` is non-empty, quote it
+  first and split by kind: a measurement warning (`n_scored: 0`, missing
+  measurements) is a failure — find the error in `log_file` or an `opt-*`
+  run dir instead of suggesting `--apply`; the val-size warning (fewer
+  than 2 validation cases) is not a failure — carry it as a caveat, and
+  `--apply` is still the right next step. Otherwise report accepted/rejected/
+  indecisive counts, spend vs. budget, and an honest caveat on the error
+  bars. If `final` is present, `git diff --no-index` the seed capability
+  (`.capevolve/project/seed_capability/`) against
+  `<run_dir>/candidates/<best_id>/` and describe the change, grounded in
+  the diff.
+- **`--apply`**: run it, report the branch and changed files, then surface
+  the response's `caveat` and `suggested_next_step` verbatim — the
+  optimistic-bias warning and its suggested confirmation run.
+
 | Argument | Required | Default | Description |
 |----------|----------|---------|-------------|
+| `--engine <cap-evolve>` | no | the interactive loop below | Pass `--engine cap-evolve` (alias: `capevolve`) for statistically validated optimization instead (see Step 0). Any other value is an error, never a silent fall-through |
 | `--config <path>` | no | auto-discover | Path to eval config |
 | `--model <model>` | no | `models.skill` from eval.yaml | Model to use for eval runs (overrides config default) |
 | `--max-iterations <N>` | no | 3 | Stop after N improvement cycles |

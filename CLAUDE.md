@@ -156,7 +156,7 @@ skills/eval-mlflow/      # Skill: MLflow integration
     attach_feedback.py   # Push/pull feedback between harness and traces
     from_traces.py       # Extract inputs from production traces
 
-skills/eval-optimize/    # Skill: automated refinement loop
+skills/eval-optimize/    # Skill: refinement loop, or --engine cap-evolve
   SKILL.md               # Composes with /eval-run via Skill tool
 
 skills/eval-compare/     # Skill: cross-model/cross-run comparison report
