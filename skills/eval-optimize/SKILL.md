@@ -24,10 +24,11 @@ setup. Any other `--engine <value>` is an error — never fall through to the
 interactive loop silently.
 
 Parse only `--config`, `--max-usd`, `--max-iterations`, `--num-trials`,
-`--workers`, `--dry-run`, `--pilot-case-ids`, `--runner-budget-usd`, `--runner`,
-`--env`, `--image`, `--reintake`, `--optimizer`, `--optimizer-model`, `--skills-dir`,
-`--seed`, `--split-ratios`, `--run`, `--setup`, `--status`, `--stop`, and
-`--apply` from the arguments (ignore `--model`/`--run-id`/`--target-judge`).
+`--workers`, `--dashboard`, `--dashboard-port`, `--dry-run`, `--pilot-case-ids`,
+`--runner-budget-usd`, `--runner`, `--env`, `--image`, `--reintake`, `--optimizer`,
+`--optimizer-model`, `--skills-dir`, `--seed`, `--split-ratios`, `--run`,
+`--setup`, `--status`, `--stop`, and `--apply` from the arguments (ignore
+`--model`/`--run-id`/`--target-judge`).
 Scope is local or Harbor substrate only (EvalHub is refused). Do not proceed
 to Step 1 for a `--engine cap-evolve` invocation. Every mode runs
 `python3 ${CLAUDE_SKILL_DIR}/scripts/capevolve.py <flags>` from the
@@ -60,15 +61,22 @@ only if the user names their own checkout.
   cost estimate as a range (blended with `observed_cost_per_rollout` when
   present). State `scaffold.workers`: at 1 the campaign is strictly serial
   (wall-clock ≈ `|val| × num_trials × (iterations + 1)` rollout times —
-  `--max-usd` caps spend, not time); `--workers N` runs N-wide instead.
+  `--max-usd` caps spend, not time); `--workers N` runs N-wide instead. State
+  `scaffold.dashboard_url` (the live view the campaign will open at launch,
+  on by default) and, if `scaffold.dashboard_available` is false, that it
+  will run with no live view until `capevolve-dashboard` is installed.
 - **Launch** (no `--dry-run`/`--status`/`--stop`/`--apply`, `--max-usd`
   given): confirm the spend with `AskUserQuestion` first. It launches
   detached and returns immediately — give the user the printed
   `run_dir`/`pid`/`log_file`; `--stop` ends it (signals the whole process
-  group — never tell the user to `kill <pid>` themselves), and
-  `cap-evolve dashboard --base <benchmark>/.capevolve` watches it live
-  (needs the dashboard backend installed — see the cap-evolve guide).
-  Point them at `--status`/`--apply` once it finishes.
+  group — never tell the user to `kill <pid>` themselves). A live dashboard
+  starts automatically with the campaign (`--dashboard auto`, the default) —
+  give the user `scaffold.dashboard_url` from the prior `--dry-run` (or this
+  launch's own output) to open it. If `scaffold.dashboard_available` was
+  false, say plainly that the campaign runs fine but with no live view
+  until `capevolve-dashboard` is installed (`/eval-setup --optimize`); pass
+  `--dashboard off` only if the user explicitly doesn't want it. Point them
+  at `--status`/`--apply` once it finishes.
 - **`--stop`**: run it, report `status` plainly (stopped / already stopped /
   could not be stopped).
 - **`--status`**: run it, then interpret in prose, not raw JSON: report

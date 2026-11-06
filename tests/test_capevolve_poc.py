@@ -1781,6 +1781,35 @@ def test_cli_dry_run_scaffolds_checks_and_estimates(tmp_path, monkeypatch, capsy
     assert result["estimate"]["spec_path"] == result["scaffold"]["spec_path"]
 
 
+@pytest.mark.skipif(importlib.util.find_spec("cap_evolve") is None,
+                    reason="requires the optional cap-evolve-core extra")
+def test_cli_dashboard_flags_reach_the_generated_spec(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    _demo_eval_yaml(tmp_path, mode="batch")
+    exit_code = capevolve.main([
+        "--config", "eval.yaml", "--max-usd", "5", "--max-iterations", "1",
+        "--optimizer", "mock", "--dashboard", "off", "--dry-run",
+    ])
+    result = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert result["scaffold"]["dashboard"] == "off"
+    assert result["scaffold"]["dashboard_url"] is None
+
+    exit_code = capevolve.main([
+        "--config", "eval.yaml", "--max-usd", "5", "--max-iterations", "1",
+        "--optimizer", "mock", "--dashboard-port", "9001", "--dry-run",
+    ])
+    result = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert result["scaffold"]["dashboard"] == "auto"       # still the default
+    assert result["scaffold"]["dashboard_url"] == "http://127.0.0.1:9001"
+
+    with pytest.raises(SystemExit):
+        capevolve.main([
+            "--config", "eval.yaml", "--max-usd", "5", "--dashboard", "bogus", "--dry-run",
+        ])
+
+
 @pytest.mark.skipif(importlib.util.find_spec("cap_evolve") is None or _LOCAL_CAPEVOLVE_TEMPLATES is None,
                     reason="requires the optional cap-evolve-core extra and its templates/project")
 def test_cli_dry_run_intakes_a_bare_benchmark_end_to_end(tmp_path, monkeypatch, capsys):
@@ -1933,6 +1962,62 @@ def test_workers_above_one_warns_on_the_harbor_substrate(tmp_path, monkeypatch):
     serial = capevolve.prepare_project(max_usd=5, optimizer="mock", runner="harbor",
                                        harbor_env="podman", image="localhost/aeh:latest")
     assert not any("concurrent" in w for w in serial["warnings"])
+
+
+def test_dashboard_defaults_to_auto_and_is_wired_into_the_generated_spec(tmp_path, monkeypatch):
+    """The live dashboard cap-evolve launches at the top of `run` is on by
+    default (--dashboard auto) so a user gets it without having to ask."""
+    import yaml as _yaml
+    monkeypatch.chdir(tmp_path)
+    _bare_benchmark(tmp_path)
+
+    result = capevolve.prepare_project(max_usd=5, optimizer="mock")
+    assert result["dashboard"] == "auto"
+    assert result["dashboard_url"] == "http://127.0.0.1:7878"
+    spec = _yaml.safe_load((Path(result["project_dir"]) / "capevolve.yaml").read_text())
+    assert spec["dashboard"] == "auto"
+    assert spec["dashboard_port"] == 7878
+
+    off = capevolve.prepare_project(max_usd=5, optimizer="mock", dashboard="off")
+    assert off["dashboard_url"] is None
+    spec = _yaml.safe_load((Path(off["project_dir"]) / "capevolve.yaml").read_text())
+    assert spec["dashboard"] == "off"
+
+    custom_port = capevolve.prepare_project(max_usd=5, optimizer="mock", dashboard_port=9001)
+    assert custom_port["dashboard_url"] == "http://127.0.0.1:9001"
+    spec = _yaml.safe_load((Path(custom_port["project_dir"]) / "capevolve.yaml").read_text())
+    assert spec["dashboard_port"] == 9001
+
+    with pytest.raises(ValueError, match="--dashboard must be one of"):
+        capevolve.prepare_project(max_usd=5, optimizer="mock", dashboard="bogus")
+
+
+def test_dashboard_available_reports_whether_the_backend_package_is_installed(tmp_path, monkeypatch):
+    """--dry-run should tell the user upfront whether the (optional)
+    capevolve-dashboard package can actually be launched, rather than only
+    discovering it from cap-evolve's own silent no-op after launch."""
+    monkeypatch.chdir(tmp_path)
+    _bare_benchmark(tmp_path)
+    real_find_spec = capevolve.importlib.util.find_spec
+
+    monkeypatch.setattr(capevolve.importlib.util, "find_spec",
+                        lambda name: None if name == "capevolve_dashboard" else real_find_spec(name))
+    missing = capevolve.prepare_project(max_usd=5, optimizer="mock")
+    assert missing["dashboard_available"] is False
+    assert any("capevolve-dashboard isn't installed" in w for w in missing["warnings"])
+
+    monkeypatch.setattr(capevolve.importlib.util, "find_spec",
+                        lambda name: object() if name == "capevolve_dashboard" else real_find_spec(name))
+    present = capevolve.prepare_project(max_usd=5, optimizer="mock")
+    assert present["dashboard_available"] is True
+    assert not any("capevolve-dashboard isn't installed" in w for w in present["warnings"])
+
+    # --dashboard off never warns about a missing install — there's nothing
+    # to launch, so nothing to warn about.
+    monkeypatch.setattr(capevolve.importlib.util, "find_spec",
+                        lambda name: None if name == "capevolve_dashboard" else real_find_spec(name))
+    off = capevolve.prepare_project(max_usd=5, optimizer="mock", dashboard="off")
+    assert not any("capevolve-dashboard isn't installed" in w for w in off["warnings"])
 
 
 def test_optimize_block_redirects_search_controls(tmp_path):

@@ -110,6 +110,18 @@ the install above failed — show its `reason`. A user who keeps their own
 cap-evolve checkout can set `CAPEVOLVE_SKILLS_DIR`; it is used only when it is
 at the pinned commit.
 
+The `[optimize]` extra above also installs `capevolve-dashboard` — the live
+dashboard `/eval-optimize --engine cap-evolve` launches by default (`--dashboard
+auto`) when a campaign starts. That gives a working REST API and the
+pre-built static dashboard.html each run writes, but not the live React UI:
+the frontend is a separate npm build this pip package doesn't bundle. A user
+who wants the full live UI, not just the API/static export, needs to build it
+themselves once from a cap-evolve checkout at the pinned commit
+(`cd dashboard/frontend && npm install && npm run build`), then set
+`CAPEVOLVE_STATIC_DIR` to that `dist/` dir before launching. Mention this only
+if the user asks about the dashboard UI specifically — the campaign and its
+static dashboard.html work fully without it.
+
 ## Step 2: Run Preflight Checks
 
 ```bash

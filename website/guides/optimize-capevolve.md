@@ -41,10 +41,11 @@ That's the whole idea. The rest of this page is the mechanics and a real example
 /eval-setup --optimize
 ```
 
-This installs `cap-evolve-core` into the harness's own venv and fetches its skills
-tree (phases, algorithms, templates) at a pinned commit — nothing to check out
-yourself. Needs Python 3.11+ in the harness venv; `/eval-setup --optimize` rebuilds
-it with a newer interpreter if needed.
+This installs `cap-evolve-core` (and `capevolve-dashboard`, for the live dashboard
+every campaign starts by default) into the harness's own venv and fetches
+cap-evolve's skills tree (phases, algorithms, templates) at a pinned commit —
+nothing to check out yourself. Needs Python 3.11+ in the harness venv;
+`/eval-setup --optimize` rebuilds it with a newer interpreter if needed.
 
 ## A real end-to-end example
 
@@ -169,38 +170,72 @@ many of your total cases were actually seen during the search (train + val), sin
 a full `/eval-run` over the whole dataset will look *better* than the sealed test
 delta for exactly that reason.
 
-### The dashboard
+### The dashboard — on by default
 
-A launched campaign writes its own run directory under `.capevolve/run_<timestamp>/`
-— including a **self-contained `dashboard.html`** you can open directly, no backend
-needed (a live-updating version is also available via `pip install -e
-<cap-evolve checkout>/dashboard/backend && cap-evolve dashboard --base .capevolve`
-if you want to watch a long campaign progress in real time).
+A launched campaign starts a **live dashboard automatically** (`--dashboard auto`,
+the default) at `http://127.0.0.1:7878` and prints the URL. You don't have to ask
+for it:
 
-Here's the real dashboard from the run above:
+```bash
+agent-eval-capevolve --max-usd 25                    # dashboard starts with it
+agent-eval-capevolve --max-usd 25 --dashboard off    # explicitly skip it
+agent-eval-capevolve --max-usd 25 --dashboard-port 9001
+```
 
-![the real dashboard](../assets/images/optimize-capevolve/05-dashboard.png)
+`--dry-run` reports whether it can actually launch — `dashboard_available` is
+`false` until the optional `capevolve-dashboard` package is installed
+(`/eval-setup --optimize` installs it alongside `cap-evolve-core`; a missing
+install is a no-op, never a failed campaign — you just get no live view until
+then).
 
-Reading it left to right, top to bottom:
+**What "the dashboard" gets you depends on what's installed.** The pip package
+(`capevolve-dashboard`) is the backend only — a REST API plus the static,
+self-contained `dashboard.html` every run writes to its run directory (open it
+directly, no server needed: this is the artifact the screenshots below under
+"self-contained, no backend" came from). The full live React UI you see in the
+other screenshots below is a separate frontend, built with `npm`, that the pip
+package doesn't bundle — most users will only ever see the static export, and
+that's genuinely enough day to day. If you want the live UI too, build it once
+from a cap-evolve checkout at the pinned commit:
 
-- **Summary row** — best val (1.000) vs. baseline (0.000), the delta, the sealed
-  test score, candidate/iteration counts, wall-clock, and total spend ($0.81 for
-  this whole pilot — mostly the optimizer agent's own tokens, not the skill's).
-- **Pipeline phases** — intake → implement & check → baseline → optimize →
-  finalize → report, each marked done with a one-line summary. This is the exact
-  sequence described above, laid out as a timeline.
-- **Score over iterations** — the cumulative-best line. Flat at 0 until the one
-  accepted candidate, then a jump to 1.0 — a real, measured step, not a smoothed
-  curve.
-- **Per-task pass/fail** — a grid of every task × outcome. With one val case this
-  is a single row; a real campaign's grid is where you'd spot a task that's
-  always failing versus one that flips with noise.
-- **Diff vs parent** — the optimizer's own structured diagnosis
-  (`DIAGNOSIS.json`), generated automatically alongside the SKILL.md edit, naming
-  the failure cluster and the fix.
-- **Lineage** — seed → accepted candidate, as a small graph. On a longer campaign
-  with several iterations this is where you'd see rejected branches dead-end and
-  the accepted lineage continue.
+```bash
+git clone https://github.com/skillberry-ai/cap-evolve.git
+cd cap-evolve && git checkout <the commit pyproject.toml pins>
+cd dashboard/frontend && npm install && npm run build
+export CAPEVOLVE_STATIC_DIR=$(pwd)/dist     # before launching a campaign
+```
+
+#### Self-contained, no backend
+
+Every run directory (`.capevolve/run_<timestamp>/dashboard.html`) gets a static
+export of the same data — open it straight in a browser, nothing to install:
+
+![the static dashboard.html export](../assets/images/optimize-capevolve/05-dashboard.png)
+
+#### The live UI (with the frontend built)
+
+Here's the real live dashboard — same campaign, with the frontend built as shown
+above. The overview tab:
+
+![live dashboard — overview](../assets/images/optimize-capevolve/06-dashboard-overview.png)
+
+The **Candidates** tab — every proposed edit, its verdict, and the exact val delta
+that got it accepted or rejected:
+
+![live dashboard — candidates](../assets/images/optimize-capevolve/07-dashboard-candidates.png)
+
+The **Diffs** tab — the optimizer's literal edit, syntax-highlighted, with a
+dropdown to compare any candidate against its parent or the seed:
+
+![live dashboard — diffs](../assets/images/optimize-capevolve/08-dashboard-diffs.png)
+
+Reading the overview tab left to right, top to bottom: baseline vs. best val vs.
+the delta vs. the sealed test score; verdicts (accept/reject/indecisive), spend,
+wall-clock, tokens; a lineage graph (seed → accepted candidates — on a longer
+campaign this is where you'd see rejected branches dead-end); a val-score-per-
+candidate chart; and one card per pipeline phase (intake → implement & check →
+baseline → optimize → finalize → report), each with a one-line summary of what
+it did.
 
 ## What this is actually for
 
@@ -279,6 +314,14 @@ campaign after a failed attempt is safe — a failed apply cleans up its own bra
 - **`--apply` refuses with "not clean"** — commit or stash real changes first. If
   you suspect it's the campaign's own byproduct rather than your changes, check that
   your runs dir (`$AGENT_EVAL_RUNS_DIR`, default `eval/runs`) is gitignored.
+- **The dashboard URL loads, but looks bare or shows a status that disagrees with
+  `--status`'s JSON** — the backend's REST API (`.../api/runs`) is correct either
+  way; a blank or stale-looking page means the live React frontend isn't built
+  (`CAPEVOLVE_STATIC_DIR` unset, so there's no UI to serve, only the API), or — if
+  you did build one yourself — it's from a different commit than the harness's
+  pinned one. Rebuild from the exact pinned commit (see "The dashboard" above);
+  the self-contained `dashboard.html` in the run directory always matches, since
+  cap-evolve generates it itself at the pinned commit's own code.
 
 ## Relationship to the rest of the pipeline
 

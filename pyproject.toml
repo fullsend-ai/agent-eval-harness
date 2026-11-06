@@ -45,6 +45,9 @@ anova = [
 optimize = [
     # cap-evolve v0.2.0, pinned to the tag's commit (a tag can move; a SHA cannot).
     "cap-evolve-core @ git+https://github.com/skillberry-ai/cap-evolve.git@520ecbe8b9963588eb8d53e3ae29a4ccc1f8436c#subdirectory=core",
+    # The live dashboard cap-evolve launches during a run (on by default, see
+    # --dashboard in agent-eval-capevolve). Same pin, same checkout.
+    "capevolve-dashboard @ git+https://github.com/skillberry-ai/cap-evolve.git@520ecbe8b9963588eb8d53e3ae29a4ccc1f8436c#subdirectory=dashboard/backend",
 ]
 all = [
     "mlflow[genai]>=3.5",

@@ -52,6 +52,10 @@ _BRIDGE_TEMPLATE = Path(__file__).with_name("_bridge_template.py")
 # (no --cases: it runs the whole dataset per invocation).
 SUBSTRATES = ("local", "harbor", "evalhub")
 HARBOR_ENVS = ("podman", "kubernetes", "openshift")
+# cap-evolve's own dashboard_launch.MODES — mirrored here (not imported: cap-
+# evolve-core may not be installed yet when argparse builds --choices).
+DASHBOARD_MODES = ("auto", "report-only", "off")
+_DASHBOARD_DEFAULT_PORT = 7878
 _UNSUPPORTED_SUBSTRATES = {
     "evalhub": "structurally incompatible with per-case rollouts (no --cases; it runs "
                "the whole dataset per invocation)",
@@ -116,6 +120,14 @@ def require_cap_evolve() -> None:
         )
     if importlib.util.find_spec("cap_evolve") is None:
         raise SetupRequired("cap-evolve-core is not installed in the harness venv")
+
+
+def _dashboard_available() -> bool:
+    """True if the optional ``capevolve-dashboard`` package can actually be
+    launched — mirrors cap-evolve's own dashboard_launch.is_available(), kept
+    local so a dry-run can report this before cap-evolve-core is confirmed
+    installed."""
+    return importlib.util.find_spec("capevolve_dashboard") is not None
 
 
 def _tree_version(skills_dir: Path) -> str | None:
@@ -596,6 +608,8 @@ def prepare_project(
     skills_dir: str | None = None,
     reintake: bool = False,
     workers: int = 1,
+    dashboard: str = "auto",
+    dashboard_port: int = _DASHBOARD_DEFAULT_PORT,
 ) -> dict:
     """Run cap-evolve's intake phase against the benchmark in the current directory.
 
@@ -623,6 +637,8 @@ def prepare_project(
         raise ValueError("a pilot run uses exactly three cases (train, val, test)")
     if workers < 1:
         raise ValueError("--workers must be >= 1")
+    if dashboard not in DASHBOARD_MODES:
+        raise ValueError(f"--dashboard must be one of {', '.join(DASHBOARD_MODES)}")
     if runner in _UNSUPPORTED_SUBSTRATES:
         raise ValueError(f"--runner {runner}: {_UNSUPPORTED_SUBSTRATES[runner]}")
     if runner == "harbor" and harbor_env not in HARBOR_ENVS:
@@ -799,6 +815,13 @@ def prepare_project(
         # spec keeps its default-serial shape — every published number is
         # a serial measurement unless the user asks otherwise.
         **({"workers": workers} if workers > 1 else {}),
+        # The live dashboard cap-evolve launches at the top of `run` (on by
+        # default: --dashboard auto). A missing capevolve-dashboard install
+        # degrades to a no-op with a logged reason, never a failed campaign
+        # (see dashboard_launch.maybe_launch at the pinned commit) — the CLI
+        # flag always wins over this spec value if both are given.
+        "dashboard": dashboard,
+        "dashboard_port": dashboard_port,
         "gate_mode": "paired",
         "gate_k_se": 1.0,
         "max_iterations": max_iterations,
@@ -895,6 +918,11 @@ def prepare_project(
                f"containers against one {'podman socket' if harbor_env == 'podman' else harbor_env + ' cluster'} "
                "— each rollout is a full container; start small and watch the substrate"]
                if workers > 1 and runner == "harbor" else [])
+            + (["--dashboard is on (default) but capevolve-dashboard isn't installed; the "
+                "campaign runs fine without it, just with no live view. Run "
+                "`/eval-setup --optimize` to install it, or pass --dashboard off to silence "
+                "this warning."]
+               if dashboard != "off" and not _dashboard_available() else [])
         ),
         "runtime_resources": candidate_manifest["runtime_resources"],
         "cap_evolve_templates": str(template_dir) if template_dir else None,
@@ -912,6 +940,14 @@ def prepare_project(
         # |val| x num_trials x (iterations + 1) sequential rollouts, and
         # max_usd cannot shorten that — the binding constraint is time.
         "workers": workers,
+        "dashboard": dashboard,
+        "dashboard_available": _dashboard_available(),
+        # The port actually asked for — cap-evolve itself picks the next free
+        # port above this if it's taken (dashboard_launch._free_port at the
+        # pinned commit), so this is the requested, not guaranteed, address.
+        "dashboard_url": (
+            f"http://127.0.0.1:{dashboard_port}" if dashboard != "off" else None
+        ),
     }
     if cost_hint is not None:
         result["observed_cost_per_rollout"] = cost_hint
@@ -1706,6 +1742,14 @@ def main(argv=None) -> int:
     parser.add_argument("--workers", type=int, default=1,
                         help="concurrent rollouts cap-evolve may run (default 1 = serial; wall-clock "
                              "scales roughly 1/N, bounded by provider rate limits)")
+    parser.add_argument("--dashboard", default="auto", choices=DASHBOARD_MODES,
+                        help="live dashboard during the run: auto (default, launch at start), "
+                             "report-only (write the static dashboard.html but don't serve it "
+                             "live), or off. No-op (never fails the campaign) if "
+                             "capevolve-dashboard isn't installed — see /eval-setup --optimize")
+    parser.add_argument("--dashboard-port", type=int, default=_DASHBOARD_DEFAULT_PORT,
+                        help=f"dashboard server port (default {_DASHBOARD_DEFAULT_PORT}; cap-evolve "
+                             "moves to the next free port above this if it's taken)")
     parser.add_argument("--split-ratios", default="0.5,0.25,0.25")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--optimizer", default="claude-code",
@@ -1826,6 +1870,8 @@ def main(argv=None) -> int:
             skills_dir=skills["skills_dir"],
             reintake=args.reintake,
             workers=args.workers,
+            dashboard=args.dashboard,
+            dashboard_port=args.dashboard_port,
         )
         generated["warnings"] = skills["warnings"] + generated.get("warnings", [])
         generated["cap_evolve_skills"] = {k: skills[k] for k in ("skills_dir", "source", "pinned_sha", "fetched")}
