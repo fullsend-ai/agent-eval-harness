@@ -1388,28 +1388,37 @@ def _coverage_warnings(coverage: dict | None, log_file: str | None) -> list[str]
     return []
 
 
-def _val_size_warnings(run_dir: Path, state: dict) -> list[str]:
-    """Warn when the validation split is too small for the significance gate.
+def _val_size_note(run_dir: Path, project_dir: Path) -> str | None:
+    """The val<2 significance-gate honesty note, or None when it doesn't apply.
 
-    With fewer than 2 validation cases the gate degenerates to "accept any
-    positive delta" (SE=0), which is a coin flip, not a measurement. This is
-    the same honesty note ``_project_md`` writes into PROJECT.md, surfaced
-    in ``--status`` and ``--apply`` where users actually look.
+    Two conditions, both required:
+
+    - ``num_trials == 1``, read from ``capevolve.yaml`` — the spec the
+      harness itself wrote. (cap-evolve's own ``state.json`` carries no
+      ``spec`` key, so that was never a source for it.) With more trials,
+      per-trial SEs give the gate a non-zero floor, so it can reject noise
+      even at ``|val| = 1`` — the note must not fire there.
+    - fewer than 2 val cases in the run's frozen ``splits.json``.
+
+    One helper shared by ``--status`` and ``--apply`` so the two surfaces
+    cannot disagree about the same campaign.
     """
-    num_trials = (state.get("spec") or {}).get("num_trials", 1)
-    if num_trials != 1:
-        return []
+    try:
+        spec = yaml.safe_load(
+            (Path(project_dir) / "capevolve.yaml").read_text(encoding="utf-8")
+        ) or {}
+    except (OSError, yaml.YAMLError):
+        spec = {}
+    if not isinstance(spec, dict) or int(spec.get("num_trials") or 1) != 1:
+        return None
     splits = _read_json(run_dir / "splits.json")
     if not splits:
-        return []  # no split data yet — too early to warn
-    val_ids = splits.get("val") or []
-    if len(val_ids) < 2:
-        return [
-            "fewer than 2 validation cases: the significance gate cannot reject noise "
-            "(SE=0 — any positive delta is accepted); this is a plumbing check, not a "
-            "measurement"
-        ]
-    return []
+        return None  # no split data yet — too early to warn
+    if len(splits.get("val") or []) < 2:
+        return ("fewer than 2 validation cases: the significance gate cannot reject noise "
+                "(SE=0 — any positive delta is accepted); this is a plumbing check, not a "
+                "measurement")
+    return None
 
 
 def read_status(project_dir: Path) -> dict:
@@ -1440,7 +1449,9 @@ def read_status(project_dir: Path) -> dict:
         status = "stopped"
     coverage = _measurement_coverage(final) if final else None
     warnings = _coverage_warnings(coverage, manifest.get("log_file"))
-    warnings.extend(_val_size_warnings(run_dir, state))
+    val_note = _val_size_note(run_dir, project_dir)
+    if val_note:
+        warnings.append(val_note)
 
     return {
         "status": status,
@@ -1694,12 +1705,9 @@ def apply_winner(*, project_root: Path, harness_manifest: dict, campaign_manifes
             f"some of those cases were seen during the search (no usable split "
             f"record at {run_dir / 'splits.json'}, so the exact count is unavailable)."
         )
-    if total and len(val_ids) < 2:
-        caveat += (
-            " Note: fewer than 2 validation cases — the significance gate could not "
-            "reject noise (SE=0 — any positive delta was accepted); treat this as a "
-            "plumbing check, not a significance result."
-        )
+    val_note = _val_size_note(run_dir, _project_dir_for(project_root))
+    if val_note:
+        caveat += f" Note: {val_note}"
     return {
         "branch": branch,
         "best_id": best_id,

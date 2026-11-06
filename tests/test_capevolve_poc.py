@@ -3255,9 +3255,10 @@ def test_status_warns_when_val_split_is_too_small_for_the_gate(tmp_path):
     project_dir = _finished_campaign(tmp_path, {
         "seed": _split_summary(1, 1), "best": _split_summary(1, 1)})
     run_dir = tmp_path / ".capevolve" / "run_1"
-    # state.json with num_trials=1 and splits.json with only one val case
-    (run_dir / "state.json").write_text(
-        json.dumps({"spec": {"num_trials": 1}}), encoding="utf-8")
+    # The spec the harness itself wrote — num_trials comes from here, never
+    # from cap-evolve's state.json (which carries no spec key).
+    (project_dir / "capevolve.yaml").write_text(
+        "num_trials: 1\n", encoding="utf-8")
     (run_dir / "splits.json").write_text(
         json.dumps({"train": ["c1", "c2"], "val": ["c3"], "test": ["c4"]}),
         encoding="utf-8")
@@ -3274,8 +3275,8 @@ def test_status_is_quiet_about_val_size_with_enough_cases(tmp_path):
     project_dir = _finished_campaign(tmp_path, {
         "seed": _split_summary(1, 1), "best": _split_summary(1, 1)})
     run_dir = tmp_path / ".capevolve" / "run_1"
-    (run_dir / "state.json").write_text(
-        json.dumps({"spec": {"num_trials": 1}}), encoding="utf-8")
+    (project_dir / "capevolve.yaml").write_text(
+        "num_trials: 1\n", encoding="utf-8")
     (run_dir / "splits.json").write_text(
         json.dumps({"train": ["c1", "c2"], "val": ["c3", "c4"], "test": ["c5"]}),
         encoding="utf-8")
@@ -3284,6 +3285,64 @@ def test_status_is_quiet_about_val_size_with_enough_cases(tmp_path):
 
     val_warnings = [w for w in status["warnings"] if "significance gate" in w]
     assert not val_warnings, f"unexpected val-size warning: {val_warnings}"
+
+
+def test_status_val_size_warning_is_suppressed_by_multiple_trials(tmp_path):
+    """astefanutti: with num_trials > 1 the per-trial SEs give the gate a
+    non-zero floor, so it CAN reject noise even at |val| = 1 — the warning
+    must not fire. Reads num_trials from capevolve.yaml (cap-evolve's
+    state.json has no spec key), so this fails if the guard reads the wrong
+    file or is removed."""
+    project_dir = _finished_campaign(tmp_path, {
+        "seed": _split_summary(1, 1), "best": _split_summary(1, 1)})
+    run_dir = tmp_path / ".capevolve" / "run_1"
+    (project_dir / "capevolve.yaml").write_text(
+        "num_trials: 3\n", encoding="utf-8")
+    (run_dir / "splits.json").write_text(
+        json.dumps({"train": ["c1", "c2"], "val": ["c3"], "test": ["c4"]}),
+        encoding="utf-8")
+
+    status = capevolve.read_status(project_dir)
+
+    val_warnings = [w for w in status["warnings"] if "significance gate" in w]
+    assert not val_warnings, f"unexpected val-size warning at num_trials=3: {val_warnings}"
+
+
+def test_apply_winner_caveat_flags_a_val_split_too_small_for_the_gate(tmp_path):
+    """astefanutti: the --apply half of the val-size note had no test (the
+    block could be deleted with the suite green) and no num_trials
+    condition of its own. It now shares _val_size_note with --status, so
+    the same campaign yields the same verdict on both surfaces."""
+    project_root, harness_manifest, campaign_manifest, _ = _apply_fixture(tmp_path)
+    # The fixture freezes a 2/1/1 split — one val case — and the spec the
+    # harness wrote lives at project_root/.capevolve/project/capevolve.yaml.
+    spec_dir = project_root / ".capevolve" / "project"
+    spec_dir.mkdir(parents=True)
+    (spec_dir / "capevolve.yaml").write_text("num_trials: 1\n", encoding="utf-8")
+
+    result = capevolve.apply_winner(
+        project_root=project_root,
+        harness_manifest=harness_manifest, campaign_manifest=campaign_manifest,
+    )
+
+    assert "significance gate" in result["caveat"]
+    assert "SE=0" in result["caveat"]
+
+
+def test_apply_winner_caveat_is_quiet_at_multiple_trials(tmp_path):
+    """The num_trials condition applies on the --apply surface too: with
+    per-trial SEs the gate can reject noise, so no caveat is appended."""
+    project_root, harness_manifest, campaign_manifest, _ = _apply_fixture(tmp_path)
+    spec_dir = project_root / ".capevolve" / "project"
+    spec_dir.mkdir(parents=True)
+    (spec_dir / "capevolve.yaml").write_text("num_trials: 3\n", encoding="utf-8")
+
+    result = capevolve.apply_winner(
+        project_root=project_root,
+        harness_manifest=harness_manifest, campaign_manifest=campaign_manifest,
+    )
+
+    assert "significance gate" not in result["caveat"]
 
 
 def test_override_inside_an_unrelated_repo_is_not_misjudged(tmp_path):

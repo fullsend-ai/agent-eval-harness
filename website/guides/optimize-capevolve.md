@@ -117,7 +117,7 @@ the number that actually matters.
 
 (`--pilot-case-ids` pins one case per split for a fast, cheap sanity run — the
 normal path is just `--max-usd 25` with no pilot flags, over the real split sizes.
-The pilot run above is what actually produced every screenshot on this page.)
+The pilot run above is what produced every campaign screenshot below.)
 
 The campaign runs **detached** — it survives you closing the terminal — and
 launches the real pipeline: scaffold the project, probe the seed skill on train and
@@ -140,17 +140,19 @@ explanation of what's being optimized) and edits `SKILL.md` directly. Here is th
 ![the optimizer's real diff](../assets/images/optimize-capevolve/04-skill-diff.png)
 
 It added a decision table — must-include/never-include words per tone, with a
-worked example for each — covering five tones, not just the two val/test cases it
+worked example for each — covering five tones, not just the two train/val cases it
 had seen. That generality is the point: a model deciding its own "must
 include"/"never include" criteria per tone is a real description of how to write
-in that register, not a hardcoded answer to one prompt. This candidate then re-ran
+in that register. It also pins that one failing case's exact sentence as a
+negative example — so the edit is both: a general rule, and a memorised answer to
+the prompt it saw. This candidate then re-ran
 on the val split and scored a perfect 1.0 — though with a single val case the gate
 is in its strict fallback (accept any positive delta), so this is a plumbing
 demonstration, not a significance result.
 
 !!! warning "A weaker judge would have bought a worse edit here"
-    `tone_match`'s real check is a plain substring match against a short, fixed
-    word list (see the eval config above) — good enough to catch the seed's
+    `tone_match`'s real check is a plain substring match against a short,
+    fixed word list — good enough to catch the seed's
     specific failure, but exploitable: an edit that just repeated the judge's own
     marker words verbatim back at it would also have scored 1.0, without any real
     improvement in how the skill reasons about tone. That is reward hacking — the

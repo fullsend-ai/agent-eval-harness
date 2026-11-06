@@ -79,18 +79,20 @@ on `<project>/adapters/adapter.py`, requires a class literally named
 
 - **No injection point → configuration comes off disk.** Each generated
   project gets `adapters/substrate.json` (narrow: `runner`, `env`, `image`,
-  `harness_python` — the execution substrate; a file, not env vars, because a
+  `manifest_path` — the execution substrate; a file, not env vars, because a
   `--resume` days later in a new shell would otherwise inherit whatever
-  happens to be exported, silently changing substrate mid-campaign) and
-  `adapters/candidate.json` (the task/candidate manifest
-  `_bridge_template.py` reads; it lives at `../harness/candidate.json`,
-  outside the project tree — it names the eval-config path and every case's
-  inputs, sealed test included, none of which the optimizer should be able to
-  read, and the bridge finds it through a RELATIVE hint in substrate.json
-  plus the absolute `AGENT_EVAL_CAPEVOLVE_MANIFEST` env var set by the
-  launch/check paths — never an absolute path written into the
+  happens to be exported, silently changing substrate mid-campaign) and a
+  task/candidate manifest at `.capevolve/harness/candidate.json`
+  (`_bridge_template.py` reads it; it lives outside the project tree — it
+  names the eval-config path, `harness_python`, and every case's inputs,
+  sealed test included, none of which the optimizer should be able to read,
+  and the bridge finds it through a RELATIVE `manifest_path` hint in
+  substrate.json plus the absolute `AGENT_EVAL_CAPEVOLVE_MANIFEST` env var
+  set by the launch/check paths — never an absolute path written into the
   optimizer-visible tree, which would be a signpost one Read from the
-  manifest).
+  manifest; `adapters/candidate.json`, the manifest's pre-move location,
+  is unlinked at scaffold time so a re-intake can't leave a stale copy
+  behind).
 - **Re-instantiated per phase process** — cap-evolve loads the adapter fresh
   in every subprocess (check, baseline, each algorithm step, finalize).
   Nothing is shared between them except files.

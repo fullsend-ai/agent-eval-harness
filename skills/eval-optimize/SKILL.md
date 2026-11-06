@@ -82,9 +82,11 @@ only if the user names their own checkout.
 - **`--status`**: run it, then interpret in prose, not raw JSON: report
   `status` plainly (not launched / running / finished / stopped — if
   stopped, say to check `log_file`). If `warnings` is non-empty, quote it
-  first: `measurements.n_scored: 0` means no result at all — find the error
-  in `log_file` or an `opt-*` run dir instead of suggesting `--apply`.
-  Otherwise report accepted/rejected/
+  first and split by kind: a measurement warning (`n_scored: 0`, missing
+  measurements) is a failure — find the error in `log_file` or an `opt-*`
+  run dir instead of suggesting `--apply`; the val-size warning (fewer
+  than 2 validation cases) is not a failure — carry it as a caveat, and
+  `--apply` is still the right next step. Otherwise report accepted/rejected/
   indecisive counts, spend vs. budget, and an honest caveat on the error
   bars. If `final` is present, `git diff --no-index` the seed capability
   (`.capevolve/project/seed_capability/`) against
