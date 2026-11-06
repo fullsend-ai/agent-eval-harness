@@ -3287,12 +3287,16 @@ def test_status_is_quiet_about_val_size_with_enough_cases(tmp_path):
     assert not val_warnings, f"unexpected val-size warning: {val_warnings}"
 
 
-def test_status_val_size_warning_is_suppressed_by_multiple_trials(tmp_path):
-    """astefanutti: with num_trials > 1 the per-trial SEs give the gate a
-    non-zero floor, so it CAN reject noise even at |val| = 1 — the warning
-    must not fire. Reads num_trials from capevolve.yaml (cap-evolve's
-    state.json has no spec key), so this fails if the guard reads the wrong
-    file or is removed."""
+def test_status_val_size_warning_fires_even_at_multiple_trials(tmp_path):
+    """More trials do NOT rescue a one-case val split, so the warning must
+    still fire at num_trials > 1.
+
+    The per-trial SE floor only reaches the gate for a restricted footprint
+    (harness.py: `if fp is not None and paired_deltas`), and footprint()
+    returns None when the footprint covers every measured task — which a
+    single val task always does. So `se` stays 0.0 and the gate takes its
+    STRICT "accept any positive delta" branch whatever num_trials is.
+    An earlier revision suppressed the note here; this pins that it must not."""
     project_dir = _finished_campaign(tmp_path, {
         "seed": _split_summary(1, 1), "best": _split_summary(1, 1)})
     run_dir = tmp_path / ".capevolve" / "run_1"
@@ -3305,7 +3309,7 @@ def test_status_val_size_warning_is_suppressed_by_multiple_trials(tmp_path):
     status = capevolve.read_status(project_dir)
 
     val_warnings = [w for w in status["warnings"] if "significance gate" in w]
-    assert not val_warnings, f"unexpected val-size warning at num_trials=3: {val_warnings}"
+    assert val_warnings, "val-size warning must fire at num_trials=3 too"
 
 
 def test_apply_winner_caveat_flags_a_val_split_too_small_for_the_gate(tmp_path):
@@ -3329,9 +3333,10 @@ def test_apply_winner_caveat_flags_a_val_split_too_small_for_the_gate(tmp_path):
     assert "SE=0" in result["caveat"]
 
 
-def test_apply_winner_caveat_is_quiet_at_multiple_trials(tmp_path):
-    """The num_trials condition applies on the --apply surface too: with
-    per-trial SEs the gate can reject noise, so no caveat is appended."""
+def test_apply_winner_caveat_flags_val_size_at_multiple_trials_too(tmp_path):
+    """--apply shares _val_size_note with --status, so it must reach the same
+    verdict on the same campaign — including at num_trials > 1, where the
+    gate still degenerates on a one-case val split."""
     project_root, harness_manifest, campaign_manifest, _ = _apply_fixture(tmp_path)
     spec_dir = project_root / ".capevolve" / "project"
     spec_dir.mkdir(parents=True)
@@ -3342,7 +3347,7 @@ def test_apply_winner_caveat_is_quiet_at_multiple_trials(tmp_path):
         harness_manifest=harness_manifest, campaign_manifest=campaign_manifest,
     )
 
-    assert "significance gate" not in result["caveat"]
+    assert "significance gate" in result["caveat"]
 
 
 def test_override_inside_an_unrelated_repo_is_not_misjudged(tmp_path):

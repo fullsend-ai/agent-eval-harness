@@ -29,10 +29,7 @@ ALLOWED_YAML_READERS = {
     "agent_eval/agent/fullsend.py": {
         "_read_yaml_mapping": "fullsend <fullsend_dir>/config.yaml (agent registry) and the harness file's image:"},
     "agent_eval/evalhub/adapter.py": {"_run_cases": "case input.yaml"},
-    "agent_eval/engines/capevolve.py": {
-        "_read_agent_input": "case input.yaml",
-        "_val_size_note": "capevolve.yaml — the generated spec, not an eval config "
-                          "(no extends: to resolve); num_trials for the val-size note"},
+    "agent_eval/engines/capevolve.py": {"_read_agent_input": "case input.yaml"},
     "agent_eval/examples.py": {"harvest_review_examples": "review.yaml"},
     "agent_eval/harbor/tasks.py": {"generate_tasks": "case input.yaml"},
     "agent_eval/hooks.py": {"_read_hook_output_file": "hook output YAML"},
