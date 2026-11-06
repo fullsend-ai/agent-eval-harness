@@ -1,3 +1,10 @@
+## [1.62.3](https://github.com/fullsend-ai/agent-eval-harness/compare/v1.62.2...v1.62.3) (2026-11-06)
+
+
+### Bug Fixes
+
+* **optimize:** cap-evolve integration fixes from [#255](https://github.com/fullsend-ai/agent-eval-harness/issues/255) review ([#288](https://github.com/fullsend-ai/agent-eval-harness/issues/288)) ([0991e06](https://github.com/fullsend-ai/agent-eval-harness/commit/0991e06a11e74aacb95a64a59db5f83e8d7added)), closes [#271](https://github.com/fullsend-ai/agent-eval-harness/issues/271) [#8](https://github.com/fullsend-ai/agent-eval-harness/issues/8) [#11](https://github.com/fullsend-ai/agent-eval-harness/issues/11)
+
 ## [1.62.2](https://github.com/fullsend-ai/agent-eval-harness/compare/v1.62.1...v1.62.2) (2026-11-05)
 
 
