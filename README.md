@@ -737,9 +737,11 @@ Automated refinement loop: run eval, identify failures, read traces + judge rati
 
 With `--engine cap-evolve` (one-time setup: `/eval-setup --optimize`), runs a
 statistically validated search instead: train/val/test splits, a significance gate
-on validation (`Δ > k·SE`), and a sealed test split scored exactly once. See the
-[cap-evolve guide](https://skillberry-ai.github.io/cap-evolve/) /
-`website/guides/optimize-capevolve.md` for the full walkthrough, including the live
+on validation (`Δ > k·SE`), and a sealed test split scored exactly once. A
+real coding agent reads the failing cases and proposes the fix; only a candidate
+that clears the significance gate gets accepted. See
+[Statistically validated optimization](website/guides/optimize-capevolve.md) for a
+full walkthrough with real screenshots from an actual run, including the live
 dashboard.
 
 ```bash
