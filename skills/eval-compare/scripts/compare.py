@@ -20,6 +20,8 @@ from urllib.parse import quote
 
 import yaml
 
+from agent_eval.optimize.export import is_rollout_run
+
 
 def load_yaml(path):
     """Load a YAML mapping, tolerating unreadable/malformed files.
@@ -85,6 +87,12 @@ def discover_runs(input_dir):
     used_slugs = set()
     for summary_path in sorted(input_dir.rglob("summary.yaml")):
         d = summary_path.parent
+        if is_rollout_run(d, input_dir):
+            # An optimization campaign writes one run dir per rollout. They are
+            # real runs, but there are hundreds of them and they are not what
+            # someone comparing models asked about. Point the tool at the
+            # .optimize dir to get them.
+            continue
         summary = load_yaml(summary_path)
         run = {
             "dir": str(d),

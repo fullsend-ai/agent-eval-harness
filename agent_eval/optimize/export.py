@@ -1,9 +1,18 @@
 """Place a rollout's artifacts into the standard harness run-dir layout.
 
 Every optimization rollout, regardless of search engine, lands as an ordinary
-``$AGENT_EVAL_RUNS_DIR/<eval-name>/<run-id>`` run directory with a
+``$AGENT_EVAL_RUNS_DIR/<eval-name>/.optimize/<run-id>`` run directory with a
 ``condition.json`` identifying it — so ``/eval-compare``, ``/eval-mlflow`` and
-``/eval-review`` work on the result unchanged.
+``/eval-review`` work on the result unchanged when pointed at it.
+
+The ``.optimize/`` level is what keeps a campaign from drowning the ordinary
+run set: one campaign is ``|val| x num_trials x (iterations + 1)`` run dirs,
+each one a legitimate ``summary.yaml`` that ``/eval-compare`` and
+``/eval-anova`` would otherwise sweep up by ``rglob`` and chart beside the two
+or three runs a person actually meant to compare. :func:`is_rollout_run` is
+the shared predicate those discoverers filter on; pointing a tool straight at
+``.../.optimize`` (or any directory inside it) still works, because then the
+segment is above the input root rather than below it.
 """
 
 from __future__ import annotations
@@ -12,12 +21,29 @@ import json
 import os
 from pathlib import Path
 
+#: Path segment under ``<runs dir>/<eval-name>/`` holding optimization rollouts.
+ROLLOUT_SUBDIR = ".optimize"
+
 
 def runs_dir_for(manifest: dict) -> Path:
     base = Path(os.environ.get("AGENT_EVAL_RUNS_DIR", "eval/runs"))
     if not base.is_absolute():
         base = Path(manifest["project_root"]) / base
-    return base.resolve() / manifest["eval_name"]
+    return base.resolve() / manifest["eval_name"] / ROLLOUT_SUBDIR
+
+
+def is_rollout_run(run_dir, input_dir) -> bool:
+    """True when *run_dir* is an optimization rollout nested under *input_dir*.
+
+    False when *input_dir* is itself the ``.optimize`` directory or inside it:
+    asking for the rollouts is how you get the search curve, and that stays
+    available. Only the incidental sweep is filtered.
+    """
+    try:
+        relative = Path(run_dir).resolve().relative_to(Path(input_dir).resolve())
+    except (ValueError, OSError):
+        return False
+    return ROLLOUT_SUBDIR in relative.parts[:-1]
 
 
 def write_condition(run_dir: Path, condition: dict) -> None:

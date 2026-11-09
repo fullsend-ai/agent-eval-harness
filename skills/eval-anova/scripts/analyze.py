@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from agent_eval.anova.stats import ANOVA_AVAILABLE, missing_deps_message
+from agent_eval.optimize.export import is_rollout_run
 
 # pandas is module-level (DataFrames are this module's currency), so a missing
 # anova extra fails here — long before the ANOVA_AVAILABLE check below could
@@ -550,10 +551,18 @@ def load_conditions_from_runs(
 
 
 def _discover_run_dirs(runs_dir: Path) -> list[Path]:
-    """Run directories under ``runs_dir`` (each containing a ``summary.yaml``)."""
+    """Run directories under ``runs_dir`` (each containing a ``summary.yaml``).
+
+    Optimization rollouts are excluded: a campaign writes hundreds of run dirs
+    whose ``condition.json`` describes a candidate and a seed, not a factor
+    level, and pooling them into a design matrix produces one "condition" per
+    rollout. Point ``--runs-dir`` at the ``.optimize`` directory to analyze
+    the search itself.
+    """
     if not runs_dir.is_dir():
         return []
-    return sorted({p.parent for p in runs_dir.rglob("summary.yaml")})
+    return sorted({p.parent for p in runs_dir.rglob("summary.yaml")
+                   if not is_rollout_run(p.parent, runs_dir)})
 
 
 def _condition_levels_for_run(run_dir: Path) -> dict[str, Any]:
@@ -564,6 +573,12 @@ def _condition_levels_for_run(run_dir: Path) -> dict[str, Any]:
         try:
             data = json.loads(cond_path.read_text())
             levels = data.get("levels", data) if isinstance(data, dict) else None
+            if isinstance(levels, dict) and "harness_run_id" in levels and "levels" not in data:
+                # An optimization rollout's condition.json: candidate, seed,
+                # substrate — provenance, not a factorial cell. Falling back
+                # to the model keeps it from becoming its own condition if one
+                # ever reaches here outside the .optimize tree.
+                levels = None
             if isinstance(levels, dict) and levels:
                 return {str(k): v for k, v in levels.items()}
         except (json.JSONDecodeError, OSError) as exc:

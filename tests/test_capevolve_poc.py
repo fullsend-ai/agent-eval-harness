@@ -13,7 +13,7 @@ import pytest
 
 from agent_eval.engines import capevolve
 from agent_eval.engines import _bridge_template as bridge_template
-from agent_eval.optimize import artifact, intake, rollout
+from agent_eval.optimize import artifact, export, intake, rollout
 
 # cap-evolve's real templates/project, when a local install carries one
 # (an editable install, or $CAPEVOLVE_SKILLS_DIR next to a checkout).
@@ -95,6 +95,46 @@ def test_snapshot_candidate_refuses_to_delete_a_protected_directory(tmp_path, mo
     monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
     with pytest.raises(ValueError, match="protected directory"):
         artifact.snapshot_candidate([], tmp_path)
+
+
+def test_snapshot_candidate_skips_symlinks_instead_of_refusing_the_skill(tmp_path):
+    """The repo's own convention is a symlink inside every skill.
+
+    CLAUDE.md mandates ``skills/<skill>/scripts/agent_eval -> ../../../agent_eval``
+    so skill scripts can import the package. Hard-erroring on it meant the
+    harness's own skills could not be optimization candidates at all. Skip the
+    link, copy everything else, and report what was left behind — a snapshot
+    travels into rollout workspaces and containers, where a link out of the
+    tree would dangle anyway.
+    """
+    skill = tmp_path / "skills" / "demo"
+    (skill / "scripts").mkdir(parents=True)
+    (skill / "SKILL.md").write_text("seed", encoding="utf-8")
+    (skill / "scripts" / "run.py").write_text("print(1)", encoding="utf-8")
+    (tmp_path / "agent_eval").mkdir()
+    (skill / "scripts" / "agent_eval").symlink_to(tmp_path / "agent_eval", target_is_directory=True)
+
+    destination = tmp_path / "seed_capability"
+    skipped = artifact.snapshot_candidate(
+        [{"dest": "demo", "source": str(skill), "is_dir": True}], destination)
+
+    assert (destination / "demo/SKILL.md").read_text() == "seed"
+    assert (destination / "demo/scripts/run.py").is_file()
+    assert not (destination / "demo/scripts/agent_eval").exists()
+    assert skipped == [os.path.join("demo", "scripts", "agent_eval")]
+
+
+def test_snapshot_candidate_still_refuses_a_symlinked_source_root(tmp_path):
+    """Incidental plumbing is skipped; an explicit candidate source aimed at a
+    link is a config mistake, and snapshotting nothing would be worse."""
+    real = tmp_path / "real"
+    real.mkdir()
+    (real / "SKILL.md").write_text("seed", encoding="utf-8")
+    link = tmp_path / "link"
+    link.symlink_to(real, target_is_directory=True)
+    with pytest.raises(ValueError, match="must not be a symlink"):
+        artifact.snapshot_candidate(
+            [{"dest": "demo", "source": str(link), "is_dir": True}], tmp_path / "seed")
 
 
 def test_candidate_overlay_detaches_project_symlink(tmp_path):
@@ -432,9 +472,21 @@ def test_batch_mode_rollouts_also_scrub_gold_from_the_workspace(tmp_path, monkey
     assert not (state["workspace"] / "annotations.yaml").exists()
 
 
-def test_batch_rollout_returns_the_run_level_transcript(tmp_path, monkeypatch):
-    """Caught by the live GLM smoke rollout: batch mode writes stdout.log once
-    per run, not under cases/<id>/, so the proposer got an empty trace."""
+def test_batch_rollout_finds_the_run_level_transcript_but_withholds_it(tmp_path, monkeypatch):
+    """Two halves of one contract.
+
+    The lookup: batch mode writes stdout.log once per run, not under
+    cases/<id>/, and _execute_local must still find it (caught by the live GLM
+    smoke rollout, which came back with an empty one).
+
+    The withholding: it does not travel onward in the Rollout. A search engine
+    persists output/trace into the run record the proposer reads each
+    iteration, and a target-agent transcript quotes the case input and
+    whatever the agent read — which is the exact content redact.py,
+    feedback_rationale and the out-of-tree manifest all exist to keep away
+    from it. The generated INSTRUCTIONS.md promises transcripts are
+    unavailable; this is the assertion behind that promise.
+    """
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("AGENT_EVAL_RUNS_DIR", str(tmp_path / "runs"))
     _demo_eval_yaml(tmp_path, mode="batch")
@@ -461,8 +513,19 @@ def test_batch_rollout_returns_the_run_level_transcript(tmp_path, monkeypatch):
                 "per_case:\n  case-1:\n    quality:\n      value: true\n", encoding="utf-8")
 
     monkeypatch.setattr(rollout, "_run_script", _fake_run_script)
+    seen = {}
+    real_execute_local = rollout._execute_local
+
+    def _spy(*args, **kwargs):
+        result = real_execute_local(*args, **kwargs)
+        seen["transcript"] = result[1]
+        return result
+
+    monkeypatch.setattr(rollout, "_execute_local", _spy)
     result = rollout.run_case(manifest, "case-1", candidate_dir, seed=0)
-    assert result["rollout"]["output"] == "batch transcript"
+    assert seen["transcript"] == "batch transcript"
+    assert result["rollout"]["output"] is None
+    assert result["rollout"]["trace"] is None
     assert result["rollout"]["error"] is None
 
 
@@ -779,6 +842,13 @@ optimize:
     assert "observers" in spec
     assert "mlflow" in spec
     assert "my-experiment" in spec
+    # The observer backend ships in capevolve-telemetry, a distribution apart
+    # from cap-evolve-core. Writing the observer without it is how a campaign
+    # reaches its end against an empty experiment with nothing said, so the
+    # gap is reported at scaffold time rather than discovered afterwards.
+    expected = importlib.util.find_spec("capevolve_telemetry") is None
+    assert any("capevolve_telemetry is not importable" in w
+               for w in result["warnings"]) is expected
 
 
 def _bare_benchmark(tmp_path, *, mode="batch", entry="pipeline"):
@@ -920,8 +990,62 @@ def test_plugin_candidate_runs_from_a_private_plugin_copy(tmp_path, monkeypatch)
     assert "candidate" not in (tmp_path / "skills/decompose/SKILL.md").read_text()
     # The private copy REPLACES the real plugin rather than loading next to it.
     assert [Path(d) for d in config.runner.plugin_dirs] == [private / "plugin"]
+    assert manifest["other_plugin_dirs"] == []
     assert config.eval_name() == "decompose"
     assert config.resolve_path(config.dataset.path) == tmp_path / "eval/cases"
+
+
+def test_sibling_plugins_survive_the_rollout_overlay(tmp_path, monkeypatch):
+    """`!replace` displaces only the plugin that owns the candidate.
+
+    The skill under test can call skills from another configured plugin. If
+    the overlay replaced plugin_dirs with just the private copy, those would
+    vanish for every rollout — so the campaign would be measuring a different
+    skill from the one the baseline measured, and nothing would say so.
+    """
+    monkeypatch.chdir(tmp_path)
+    _plugin_benchmark(tmp_path)
+    sibling = tmp_path / "other-plugin"
+    (sibling / ".claude-plugin").mkdir(parents=True)
+    (sibling / ".claude-plugin/plugin.json").write_text('{"name": "sibling"}', encoding="utf-8")
+    (sibling / "skills/helper").mkdir(parents=True)
+    (sibling / "skills/helper/SKILL.md").write_text("Helper.", encoding="utf-8")
+    config_path = tmp_path / "eval/decompose.yaml"
+    config_path.write_text(
+        config_path.read_text().replace('    - "."\n', '    - "."\n    - "other-plugin"\n'),
+        encoding="utf-8")
+
+    result = capevolve.prepare_project(max_usd=5, optimizer="mock")
+    manifest = json.loads((Path(result["project_dir"]).parent / "harness/candidate.json").read_text())
+    assert manifest["other_plugin_dirs"] == [str(sibling)]
+
+    private = tmp_path / "elsewhere/run.plugin"
+    private.mkdir(parents=True)
+    from agent_eval.config import EvalConfig
+    config = EvalConfig.from_yaml(rollout._rollout_config(manifest, private, private / "plugin"))
+    assert [Path(d) for d in config.runner.plugin_dirs] == [private / "plugin", sibling]
+
+
+def test_a_failed_scaffold_does_not_wedge_the_project_dir(tmp_path, monkeypatch):
+    """The marker is the project dir's "we own this" claim, and it used to be
+    written only at the very end. Anything that raised in between — an
+    unreadable case, Ctrl-C — left the directory created and unmarked, after
+    which every later attempt hit "refusing to overwrite an existing
+    cap-evolve project without the marker". The only way out was deleting a
+    directory the error never named.
+    """
+    monkeypatch.chdir(tmp_path)
+    _bare_benchmark(tmp_path)
+    boom = RuntimeError("scaffold exploded")
+    real_snapshot = artifact.snapshot_candidate
+    monkeypatch.setattr(artifact, "snapshot_candidate",
+                        lambda *a, **k: (_ for _ in ()).throw(boom))
+    with pytest.raises(RuntimeError, match="scaffold exploded"):
+        capevolve.prepare_project(max_usd=5, optimizer="mock")
+
+    monkeypatch.setattr(artifact, "snapshot_candidate", real_snapshot)
+    result = capevolve.prepare_project(max_usd=5, optimizer="mock")
+    assert Path(result["spec_path"]).is_file()
 
 
 def test_overlay_is_re_pointed_when_the_eval_config_changes(tmp_path, monkeypatch):
@@ -1213,9 +1337,12 @@ def test_cost_hint_is_per_case_runner_cost(tmp_path, monkeypatch):
     (runs / "full").mkdir(parents=True)
     (runs / "full/run_result.json").write_text(json.dumps(
         {"cost_usd": 40.0, "per_case": {f"case-{i}": {} for i in range(4)}}), encoding="utf-8")
-    (runs / "opt-1").mkdir()
-    (runs / "opt-1/run_result.json").write_text(json.dumps({"cost_usd": 12.0}), encoding="utf-8")
-    (runs / "opt-1/condition.json").write_text("{}", encoding="utf-8")
+    # A past campaign's rollouts: one level down, in .optimize/. They are the
+    # most representative sample there is (one case, one candidate), so the
+    # walk has to reach them — not just the top level.
+    (runs / ".optimize/opt-1").mkdir(parents=True)
+    (runs / ".optimize/opt-1/run_result.json").write_text(json.dumps({"cost_usd": 12.0}), encoding="utf-8")
+    (runs / ".optimize/opt-1/condition.json").write_text("{}", encoding="utf-8")
     (runs / "batch-unknown").mkdir()
     (runs / "batch-unknown/run_result.json").write_text(json.dumps({"cost_usd": 99.0}), encoding="utf-8")
     assert capevolve._calibrate_cost_from_past_runs(config, tmp_path) == 11.0  # (10 + 12) / 2
@@ -2584,6 +2711,41 @@ def test_apply_winner_keeps_ignored_files_and_drops_only_tracked_ones(tmp_path):
     assert (skill_dir / "notes.local").read_text(encoding="utf-8") == "ignored local data"
 
 
+def test_apply_winner_keeps_the_tracked_plumbing_symlink(tmp_path):
+    """The other half of "the snapshot skips symlinks".
+
+    No candidate ever contains one, so a winner missing ``scripts/agent_eval``
+    is not the optimizer having decided to drop it — it is the snapshot never
+    having carried it. Deleting tracked files absent from the winner is right
+    for ordinary files and wrong for these: it would land on the branch as a
+    removal of the import plumbing CLAUDE.md requires of every skill.
+    """
+    project_root, harness_manifest, campaign_manifest, skill_path, run_dir = _apply_fixture_in_checkout(tmp_path)
+    skill_dir = skill_path.parent
+    (project_root / "agent_eval").mkdir(exist_ok=True)
+    (project_root / "agent_eval" / "__init__.py").write_text("", encoding="utf-8")
+    (skill_dir / "scripts").mkdir()
+    (skill_dir / "scripts" / "run.py").write_text("print(1)", encoding="utf-8")
+    (skill_dir / "scripts" / "agent_eval").symlink_to("../../../agent_eval")
+    (skill_dir / "stale.md").write_text("tracked, genuinely dropped", encoding="utf-8")
+    _git_commit_all(project_root, "add the plumbing symlink")
+
+    winner = run_dir / "candidates/cand_1/demo"
+    (winner / "scripts").mkdir(parents=True)
+    (winner / "SKILL.md").write_text("winner skill", encoding="utf-8")
+    (winner / "scripts" / "run.py").write_text("print(2)", encoding="utf-8")
+    harness_manifest["candidate"] = [{"dest": "demo", "source": str(skill_dir), "is_dir": True}]
+
+    result = capevolve.apply_winner(project_root=project_root, harness_manifest=harness_manifest,
+                                    campaign_manifest=campaign_manifest)
+
+    files = subprocess.run(["git", "ls-tree", "-r", "--name-only", result["branch"], "--", "skills/demo"],
+                           cwd=project_root, capture_output=True, text=True, check=True).stdout.split()
+    assert "skills/demo/scripts/agent_eval" in files   # the symlink survives
+    assert "skills/demo/stale.md" not in files         # an ordinary dropped file still goes
+    assert (skill_dir / "scripts" / "agent_eval").is_symlink()
+
+
 def test_apply_winner_returns_to_a_detached_head(tmp_path):
     """Qodo #15: from a detached HEAD, --apply returns to the same commit."""
     project_root, harness_manifest, campaign_manifest, skill_path, run_dir = _apply_fixture_in_checkout(tmp_path)
@@ -2660,6 +2822,73 @@ def test_apply_winner_tolerates_an_absolute_runs_dir_outside_the_repo(tmp_path, 
     )
 
     assert result["best_id"] == "cand_1"
+
+
+def test_rollouts_land_under_the_optimize_subdir(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENT_EVAL_RUNS_DIR", str(tmp_path / "runs"))
+    manifest = {"project_root": str(tmp_path), "eval_name": "demo-eval"}
+    assert export.runs_dir_for(manifest) == (tmp_path / "runs/demo-eval/.optimize").resolve()
+
+
+def test_rollout_runs_are_hidden_from_a_sweep_but_not_from_a_direct_ask():
+    """A campaign is |val| x num_trials x (iterations + 1) run dirs, every one
+    of them a real summary.yaml. /eval-compare and /eval-anova rglob for those,
+    so without a filter one campaign buries the two or three runs a person
+    meant to compare. Asking for the rollouts directly still works: that is
+    how you look at the search curve."""
+    runs = Path("/runs/demo-eval")
+    assert export.is_rollout_run(runs / ".optimize/opt-1", runs)
+    assert not export.is_rollout_run(runs / "2026-01-01-baseline", runs)
+    # Pointed straight at the rollouts: the segment is above the input root.
+    assert not export.is_rollout_run(runs / ".optimize/opt-1", runs / ".optimize")
+    # Unrelated trees are never "rollouts" just because they can't be related.
+    assert not export.is_rollout_run(Path("/elsewhere/run"), runs)
+
+
+def test_eval_compare_and_anova_skip_rollout_run_dirs(tmp_path):
+    def _write_run(path, condition=None):
+        path.mkdir(parents=True)
+        (path / "summary.yaml").write_text("per_case: {}\n", encoding="utf-8")
+        (path / "run_result.json").write_text(json.dumps({"model": "sonnet"}), encoding="utf-8")
+        if condition is not None:
+            (path / "condition.json").write_text(json.dumps(condition), encoding="utf-8")
+
+    runs = tmp_path / "runs" / "demo-eval"
+    _write_run(runs / "2026-01-01-baseline", {"levels": {"model": "sonnet"}})
+    for i in range(3):
+        _write_run(runs / ".optimize" / f"opt-case-{i}",
+                   {"engine": "cap-evolve", "candidate_id": "cand_1", "task_id": f"case-{i}",
+                    "seed": 0, "harness_run_id": f"opt-case-{i}"})
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "skills/eval-compare/scripts"))
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "skills/eval-anova/scripts"))
+    try:
+        import compare
+        analyze = pytest.importorskip("analyze", reason="eval-anova needs the anova extra")
+        assert [r["name"] for r in compare.discover_runs(runs)] == ["2026-01-01-baseline"]
+        assert [p.name for p in analyze._discover_run_dirs(runs)] == ["2026-01-01-baseline"]
+        # And the search curve is still reachable by asking for it.
+        assert len(compare.discover_runs(runs / ".optimize")) == 3
+    finally:
+        sys.path[:2] = []
+
+
+def test_a_rollout_condition_is_never_read_as_a_factorial_cell(tmp_path):
+    """condition.json on a rollout records candidate/seed/substrate — not
+    factor levels. _condition_levels_for_run's `data.get("levels", data)`
+    would otherwise make every rollout its own one-off condition."""
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "skills/eval-anova/scripts"))
+    try:
+        analyze = pytest.importorskip("analyze", reason="eval-anova needs the anova extra")
+        run = tmp_path / "opt-case-1"
+        run.mkdir()
+        (run / "condition.json").write_text(json.dumps(
+            {"engine": "cap-evolve", "candidate_id": "cand_1", "harness_run_id": "opt-case-1"}),
+            encoding="utf-8")
+        (run / "run_result.json").write_text(json.dumps({"model": "sonnet"}), encoding="utf-8")
+        assert analyze._condition_levels_for_run(run) == {"model": "sonnet"}
+    finally:
+        sys.path[:1] = []
 
 
 def _nested_apply_fixture(tmp_path):

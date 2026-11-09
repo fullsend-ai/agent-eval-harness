@@ -8,6 +8,7 @@ top of :func:`validate_candidate_block`, it does not redefine these.
 
 from __future__ import annotations
 
+import os
 import shutil
 from pathlib import Path
 
@@ -82,21 +83,44 @@ def validate_candidate_block(raw: dict, config: EvalConfig) -> tuple[dict, list[
     return block, components
 
 
-def _copy_without_symlinks(source: Path, destination: Path) -> None:
+def _copy_without_symlinks(source: Path, destination: Path) -> list[Path]:
+    """Copy *source* into *destination*, leaving every symlink behind.
+
+    A symlink *inside* the tree is skipped, not fatal. Skill packages in this
+    repo carry plumbing symlinks by convention — CLAUDE.md mandates
+    ``skills/<skill>/scripts/agent_eval -> ../../../agent_eval`` — so refusing
+    one made the harness's own skills unusable as an optimization candidate.
+    They are also exactly what must not travel: the snapshot is copied on into
+    per-rollout workspaces and into containers, where a link pointing out of
+    the tree either dangles or escapes it.
+
+    The *root* being a symlink stays a hard error. That one is an explicit
+    ``optimize.candidate.source`` aimed at a link rather than incidental
+    plumbing, and silently snapshotting nothing would be the worse failure.
+
+    Returns the symlinks that were skipped, so the caller can report them.
+    """
     if source.is_symlink():
         raise ValueError(f"candidate seed source must not be a symlink: {source}")
+    skipped: list[Path] = []
     if source.is_dir():
-        for child in source.rglob("*"):
-            if child.is_symlink():
-                raise ValueError(f"candidate seed source contains a symlink: {child}")
-        shutil.copytree(source, destination)
+        def _ignore(directory, names):
+            dropped = {name for name in names if Path(directory, name).is_symlink()}
+            skipped.extend(Path(directory, name) for name in sorted(dropped))
+            return dropped
+
+        shutil.copytree(source, destination, ignore=_ignore)
     else:
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, destination)
+    return skipped
 
 
-def snapshot_candidate(components: list[dict], destination: Path) -> None:
-    """Copy each resolved candidate component into *destination* (the seed capability)."""
+def snapshot_candidate(components: list[dict], destination: Path) -> list[str]:
+    """Copy each resolved candidate component into *destination* (the seed capability).
+
+    Returns the source-relative paths of any symlinks left behind.
+    """
     destination = Path(destination)
     if destination.exists():
         resolved = destination.resolve()
@@ -104,8 +128,15 @@ def snapshot_candidate(components: list[dict], destination: Path) -> None:
             raise ValueError(f"refusing to delete a protected directory: {resolved}")
         shutil.rmtree(destination)
     destination.mkdir(parents=True)
+    skipped: list[str] = []
     for component in components:
-        _copy_without_symlinks(Path(component["source"]), destination / component["dest"])
+        source = Path(component["source"])
+        for link in _copy_without_symlinks(source, destination / component["dest"]):
+            # Named by where it would have landed in the snapshot, so the
+            # path means the same thing for every component regardless of
+            # where on disk that component was seeded from.
+            skipped.append(os.path.join(component["dest"], os.path.relpath(link, source)))
+    return skipped
 
 
 # ── Overlay: stage a candidate into an isolated rollout workspace ("make it live") ──

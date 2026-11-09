@@ -36,7 +36,7 @@ from pathlib import Path
 import yaml
 
 from agent_eval.config import EvalConfig, load_raw
-from agent_eval.optimize import artifact, intake
+from agent_eval.optimize import artifact, export, intake
 
 _SEARCH_KEYS = {
     "num_trials", "max_iterations", "stall", "max_usd", "max_metric_calls",
@@ -354,11 +354,22 @@ def _model_preflight(config: EvalConfig) -> tuple[dict, list[str]]:
 def _skill_location(project_root: Path, config: EvalConfig, apply_to: str) -> dict:
     source = intake.source_for_apply_to(project_root, config, apply_to)
     plugin = source["plugin_dir"]
+    sources = intake.skill_sources(project_root, config)
+    # Configured plugin roots the candidate does NOT live in. The rollout
+    # overlay replaces plugin_dirs wholesale (the owning plugin must not load
+    # beside its private copy), so these have to be listed back explicitly or
+    # the skill under test silently loses its siblings.
+    others: list[str] = []
+    for other in sources:
+        root = other["plugin_dir"]
+        if root is not None and root != plugin and str(root) not in others:
+            others.append(str(root))
     return {
         "skill_root": str(source["root"]),
-        "skill_roots": [str(s["root"]) for s in intake.skill_sources(project_root, config)
+        "skill_roots": [str(s["root"]) for s in sources
                         if s["plugin_dir"] == plugin] or [str(source["root"])],
         "plugin_dir": str(plugin) if plugin is not None else None,
+        "other_plugin_dirs": others,
     }
 
 
@@ -385,12 +396,24 @@ def _project_dir_for(project_root: Path) -> Path:
     return Path(project_root) / ".capevolve" / "project"
 
 
+def _write_marker(project_dir: Path) -> None:
+    (project_dir / _MARKER).write_text(
+        json.dumps({"generated_by": "agent-eval-capevolve", "version": 3}) + "\n"
+    )
+
+
 def _ensure_project_dir(project_dir: Path) -> None:
     if project_dir.exists() and not (project_dir / _MARKER).exists():
         raise FileExistsError(
             f"refusing to overwrite an existing cap-evolve project without the marker: {project_dir}"
         )
     project_dir.mkdir(parents=True, exist_ok=True)
+    # Claim the directory immediately, not at the end of a successful scaffold.
+    # Anything that raises in between (an unreadable case dir, a blocked
+    # NEEDED input, Ctrl-C) used to leave the dir created but unmarked, and
+    # the check above then refused every later attempt — a wedge whose only
+    # exit was deleting a directory the error message never named.
+    _write_marker(project_dir)
 
 
 def _write_blocked(project_dir: Path, blocked: list[dict]) -> None:
@@ -406,7 +429,7 @@ def _write_blocked(project_dir: Path, blocked: list[dict]) -> None:
         "usd": 0.0, "tokens": 0, "seconds": 0.0, "blocked": blocked,
         "output_summary": "intake blocked: " + ", ".join(b["input"] for b in blocked),
     }, indent=2) + "\n", encoding="utf-8")
-    (project_dir / _MARKER).write_text(json.dumps({"generated_by": "agent-eval-capevolve", "version": 3}) + "\n")
+    _write_marker(project_dir)
 
 
 def _instructions(template_dir: Path | None, facts: str) -> str:
@@ -716,7 +739,11 @@ def prepare_project(
     harness_dir.mkdir(parents=True, exist_ok=True)
 
     seed_dir = project_dir / "seed_capability"
-    artifact.snapshot_candidate(components, seed_dir)
+    # Symlinks are left behind rather than copied (a snapshot travels into
+    # per-rollout workspaces and containers, where a link out of the tree
+    # dangles). Report them: a skill whose real content hangs off a link
+    # would otherwise be optimized as an empty shell without a word said.
+    skipped_links = artifact.snapshot_candidate(components, seed_dir)
 
     # adapters/substrate.json — narrow: only the execution substrate, nothing
     # about the dataset/candidate (a file, not env vars, because a --resume
@@ -828,11 +855,8 @@ def prepare_project(
         "stall": 0,
         "max_usd": max_usd,
         "store": "git",
-        # Absolute: a relative value resolves project-relative under `check`
-        # but cwd-relative under `run`, which then silently falls back to the
-        # generic template (cap-evolve issue #252).
-        # Relative, never absolute: capevolve.yaml is optimizer-visible,
-        # and cap-evolve resolves this key against the project dir
+        # Relative, never absolute: capevolve.yaml is optimizer-visible, and
+        # cap-evolve resolves this key against the project dir
         # (specfile.resolve_instructions_file at the pinned commit).
         "optimizer_instructions_file": instructions_path.relative_to(project_dir).as_posix(),
         # Deliberately empty: the benchmark checkout holds the dataset (gold
@@ -842,11 +866,18 @@ def prepare_project(
         "capability_sources": [],
         "target_model": config.models.skill or "",
         "runner_model": config.models.skill or "",
-        # Tamper seal: "default" is a real cap-evolve sentinel expanding to
-        # integrity.DEFAULT_PATTERNS. Omitting this key entirely leaves
-        # dataset/judge/scorer files fully editable by the optimizer.
+        # "default" is a real cap-evolve sentinel expanding to
+        # integrity.DEFAULT_PATTERNS, and those patterns are matched inside
+        # the capability workdir — the candidate the optimizer edits. It is
+        # NOT what keeps the dataset, the eval config or the judges out of
+        # reach: those are sealed by living outside the optimizer-visible
+        # tree altogether (see the harness_dir comment in scaffold()), which
+        # is the claim to rely on. Kept because within the capability it
+        # still refuses the obvious self-grading edits, and because dropping
+        # a seal is not something to do by inference about its scope.
         "protected_paths": "default",
     }
+    telemetry_warnings: list[str] = []
     if config.mlflow.experiment:
         # Loaded automatically by cap-evolve's own baseline phase — no extra
         # invocation needed on our side.
@@ -855,6 +886,22 @@ def prepare_project(
             "tracking_uri": config.mlflow.tracking_uri,
             "experiment_name": config.mlflow.experiment,
         }]
+        # The backend lives in capevolve-telemetry, a separate distribution
+        # from cap-evolve-core. Emitting the observer without it is how the
+        # campaign reaches its end with an empty MLflow experiment and no
+        # error anyone saw, so say it here, at scaffold time.
+        if importlib.util.find_spec("capevolve_telemetry") is None:
+            telemetry_warnings.append(
+                "mlflow.experiment is set, so an mlflow observer is in capevolve.yaml, but "
+                "capevolve_telemetry is not importable by this interpreter — cap-evolve will "
+                "run the campaign with no telemetry. Run `/eval-setup --optimize` (it installs "
+                "the [optimize] extra), or drop mlflow.experiment from the eval config."
+            )
+        elif importlib.util.find_spec("mlflow") is None:
+            telemetry_warnings.append(
+                "capevolve_telemetry is installed but mlflow is not: the observer will not "
+                "record anything. Install the harness's mlflow extra (`pip install -e '.[mlflow]'`)."
+            )
     split_ids_path = project_dir / "split_ids.json"
     if pilot_case_ids:
         split_ids = {
@@ -895,7 +942,7 @@ def prepare_project(
         ),
         "implemented": ["tasks", "run_target", "score"],
     }, indent=2) + "\n", encoding="utf-8")
-    (project_dir / _MARKER).write_text(json.dumps({"generated_by": "agent-eval-capevolve", "version": 3}) + "\n")
+    _write_marker(project_dir)
 
     cost_hint = _calibrate_cost_from_past_runs(config, project_root)
     models, model_warnings = _model_preflight(config)
@@ -923,6 +970,15 @@ def prepare_project(
                 "`/eval-setup --optimize` to install it, or pass --dashboard off to silence "
                 "this warning."]
                if dashboard != "off" and not _dashboard_available() else [])
+            + ([f"the candidate snapshot left {len(skipped_links)} symlink(s) behind "
+                f"({', '.join(skipped_links[:5])}"
+                f"{f', +{len(skipped_links) - 5} more' if len(skipped_links) > 5 else ''}): "
+                "a snapshot is copied into rollout workspaces and containers, where a link "
+                "out of the tree dangles. Harmless for plumbing links like `scripts/agent_eval`; "
+                "if real candidate content hangs off one, inline it or name it in "
+                "optimize.candidate."]
+               if skipped_links else [])
+            + telemetry_warnings
         ),
         "runtime_resources": candidate_manifest["runtime_resources"],
         "cap_evolve_templates": str(template_dir) if template_dir else None,
@@ -969,7 +1025,16 @@ def _calibrate_cost_from_past_runs(config: EvalConfig, project_root: Path) -> fl
     if not eval_runs_dir.is_dir():
         return None
     costs = []
-    for run_dir in eval_runs_dir.iterdir():
+    # Ordinary runs sit directly under the eval's dir; a past campaign's
+    # rollouts sit one level down in .optimize/ (export.ROLLOUT_SUBDIR), and
+    # those are the most representative sample there is — one case, one
+    # candidate, the same shape as the rollouts being estimated. Walking only
+    # the top level would quietly throw away every previous campaign.
+    rollouts = eval_runs_dir / export.ROLLOUT_SUBDIR
+    candidates = list(eval_runs_dir.iterdir())
+    if rollouts.is_dir():
+        candidates += list(rollouts.iterdir())
+    for run_dir in candidates:
         result_path = run_dir / "run_result.json"
         if not result_path.is_file():
             continue
@@ -1495,12 +1560,20 @@ def _git_or_raise(args: list[str], cwd: Path, context: str) -> subprocess.Comple
 def _replace_tracked_dir(src: Path, dest: Path, repo_root: Path) -> None:
     """Make ``dest`` match the winner without ever deleting a file git cannot
     restore: tracked files the winner dropped are removed, the winner's files
-    are copied in, and untracked or ignored files are left alone."""
+    are copied in, and untracked or ignored files are left alone.
+
+    Tracked *symlinks* are also left alone. The seed snapshot skips symlinks
+    on the way in (``artifact._copy_without_symlinks``), so no candidate ever
+    contains one — their absence from the winner says nothing about whether
+    the optimizer wanted them gone. Deleting on that basis would strip a
+    skill's ``scripts/agent_eval`` plumbing link, which this repo's own
+    convention requires, on the way to the branch.
+    """
     winner = {path.relative_to(src) for path in src.rglob("*") if path.is_file()}
     tracked = _git(["ls-files", "-z", "--", str(dest)], cwd=repo_root).stdout.split("\0")
     for rel in filter(None, tracked):
         path = repo_root / rel
-        if path.relative_to(dest) not in winner:
+        if path.relative_to(dest) not in winner and not path.is_symlink():
             path.unlink()
     shutil.copytree(src, dest, dirs_exist_ok=True)
 

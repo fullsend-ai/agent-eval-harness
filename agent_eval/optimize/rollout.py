@@ -193,9 +193,9 @@ def score_from_summary(
         raise ValueError("optimization requires an explicit eval.yaml 'reward:' configuration")
     reward, _metrics = compose_reward(per_case, judge_ranges=judge_ranges(config), reward_cfg=config.reward)
     # Judge rationale can contain expected/gold content. The proposer only
-    # ever sees score labels and the target-agent transcript — except for
-    # judges the eval author explicitly marked gold-free
-    # (feedback_rationale: true), which contribute a bounded excerpt.
+    # ever sees score labels — except for judges the eval author explicitly
+    # marked gold-free (feedback_rationale: true), which contribute a bounded
+    # excerpt. The target-agent transcript is not among them; see run_case.
     feedback = redact.build_redacted_feedback(
         per_case, reward,
         rationale_judges={j.name for j in config.judges or [] if j.feedback_rationale},
@@ -261,12 +261,22 @@ def _skills_plugin(manifest: dict, candidate_dir: Path, plugin: Path) -> None:
 
 
 def _rollout_config(manifest: dict, private: Path, plugin: Path, files: list | None = None) -> Path:
-    """A per-rollout ``extends:`` overlay of the eval config that makes the
-    private plugin the runner's only plugin (``!replace``: the real one must
-    not load alongside it), plus optional shared workspace files."""
+    """A per-rollout ``extends:`` overlay of the eval config that swaps the
+    plugin owning the candidate for its private copy, plus optional shared
+    workspace files.
+
+    ``!replace`` rather than a merge, because the real owning plugin must not
+    load alongside its copy — two plugin roots offering the same skill name.
+    But only *that* plugin is displaced: every other entry of
+    ``runner.plugin_dirs`` is carried through, since the skill under test can
+    depend on skills from a sibling plugin and dropping them changes what is
+    being measured without saying so.
+    """
     extends = os.path.relpath(Path(manifest["eval_config"]).resolve(), private.resolve())
+    plugin_dirs = [str(plugin), *(manifest.get("other_plugin_dirs") or [])]
     text = (f"extends: {json.dumps(extends)}\n"
-            f"runner:\n  plugin_dirs: !replace\n  - {json.dumps(str(plugin))}\n")
+            "runner:\n  plugin_dirs: !replace\n"
+            + "".join(f"  - {json.dumps(entry)}\n" for entry in plugin_dirs))
     if files:
         text += yaml.safe_dump({"dataset": {"workspace": {"files": files}}}, sort_keys=False)
     path = private / "eval.yaml"
@@ -535,10 +545,13 @@ def run_case(manifest: dict, task_id: str, candidate_dir: Path, seed: int, subst
     started = time.time()
     config = EvalConfig.from_yaml(manifest["eval_config"])
 
+    # The transcript is read for the run dir's sake and deliberately dropped
+    # below; see the rollout dict.
     if substrate.get("runner") == "harbor":
-        execution_error, output = _execute_harbor(manifest, substrate, task_id, candidate_dir, run_id, run_dir)
+        execution_error, _transcript = _execute_harbor(
+            manifest, substrate, task_id, candidate_dir, run_id, run_dir)
     else:
-        execution_error, output = _execute_local(manifest, task_id, candidate_dir, run_id, run_dir)
+        execution_error, _transcript = _execute_local(manifest, task_id, candidate_dir, run_id, run_dir)
 
     summary_path = run_dir / "summary.yaml"
     summary = (yaml.safe_load(summary_path.read_text(encoding="utf-8")) or {}) if summary_path.is_file() else {}
@@ -559,8 +572,17 @@ def run_case(manifest: dict, task_id: str, candidate_dir: Path, seed: int, subst
     export.write_condition(run_dir, condition)
     rollout = {
         "task_id": task_id,
-        "output": output,
-        "trace": output,
+        # No transcript, by design. A search engine persists Rollout.output
+        # and .trace into its run record, which sits inside the tree the
+        # proposer reads every iteration — and a target-agent transcript
+        # quotes the case input and everything the agent read on the way,
+        # gold included. Nothing here consumes it either: score() reads the
+        # composed reward and the redacted feedback out of metadata below.
+        # The generated INSTRUCTIONS.md tells the proposer transcripts are
+        # unavailable; this is the line that makes that true. The full
+        # transcript stays on disk under run_dir for a human to read.
+        "output": None,
+        "trace": None,
         "cost_usd": cost,
         "tokens": tokens,
         "error": error_message,
