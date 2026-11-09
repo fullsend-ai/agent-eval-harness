@@ -21,6 +21,7 @@ import hashlib
 import json
 import logging
 import math
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -556,13 +557,20 @@ def _discover_run_dirs(runs_dir: Path) -> list[Path]:
     Optimization rollouts are excluded: a campaign writes hundreds of run dirs
     whose ``condition.json`` describes a candidate and a seed, not a factor
     level, and pooling them into a design matrix produces one "condition" per
-    rollout. Point ``--runs-dir`` at the ``.optimize`` directory to analyze
-    the search itself.
+    rollout. Their provenance is not a factorial design either, so there is
+    no ``--runs-dir`` that turns a campaign into a matrix here — use
+    ``/eval-compare`` on the ``.optimize`` root to look at the search curve.
     """
     if not runs_dir.is_dir():
         return []
-    return sorted({p.parent for p in runs_dir.rglob("summary.yaml")
-                   if not is_rollout_run(p.parent, runs_dir)})
+    found = sorted({p.parent for p in runs_dir.rglob("summary.yaml")})
+    kept = [d for d in found if not is_rollout_run(d, runs_dir)]
+    if len(kept) < len(found):
+        # stderr, not logger.info: nothing configures logging here, so an info
+        # record would be dropped and the operator told nothing.
+        print(f"note: skipped {len(found) - len(kept)} optimization rollout dir(s) under {runs_dir} "
+              "(not factorial cells)", file=sys.stderr)
+    return kept
 
 
 def _condition_levels_for_run(run_dir: Path) -> dict[str, Any]:

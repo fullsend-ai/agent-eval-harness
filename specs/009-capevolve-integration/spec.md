@@ -296,12 +296,11 @@ entry skill invokes live in more than one skill root (e.g. some in
 `.claude/skills`, some in a plugin). An explicit `optimize:` block covering one
 root works today; a multi-root candidate would need one `apply_to` per root.
 
-**CI smoke test.** `tests/test_capevolve_poc.py` has a test that builds a
-Task/Rollout/Score and runs real `cap_evolve.check` against a fixture, but
-it's `skipif`-guarded on `cap_evolve` being importable, and
-`.github/workflows/tests.yml` only installs `.[all,test]` — `optimize` is
-deliberately excluded from `[all]`, so the smoke test never actually runs in
-CI today.
+**CI smoke test.** Resolved. `tests/test_capevolve_poc.py` runs real
+`cap_evolve.check` against a fixture Task/Rollout/Score, `skipif`-guarded on
+`cap_evolve` being importable; `.github/workflows/tests.yml` installs
+`.[all,optimize,test]` so it runs on every CI run (`all` keeps excluding the
+git-pinned `optimize` extra on purpose).
 
 **Gate-resolution figure in `--dry-run`.** Showing a concrete resolvable-delta
 number (e.g. "at 10 val cases this gate resolves Δ ≳ 0.07") needs an assumed

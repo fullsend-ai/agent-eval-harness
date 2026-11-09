@@ -45,7 +45,7 @@ execution:
 
 **Implemented flavor - Agentic Documentation Testing** (see `examples/openshift-agentic-docs.md`):
 can agents navigate your docs, apply the patterns in them, respect their rules, and call an API
-correctly from them alone? Builtin generation prompts for it live in `agent_eval/prompts/docs/`.
+with the right fields from them alone? Builtin generation prompts for it live in `agent_eval/prompts/docs/`.
 
 **Extensible to other scenarios**: Code generation, API pattern validation, reasoning quality, custom agent benchmarks.
 
@@ -95,7 +95,7 @@ agent_eval/              # Python package (config, runner, state)
     intake.py            # Skill-source discovery, runtime resources, NEEDED blocks
     artifact.py          # Candidate resolve/validate/snapshot (skips symlinks)/overlay
     rollout.py           # One case x candidate -> reward + redacted feedback
-    export.py            # Rollout -> run dir under .optimize/; is_rollout_run filter
+    export.py            # Rollout -> run dir under <runs>/.optimize/; is_rollout_run filter
     redact.py            # Judge outcomes without gold (feedback_rationale opts in)
   engines/               # Search-engine coupling — the only cap-evolve imports
     capevolve.py         # agent-eval-capevolve: scaffold, launch, status, apply

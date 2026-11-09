@@ -352,17 +352,25 @@ def _model_preflight(config: EvalConfig) -> tuple[dict, list[str]]:
 
 
 def _skill_location(project_root: Path, config: EvalConfig, apply_to: str) -> dict:
+    from agent_eval.config import resolve_plugin_dir
+
     source = intake.source_for_apply_to(project_root, config, apply_to)
     plugin = source["plugin_dir"]
     sources = intake.skill_sources(project_root, config)
     # Configured plugin roots the candidate does NOT live in. The rollout
     # overlay replaces plugin_dirs wholesale (the owning plugin must not load
     # beside its private copy), so these have to be listed back explicitly or
-    # the skill under test silently loses its siblings.
+    # the skill under test silently loses its siblings. Walk the configured
+    # list itself, not skill discovery: a plugin that ships only commands,
+    # agents or hooks exports no skill root, and the runner loads it all the
+    # same.
     others: list[str] = []
-    for other in sources:
-        root = other["plugin_dir"]
-        if root is not None and root != plugin and str(root) not in others:
+    for configured in getattr(config.runner, "plugin_dirs", None) or []:
+        try:
+            root = resolve_plugin_dir(config, configured)
+        except (ValueError, FileNotFoundError):
+            continue  # config load already reports a missing plugin
+        if root != plugin and str(root) not in others:
             others.append(str(root))
     return {
         "skill_root": str(source["root"]),
@@ -392,13 +400,50 @@ def _check_harbor_substrate(config: EvalConfig, harbor_env: str, image: str | No
         raise intake.IntakeBlocked(blocked)
 
 
+def _symlinked_skill_dirs(project_root: Path, config: EvalConfig, optimize: dict,
+                          components: list[dict]) -> list[str]:
+    """The skill directories a rollout would stage that are themselves
+    symlinks — the ``.claude/skills/<name> -> ../../skills/<name>`` layout —
+    by their unresolved project paths.
+
+    Only an *entry* of a skill root counts. The copies into a rollout
+    (``_copy_tree_local``, ``_copy_skills``) resolve the directory they are
+    handed and drop the links *inside* it, so a skill root that is itself a
+    link (``.claude/skills -> ../skills``) stages fine — intake even derives
+    that ``apply_to`` on its own — while a linked skill directory under a
+    root arrives empty.
+    """
+    root = Path(project_root)
+    apply_to = str(optimize["apply_to"]).rstrip("/")
+    source = intake.source_for_apply_to(root, config, apply_to)
+    apply_is_root = source is not None and Path(source["root"]) == root / apply_to
+    candidates = [] if apply_is_root else [root / apply_to]
+    # Every directory between apply_to and the component: a nested dest
+    # (`foo/SKILL.md` under a skill root) passes through the skill directory
+    # `foo`, and that is the entry the copies drop. component["source"] is of
+    # no use here — it is already resolved, so it never shows a link.
+    for component in components:
+        parts = Path(str(component["dest"]).rstrip("/")).parts
+        depth_end = len(parts) if component.get("is_dir") else len(parts) - 1
+        for depth in range(1, depth_end + 1):
+            candidates.append(root / apply_to / Path(*parts[:depth]))
+    linked, seen = [], set()
+    for path in candidates:
+        if path in seen:
+            continue
+        seen.add(path)
+        if path.is_symlink():
+            linked.append(os.path.relpath(path, root))
+    return linked
+
+
 def _project_dir_for(project_root: Path) -> Path:
     return Path(project_root) / ".capevolve" / "project"
 
 
 def _write_marker(project_dir: Path) -> None:
     (project_dir / _MARKER).write_text(
-        json.dumps({"generated_by": "agent-eval-capevolve", "version": 3}) + "\n"
+        json.dumps({"generated_by": "agent-eval-capevolve", "version": 3}) + "\n", encoding="utf-8",
     )
 
 
@@ -686,6 +731,16 @@ def prepare_project(
         raw, _chain = load_raw(config_path)
         config = EvalConfig.from_yaml(config_path)
         optimize, components = validate_optimize_block(raw, config)
+        linked = _symlinked_skill_dirs(project_root, config, optimize, components)
+        if linked:
+            raise intake.IntakeBlocked([{
+                "input": "skill directory",
+                "why": f"{', '.join(linked)} is a symlink; every copy into a rollout drops links, "
+                       "so the skill would be staged without its files and every rollout would "
+                       "measure an empty skill",
+                "how": "replace the link with the real directory (or point optimize.apply_to / "
+                       "optimize.candidate.source at the real location), then re-run",
+            }])
         if runner == "harbor":
             _check_harbor_substrate(config, harbor_env, image)
     except intake.IntakeBlocked as exc:
@@ -741,9 +796,11 @@ def prepare_project(
     seed_dir = project_dir / "seed_capability"
     # Symlinks are left behind rather than copied (a snapshot travels into
     # per-rollout workspaces and containers, where a link out of the tree
-    # dangles). Report them: a skill whose real content hangs off a link
-    # would otherwise be optimized as an empty shell without a word said.
-    skipped_links = artifact.snapshot_candidate(components, seed_dir)
+    # dangles). The ones a rollout needs come back as real content at staging
+    # time — intake.plumbing_links below decides which, and warns about the
+    # rest, so a skill whose content hangs off a link is never optimized as
+    # an empty shell without a word said.
+    artifact.snapshot_candidate(components, seed_dir)
 
     # adapters/substrate.json — narrow: only the execution substrate, nothing
     # about the dataset/candidate (a file, not env vars, because a --resume
@@ -762,6 +819,17 @@ def prepare_project(
         json.dumps(substrate, indent=2) + "\n", encoding="utf-8",
     )
     runtime_resources, runtime_resource_warnings = intake.runtime_resources(project_root, config, components)
+    location = _skill_location(project_root, config, optimize["apply_to"])
+    # Plumbing links are enumerated over the skill directory being optimized
+    # AND every skill root the rollout copies beside it (the private plugin
+    # carries the owning plugin's whole skill tree): a sibling skill the entry
+    # skill invokes needs its import plumbing just as much.
+    plumbing_roots = [str(optimize["apply_to"]).rstrip("/")] + [
+        Path(root).resolve().relative_to(project_root.resolve()).as_posix()
+        for root in location["skill_roots"]
+        if Path(root).resolve().is_relative_to(project_root.resolve())
+    ]
+    plumbing, plumbing_warnings = intake.plumbing_links(project_root, config, components, plumbing_roots)
     # .capevolve/harness/candidate.json — the task/candidate manifest the
     # bridge and the rollout subprocess both read.
     candidate_manifest = {
@@ -789,10 +857,18 @@ def prepare_project(
             for item in components
         ],
         "runtime_resources": runtime_resources,
+        # Symlinks under the skill tree that staging puts back (artifact.
+        # restore_plumbing): every copy on the way into a rollout drops them.
+        "plumbing_links": plumbing,
+        # Where this campaign's rollouts land — fixed here, once, so the
+        # rollouts, --status and the coverage warning never disagree because
+        # AGENT_EVAL_RUNS_DIR differed between the shell that launched and the
+        # one that asks.
+        "rollouts_dir": str(export.rollout_runs_root({"project_root": str(project_root)}) / config.eval_name()),
         # Where the candidate is live at run time: the project's .claude/skills
         # (staged into the rollout workspace) or a runner plugin's skill root
         # (a private copy of the plugin per rollout).
-        **_skill_location(project_root, config, optimize["apply_to"]),
+        **location,
         "runner_budget_usd": runner_budget_usd,
         # Harbor's task-level agent timeout (the local runner reads it from
         # the eval config itself).
@@ -970,14 +1046,7 @@ def prepare_project(
                 "`/eval-setup --optimize` to install it, or pass --dashboard off to silence "
                 "this warning."]
                if dashboard != "off" and not _dashboard_available() else [])
-            + ([f"the candidate snapshot left {len(skipped_links)} symlink(s) behind "
-                f"({', '.join(skipped_links[:5])}"
-                f"{f', +{len(skipped_links) - 5} more' if len(skipped_links) > 5 else ''}): "
-                "a snapshot is copied into rollout workspaces and containers, where a link "
-                "out of the tree dangles. Harmless for plumbing links like `scripts/agent_eval`; "
-                "if real candidate content hangs off one, inline it or name it in "
-                "optimize.candidate."]
-               if skipped_links else [])
+            + plumbing_warnings
             + telemetry_warnings
         ),
         "runtime_resources": candidate_manifest["runtime_resources"],
@@ -1021,19 +1090,19 @@ def _calibrate_cost_from_past_runs(config: EvalConfig, project_root: Path) -> fl
     base = Path(os.environ.get("AGENT_EVAL_RUNS_DIR", "eval/runs"))
     if not base.is_absolute():
         base = project_root / base
-    eval_runs_dir = base.resolve() / config.eval_name()
-    if not eval_runs_dir.is_dir():
-        return None
+    base = base.resolve()
+    # Ordinary runs (and the flat rollouts of releases up to 1.62.x) sit under
+    # <base>/<eval>; a campaign's rollouts sit in the parallel runs root
+    # <base>/.optimize/<eval> (export.rollout_runs_root). The latter are the
+    # most representative sample there is — one case, one candidate, the same
+    # shape as the rollouts being estimated — so walking only the ordinary
+    # root would quietly throw away every previous campaign.
+    candidates = []
+    for eval_runs_dir in (base / config.eval_name(),
+                          base / export.ROLLOUT_SUBDIR / config.eval_name()):
+        if eval_runs_dir.is_dir():
+            candidates += list(eval_runs_dir.iterdir())
     costs = []
-    # Ordinary runs sit directly under the eval's dir; a past campaign's
-    # rollouts sit one level down in .optimize/ (export.ROLLOUT_SUBDIR), and
-    # those are the most representative sample there is — one case, one
-    # candidate, the same shape as the rollouts being estimated. Walking only
-    # the top level would quietly throw away every previous campaign.
-    rollouts = eval_runs_dir / export.ROLLOUT_SUBDIR
-    candidates = list(eval_runs_dir.iterdir())
-    if rollouts.is_dir():
-        candidates += list(rollouts.iterdir())
     for run_dir in candidates:
         result_path = run_dir / "run_result.json"
         if not result_path.is_file():
@@ -1045,7 +1114,9 @@ def _calibrate_cost_from_past_runs(config: EvalConfig, project_root: Path) -> fl
         cost = data.get("cost_usd")
         if isinstance(cost, bool) or not isinstance(cost, (int, float)) or cost <= 0:
             continue
-        n_cases = 1 if (run_dir / "condition.json").is_file() else len(data.get("per_case") or {})
+        # Only a rollout is one case; an /eval-anova cell also carries a
+        # condition.json (factor levels) and covers its whole per_case.
+        n_cases = 1 if export.is_rollout_dir(run_dir) else len(data.get("per_case") or {})
         if n_cases:
             costs.append(float(cost) / n_cases)
     if not costs:
@@ -1435,7 +1506,8 @@ def _measurement_coverage(final: dict) -> dict | None:
     return {"n_tasks": tasks, "n_scored": scored} if tasks else None
 
 
-def _coverage_warnings(coverage: dict | None, log_file: str | None) -> list[str]:
+def _coverage_warnings(coverage: dict | None, log_file: str | None,
+                       rollouts_dir: str | None = None) -> list[str]:
     if coverage is None:
         return []
     tasks, scored = coverage["n_tasks"], coverage["n_scored"]
@@ -1443,7 +1515,8 @@ def _coverage_warnings(coverage: dict | None, log_file: str | None) -> list[str]
         return [
             f"no evaluation produced a measurement (0 of {tasks}): this result is meaningless. "
             f"Every rollout errored before scoring (e.g. a model id the runner cannot serve, a "
-            f"missing API key, a judge failure) — see {log_file} and the opt-* run dirs"
+            f"missing API key, a judge failure) — see {log_file} and the opt-* run dirs "
+            f"under {rollouts_dir or '$AGENT_EVAL_RUNS_DIR/.optimize/<eval-name>/'}"
         ]
     if scored < tasks:
         return [
@@ -1511,7 +1584,12 @@ def read_status(project_dir: Path) -> dict:
     else:
         status = "stopped"
     coverage = _measurement_coverage(final) if final else None
-    warnings = _coverage_warnings(coverage, manifest.get("log_file"))
+    # Where this campaign's rollouts land: a hidden sibling of the ordinary
+    # runs, so name it rather than send anyone to `ls eval/runs/<eval>/`.
+    harness = _read_json(_harness_manifest_path(Path(project_dir))) or {}
+    rollouts_dir = (str(export.runs_dir_for(harness))
+                    if harness.get("rollouts_dir") or {"project_root", "eval_name"} <= set(harness) else None)
+    warnings = _coverage_warnings(coverage, manifest.get("log_file"), rollouts_dir)
     val_note = _val_size_note(run_dir)
     if val_note:
         warnings.append(val_note)
@@ -1521,6 +1599,7 @@ def read_status(project_dir: Path) -> dict:
         "pid": manifest["pid"],
         "alive": alive,
         "run_dir": str(run_dir),
+        "rollouts_dir": rollouts_dir,
         "log_file": manifest.get("log_file"),
         "stop_hint": manifest.get("stop_hint"),
         "launched_at": manifest.get("launched_at"),
@@ -1557,6 +1636,38 @@ def _git_or_raise(args: list[str], cwd: Path, context: str) -> subprocess.Comple
         ) from exc
 
 
+def _symlink_collisions(src: Path, dest: Path) -> list[str]:
+    """Symlinks under *dest* (dest-relative) that copying *src* onto it would
+    write **through**: any winner entry — file or directory — whose
+    destination path is a link, or has one as an ancestor.
+    ``shutil.copytree(..., dirs_exist_ok=True)`` follows such links for
+    ``makedirs`` and ``copystat`` as much as for file writes, and ``copy2``
+    follows a file link, so the write would land wherever the link points —
+    outside the candidate, outside the skill-scoped ``git add``, and beyond
+    the rollback's reach."""
+    hits: list[str] = []
+    for path in sorted(src.rglob("*")):
+        probe = dest
+        for part in path.relative_to(src).parts:
+            probe = probe / part
+            if probe.is_symlink():
+                link = probe.relative_to(dest).as_posix()
+                if link not in hits:
+                    hits.append(link)
+                break
+    return hits
+
+
+def _winner_symlinks(src: Path) -> list[str]:
+    """Symlinks inside the winner itself. Every rollout refuses a candidate
+    with one (``artifact._reject_symlinks``), so a winner carrying one was
+    altered after it was measured, or ``final.json`` names something that
+    never ran — and ``copytree(symlinks=False)``/``copy2`` would dereference
+    it, copying whatever it points at (a directory link through a checkout
+    link, a file link to a credential) onto the branch."""
+    return sorted(p.relative_to(src).as_posix() for p in src.rglob("*") if p.is_symlink())
+
+
 def _replace_tracked_dir(src: Path, dest: Path, repo_root: Path) -> None:
     """Make ``dest`` match the winner without ever deleting a file git cannot
     restore: tracked files the winner dropped are removed, the winner's files
@@ -1568,6 +1679,10 @@ def _replace_tracked_dir(src: Path, dest: Path, repo_root: Path) -> None:
     the optimizer wanted them gone. Deleting on that basis would strip a
     skill's ``scripts/agent_eval`` plumbing link, which this repo's own
     convention requires, on the way to the branch.
+
+    Keeping a link is only safe because nothing is ever copied through it:
+    ``apply_winner`` refuses, before touching the worktree, any winner with
+    content at or beneath a destination symlink (:func:`_symlink_collisions`).
     """
     winner = {path.relative_to(src) for path in src.rglob("*") if path.is_file()}
     tracked = _git(["ls-files", "-z", "--", str(dest)], cwd=repo_root).stdout.split("\0")
@@ -1623,12 +1738,54 @@ def apply_winner(*, project_root: Path, harness_manifest: dict, campaign_manifes
     for component in harness_manifest["candidate"]:
         rel = artifact.relative_path(str(component["dest"]).rstrip("/"), "candidate dest")
         src = candidate_dir / rel
+        # A link at an intermediate segment of a nested dest (candidates/
+        # cand_1/nested -> elsewhere) would have the copy below read from
+        # wherever it points. Rollouts refuse this shape (stage_candidate's
+        # intermediate-link check); so does --apply.
+        for depth in range(1, len(rel.parts)):
+            if (candidate_dir / Path(*rel.parts[:depth])).is_symlink():
+                raise RuntimeError(
+                    f"refusing to apply candidate {best_id}: {Path(*rel.parts[:depth]).as_posix()} "
+                    "is a symlink inside the candidate snapshot"
+                )
+        if src.exists() and not src.resolve().is_relative_to(candidate_dir):
+            raise RuntimeError(
+                f"refusing to apply candidate {best_id}: component {component['dest']} resolves "
+                f"outside the candidate snapshot ({src.resolve()})"
+            )
         dest = Path(component["source"]).resolve()
         if dest == repo_root or not dest.is_relative_to(repo_root) \
                 or repo_root / ".git" in (dest, *dest.parents):
             raise RuntimeError(f"refusing to apply a candidate outside the repository: {dest}")
         if not src.exists():
             raise RuntimeError(f"winning candidate is missing component {component['dest']}: {src}")
+        if src.is_symlink() or (src.is_dir() and _winner_symlinks(src)):
+            inside = _winner_symlinks(src) if src.is_dir() else [component["dest"]]
+            raise RuntimeError(
+                f"refusing to apply candidate {best_id}: it contains symlink(s) "
+                f"({', '.join(inside[:5])}{f' (+{len(inside) - 5} more)' if len(inside) > 5 else ''}). "
+                "No measured candidate can — every rollout rejects one — so this snapshot was "
+                "altered after measurement or never ran; re-check the campaign before applying"
+            )
+        if component.get("is_dir"):
+            collisions = _symlink_collisions(src, dest)
+            if collisions:
+                # The snapshot carries no symlinks, so a winner can have
+                # ordinary files exactly where the checkout has a link (a
+                # proposer-made scripts/agent_eval/ directory, say). Copying
+                # would follow the link and write outside the candidate —
+                # into this repository's real agent_eval/ for that example —
+                # where neither the branch's `git add` nor the rollback
+                # reaches. Refuse before anything is touched.
+                raise RuntimeError(
+                    f"refusing to apply candidate {best_id}: it has content at or beneath "
+                    f"{', '.join(collisions[:5])}"
+                    f"{f' (+{len(collisions) - 5} more)' if len(collisions) > 5 else ''}, "
+                    f"which {'is a symlink' if len(collisions) == 1 else 'are symlinks'} in the "
+                    f"checkout under {dest}; copying would write through the link, outside the "
+                    "candidate. Remove that content from the candidate, or replace the link in "
+                    "the checkout with real files, then re-run --apply"
+                )
         targets.append((src, dest, bool(component.get("is_dir"))))
 
     # The campaign's own state lives in the benchmark checkout under
@@ -1657,8 +1814,20 @@ def apply_winner(*, project_root: Path, harness_manifest: dict, campaign_manifes
     if not runs_dir.is_absolute():
         runs_dir = project_root / runs_dir
     runs_dir = runs_dir.resolve()
-    if runs_dir.is_relative_to(repo_root):
-        pathspecs.append(f":(exclude,top){runs_dir.relative_to(repo_root)}")
+    excluded_dirs = [runs_dir]
+    # The rollouts themselves landed where the scaffold-time environment put
+    # them (harness manifest rollouts_dir) — not necessarily under this
+    # shell's AGENT_EVAL_RUNS_DIR. Exclude that place too, or --apply from a
+    # plain terminal refuses a finished campaign over its own byproduct.
+    try:
+        excluded_dirs.append(export.runs_dir_for(harness_manifest).resolve())
+    except KeyError:
+        pass  # a manifest from before rollouts_dir / eval_name were recorded
+    for excluded in excluded_dirs:
+        if excluded.is_relative_to(repo_root) and excluded != repo_root:
+            spec = f":(exclude,top){excluded.relative_to(repo_root)}"
+            if spec not in pathspecs:
+                pathspecs.append(spec)
     dirty = _git_or_raise(
         ["status", "--porcelain", "--", *pathspecs], cwd=project_root,
         context="could not check whether the working tree is clean",

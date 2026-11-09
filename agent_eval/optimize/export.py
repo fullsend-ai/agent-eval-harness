@@ -1,18 +1,30 @@
 """Place a rollout's artifacts into the standard harness run-dir layout.
 
 Every optimization rollout, regardless of search engine, lands as an ordinary
-``$AGENT_EVAL_RUNS_DIR/<eval-name>/.optimize/<run-id>`` run directory with a
-``condition.json`` identifying it — so ``/eval-compare``, ``/eval-mlflow`` and
-``/eval-review`` work on the result unchanged when pointed at it.
+run directory — ``run_result.json``, ``summary.yaml``, ``report.html``, a
+``condition.json`` identifying it — under a **parallel runs root**::
 
-The ``.optimize/`` level is what keeps a campaign from drowning the ordinary
-run set: one campaign is ``|val| x num_trials x (iterations + 1)`` run dirs,
-each one a legitimate ``summary.yaml`` that ``/eval-compare`` and
-``/eval-anova`` would otherwise sweep up by ``rglob`` and chart beside the two
-or three runs a person actually meant to compare. :func:`is_rollout_run` is
-the shared predicate those discoverers filter on; pointing a tool straight at
-``.../.optimize`` (or any directory inside it) still works, because then the
-segment is above the input root rather than below it.
+    $AGENT_EVAL_RUNS_DIR/.optimize/<eval-name>/<run-id>
+
+The scripts that take a ``--run-id`` (score.py, report.py, log_results.py,
+attach_feedback.py) resolve it as ``$AGENT_EVAL_RUNS_DIR/<eval-name>/<run-id>``;
+each also accepts ``--run-dir <path>`` naming the directory outright, which is
+how the rollout runner hands them a rollout and how a person does by hand
+(``python3 skills/eval-mlflow/scripts/log_results.py --run-dir
+eval/runs/.optimize/<eval>/<run-id> --config eval.yaml``). The environment
+variable is deliberately left alone: it is forwarded into the agent under test
+and read by the few-shot ``examples:`` harvest, neither of which should see
+the rollout root.
+
+The separate root is what keeps a campaign from drowning the ordinary run set:
+one campaign is ``|val| x num_trials x (iterations + 1)`` run dirs, each one a
+legitimate ``summary.yaml`` that ``/eval-compare`` and ``/eval-anova`` would
+otherwise sweep up by ``rglob`` and chart beside the two or three runs a person
+meant to compare. :func:`is_rollout_run` is the shared predicate those
+discoverers filter on; pointing a tool straight at ``.optimize`` (or anywhere
+inside it) still works, because then the segment is above the input root
+rather than below it — that is how you browse the rollouts' own reports (the
+search curve itself is cap-evolve's: ``--status``, ``history.jsonl``).
 """
 
 from __future__ import annotations
@@ -21,29 +33,65 @@ import json
 import os
 from pathlib import Path
 
-#: Path segment under ``<runs dir>/<eval-name>/`` holding optimization rollouts.
+#: Name of the parallel runs root, directly under ``$AGENT_EVAL_RUNS_DIR``.
 ROLLOUT_SUBDIR = ".optimize"
 
 
-def runs_dir_for(manifest: dict) -> Path:
+def rollout_runs_root(manifest: dict) -> Path:
+    """``$AGENT_EVAL_RUNS_DIR/.optimize``, resolved against the project."""
     base = Path(os.environ.get("AGENT_EVAL_RUNS_DIR", "eval/runs"))
     if not base.is_absolute():
         base = Path(manifest["project_root"]) / base
-    return base.resolve() / manifest["eval_name"] / ROLLOUT_SUBDIR
+    return base.resolve() / ROLLOUT_SUBDIR
 
 
-def is_rollout_run(run_dir, input_dir) -> bool:
+def runs_dir_for(manifest: dict) -> Path:
+    """Where this campaign's rollouts go. Recorded in the harness manifest at
+    scaffold time (``rollouts_dir``) so every later reader — the rollouts
+    themselves, ``--status``, the coverage warning — agrees on one place
+    regardless of the environment it happens to run in; computed only for a
+    manifest from before that key existed."""
+    recorded = manifest.get("rollouts_dir")
+    if recorded:
+        return Path(recorded)
+    return rollout_runs_root(manifest) / manifest["eval_name"]
+
+
+def is_rollout_dir(run_dir: Path | str) -> bool:
+    """A rollout's ``condition.json`` records provenance (candidate, seed,
+    harness run id), never factor ``levels``. Releases up to 1.62.x wrote
+    rollouts flat into ``<runs>/<eval-name>/``, so the path alone cannot
+    identify those — the file can."""
+    try:
+        data = json.loads((Path(run_dir) / "condition.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return (isinstance(data, dict) and "levels" not in data
+            and "harness_run_id" in data and "candidate_id" in data)
+
+
+def is_rollout_run(run_dir: Path | str, input_dir: Path | str) -> bool:
     """True when *run_dir* is an optimization rollout nested under *input_dir*.
 
-    False when *input_dir* is itself the ``.optimize`` directory or inside it:
-    asking for the rollouts is how you get the search curve, and that stays
-    available. Only the incidental sweep is filtered.
+    False when *input_dir* is itself the ``.optimize`` root or inside it, or is
+    the rollout directory itself: asking for the rollouts is how you get the
+    search curve, and that stays available. Only the incidental sweep is
+    filtered — including legacy flat rollouts, recognised by their
+    ``condition.json`` rather than their path.
     """
+    run_dir = Path(run_dir)
+    root = Path(input_dir).resolve()
+    if ROLLOUT_SUBDIR in root.parts:
+        return False  # the caller asked for the rollouts
     try:
-        relative = Path(run_dir).resolve().relative_to(Path(input_dir).resolve())
+        relative = run_dir.resolve().relative_to(root)
     except (ValueError, OSError):
         return False
-    return ROLLOUT_SUBDIR in relative.parts[:-1]
+    if not relative.parts:
+        return False
+    if ROLLOUT_SUBDIR in relative.parts[:-1]:
+        return True
+    return is_rollout_dir(run_dir)
 
 
 def write_condition(run_dir: Path, condition: dict) -> None:

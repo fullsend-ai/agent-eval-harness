@@ -79,14 +79,14 @@ only if the user names their own checkout.
   at `--status`/`--apply` once it finishes.
 - **`--stop`**: run it, report `status` plainly (stopped / already stopped /
   could not be stopped).
-- **`--status`**: run it, then interpret in prose, not raw JSON: report
+- **`--status`**: interpret it in prose, not raw JSON: report
   `status` plainly (not launched / running / finished / stopped — if
   stopped, say to check `log_file`). If `warnings` is non-empty, quote it
   first and split by kind: a measurement warning (`n_scored: 0`, missing
   measurements) is a failure — find the error in `log_file` or an `opt-*`
-  run dir instead of suggesting `--apply`; the val-size warning (fewer
-  than 2 validation cases) is not a failure — carry it as a caveat, and
-  `--apply` is still the right next step. Otherwise report accepted/rejected/
+  run dir (`<runs>/.optimize/<eval>/`), not `--apply`; the
+  val-size warning (fewer than 2 validation cases) is not a failure — carry
+  it as a caveat, and `--apply` is still the right next step. Otherwise report accepted/rejected/
   indecisive counts, spend vs. budget, and an honest caveat on the error
   bars. If `final` is present, `git diff --no-index` the seed capability
   (`.capevolve/project/seed_capability/`) against

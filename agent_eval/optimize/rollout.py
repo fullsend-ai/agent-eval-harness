@@ -38,6 +38,13 @@ def _child_env() -> dict[str, str]:
     # The sentinel records bootstrap completion in this process, not in a
     # newly spawned process.
     env.pop("_AGENT_EVAL_BOOTSTRAP_DONE", None)
+    # Deliberately NOT re-pointing AGENT_EVAL_RUNS_DIR at the rollout root.
+    # execute.py forwards that variable into the agent under test, where a
+    # plugin shipping this repo's own Stop guard would then find the
+    # rollout's live execute.pid and block its own agent from stopping; and
+    # score.py harvests few-shot `examples:` from review.yaml under that
+    # root, which rollouts never have. The rollout's directory is passed
+    # explicitly instead (--run-dir on score.py and report.py).
     return env
 
 
@@ -246,6 +253,14 @@ def _private_plugin(manifest: dict, candidate_dir: Path, plugin: Path) -> None:
         plugin, candidate_dir, (project_root / manifest["apply_to"]).relative_to(source).as_posix(),
         manifest["candidate"],
     )
+    # Copies, not links: the runner re-stages this plugin into the workspace
+    # with symlinks=False, which drops a link to the checkout and would have
+    # materialized an in-plugin one anyway (artifact.restore_plumbing).
+    if source.resolve().is_relative_to(project_root.resolve()):
+        artifact.restore_plumbing(
+            plugin, source.resolve().relative_to(project_root.resolve()).as_posix(),
+            manifest.get("plumbing_links") or [], "copy",
+        )
 
 
 def _skills_plugin(manifest: dict, candidate_dir: Path, plugin: Path) -> None:
@@ -258,6 +273,16 @@ def _skills_plugin(manifest: dict, candidate_dir: Path, plugin: Path) -> None:
     _copy_skills(manifest.get("skill_roots") or [skill_root], plugin / "skills")
     apply_rel = (project_root / manifest["apply_to"]).relative_to(skill_root)
     artifact.stage_candidate(plugin, candidate_dir, (Path("skills") / apply_rel).as_posix(), manifest["candidate"])
+    # Copies, not links: this plugin is uploaded into the container, where a
+    # link into the local checkout would dangle. plugin/skills flattens every
+    # skill root, so map each root's links onto it in turn.
+    for root in manifest.get("skill_roots") or [skill_root]:
+        root = Path(root).resolve()
+        if root.is_relative_to(project_root.resolve()):
+            artifact.restore_plumbing(
+                plugin / "skills", root.relative_to(project_root.resolve()).as_posix(),
+                manifest.get("plumbing_links") or [], "copy",
+            )
 
 
 def _rollout_config(manifest: dict, private: Path, plugin: Path, files: list | None = None) -> Path:
@@ -360,6 +385,10 @@ def _execute_local_steps(
             manifest["apply_to"],
             manifest["candidate"],
         )
+        # The workspace mirrors the project's .claude/ tree, which a normal
+        # /eval-run symlinks to the project — so links, as the agent would
+        # have had them (artifact.restore_plumbing).
+        artifact.restore_plumbing(candidate_workspace, "", manifest.get("plumbing_links") or [], "symlink")
 
     execute_args = [
         "--workspace", str(workspace),
@@ -379,12 +408,18 @@ def _execute_local_steps(
         "--workspace", workspace,
         "--output", run_dir,
     )
+    # --run-dir, not --run-id: a rollout lives in the parallel runs root
+    # (export.runs_dir_for), not where $AGENT_EVAL_RUNS_DIR/<eval>/<run-id>
+    # would put it. The explicit directory keeps everything else these
+    # scripts resolve against the ordinary root — notably score.py's few-shot
+    # `examples:` harvest, which reads human review.yaml labels that only
+    # ordinary runs have.
     try:
         _run_script(
             manifest,
             "score.py",
             "judges",
-            "--run-id", run_id,
+            "--run-dir", run_dir,
             "--config", config_path,
             "--workspace", workspace,
         )
@@ -401,7 +436,7 @@ def _execute_local_steps(
     try:
         # The same report.html a plain /eval-run leaves (no model calls; the
         # Harbor substrate's agent_eval.harbor.run writes its own).
-        _run_script(manifest, "report.py", "--run-id", run_id, "--config", config_path)
+        _run_script(manifest, "report.py", "--run-dir", run_dir, "--config", config_path)
     except RuntimeError:
         pass  # a report is a convenience, never a reason to lose the measurement
 

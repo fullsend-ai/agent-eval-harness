@@ -3513,7 +3513,7 @@ _STALE_FIELD_PROBE_CASES = 3
 
 
 def _warn_stale_inline_field_refs(judges, case_dirs, config, aggregated,
-                                  run_id=None):
+                                  run_id=None, runs_dir=None):
     """Explain a check judge that failed everywhere, if its fields moved.
 
     Runs AFTER scoring and only for a judge whose every case returned False.
@@ -3526,7 +3526,7 @@ def _warn_stale_inline_field_refs(judges, case_dirs, config, aggregated,
     the run has already been paid for.
     """
     try:
-        _stale_inline_field_refs(judges, case_dirs, config, aggregated, run_id)
+        _stale_inline_field_refs(judges, case_dirs, config, aggregated, run_id, runs_dir=runs_dir)
     except Exception as exc:                      # pragma: no cover - guard
         print(f"  Warning: stale-field check skipped: {exc}", file=sys.stderr)
 
@@ -3547,7 +3547,7 @@ def _judge_failed_every_case(agg):
 
 
 def _stale_inline_field_refs(judges, case_dirs, config, aggregated,
-                             run_id=None):
+                             run_id=None, runs_dir=None):
     refs_by_judge = {}
     for name, scorer, _condition, judge_type, _samples in judges:
         if judge_type != "check":
@@ -3565,7 +3565,7 @@ def _stale_inline_field_refs(judges, case_dirs, config, aggregated,
     records = []
     for case_dir in case_dirs[:_STALE_FIELD_PROBE_CASES]:
         try:
-            records.append(load_case_record(case_dir, config, run_id=run_id))
+            records.append(load_case_record(case_dir, config, run_id=run_id, runs_dir=runs_dir))
         except Exception:
             continue
     if records:
@@ -3640,7 +3640,7 @@ def _judges_read_files(judges):
     return False
 
 
-def score_cases(judges, case_dirs, config, run_id=None, samples_override=None):
+def score_cases(judges, case_dirs, config, run_id=None, samples_override=None, runs_dir=None):
     """Score all cases with all judges in parallel.
 
     Each judge's sample count comes from its config (`JudgeConfig.samples`);
@@ -3672,7 +3672,7 @@ def score_cases(judges, case_dirs, config, run_id=None, samples_override=None):
         case_id = case_dir.name
         try:
             record = load_case_record(case_dir, config, run_id=run_id,
-                                      load_files=load_files)
+                                      runs_dir=runs_dir, load_files=load_files)
         except Exception as e:
             # Reading the case directory precedes every judge, so ANY failure
             # here withholds evidence from all of them. `load_case_record`
@@ -3887,7 +3887,7 @@ def score_cases(judges, case_dirs, config, run_id=None, samples_override=None):
             aggregated[name]["pass_rate"] = None
 
     _warn_stale_inline_field_refs(judges, case_dirs, config, aggregated,
-                                  run_id=run_id)
+                                  run_id=run_id, runs_dir=runs_dir)
 
     # Per-judge stability across cases (only meaningful when sampled > 1):
     # how many cases gave a consistent score across all samples.
@@ -5926,9 +5926,26 @@ def _drop_model_calling_judges(judges, config):
     return [t for t in judges if not _calls_model(t[0], t[3])]
 
 
+def _run_location(args, config):
+    """``(runs_dir, run_id)`` such that ``runs_dir / run_id`` is the run.
+
+    ``--run-dir`` names the directory outright (an optimization rollout lives
+    in a parallel runs root, see agent_eval/optimize/export.py); its parent
+    stands in for the runs dir and its basename for the run id, so every
+    ``runs_dir / run_id`` below lands on it unchanged.
+    """
+    if getattr(args, "run_dir", None):
+        run_dir = Path(args.run_dir).resolve()
+        if not run_dir.is_dir():
+            print(f"ERROR: --run-dir is not a directory: {run_dir}", file=sys.stderr)
+            sys.exit(1)
+        return run_dir.parent, run_dir.name
+    return _get_runs_dir(config.eval_name()), args.run_id
+
+
 def cmd_judges(args):
     config = EvalConfig.from_yaml(args.config)
-    runs_dir = _get_runs_dir(config.eval_name())
+    runs_dir, args.run_id = _run_location(args, config)
     case_dirs = _get_case_dirs(args.run_id, runs_dir)
     project_root = Path.cwd()
 
@@ -5964,8 +5981,11 @@ def cmd_judges(args):
     print(f"Scoring {len(case_dirs)} cases with {len(judges)} judges{suffix}: "
           f"{[n for n, *_ in judges]}")
 
+    # runs_dir travels with the run id: with --run-dir the run is NOT under
+    # $AGENT_EVAL_RUNS_DIR/<eval>/, and load_case_record reads the run-level
+    # run_result.json (exit_code, cost, hooks, ...) from runs_dir / run_id.
     judge_results = score_cases(judges, case_dirs, config, run_id=args.run_id,
-                                samples_override=samples_override)
+                                samples_override=samples_override, runs_dir=runs_dir)
 
     for name, agg in judge_results.get("aggregated", {}).items():
         mean = agg.get("mean")
@@ -6163,7 +6183,13 @@ def main():
 
     # judges
     jdg_p = subparsers.add_parser("judges", help="Run all judges")
-    jdg_p.add_argument("--run-id", required=True)
+    jdg_where = jdg_p.add_mutually_exclusive_group(required=True)
+    jdg_where.add_argument("--run-id", help="Run under $AGENT_EVAL_RUNS_DIR/<eval-name>/")
+    jdg_where.add_argument("--run-dir",
+                           help="The run directory itself, wherever it is (its basename is "
+                                "the run id). Everything else — notably the few-shot "
+                                "`examples:` harvest — still resolves against "
+                                "$AGENT_EVAL_RUNS_DIR/<eval-name>/")
     jdg_p.add_argument("--config", required=True)
     jdg_p.add_argument("--no-llm-judges", action="store_true",
                        help="Skip judges that call a model (llm, agent, and "
@@ -6202,7 +6228,8 @@ def main():
     args = parser.parse_args()
 
     # Validate run_id / baseline to prevent path traversal (CWE-22)
-    _validate_path_segment(args.run_id, "--run-id")
+    if getattr(args, "run_id", None) is not None:
+        _validate_path_segment(args.run_id, "--run-id")
     if getattr(args, "baseline", None) is not None:
         _validate_path_segment(args.baseline, "--baseline")
 

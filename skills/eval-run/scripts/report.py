@@ -3167,7 +3167,10 @@ def generate_report(config, summary, run_result, run_dir,
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--run-id", required=True)
+    where = parser.add_mutually_exclusive_group(required=True)
+    where.add_argument("--run-id", help="Run under $AGENT_EVAL_RUNS_DIR/<eval-name>/")
+    where.add_argument("--run-dir", help="The run directory itself, wherever it is "
+                                          "(its basename is the run id)")
     parser.add_argument("--config", required=True)
     parser.add_argument("--baseline", default=None,
                         help="Baseline run ID for comparison")
@@ -3218,7 +3221,14 @@ def main():
 
     runs_base = Path(os.environ.get("AGENT_EVAL_RUNS_DIR", "eval/runs"))
     runs_dir = runs_base / eval_name if eval_name else runs_base
-    run_dir = runs_dir / args.run_id
+    if args.run_dir:
+        # An explicit directory (an optimization rollout lives in a parallel
+        # runs root, agent_eval/optimize/export.py); a baseline still resolves
+        # under the ordinary runs dir.
+        run_dir = Path(args.run_dir).resolve()
+        args.run_id = run_dir.name
+    else:
+        run_dir = runs_dir / args.run_id
     baseline_dir = runs_dir / args.baseline if args.baseline else None
 
     if not run_dir.exists():

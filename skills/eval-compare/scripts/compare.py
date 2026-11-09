@@ -85,6 +85,7 @@ def discover_runs(input_dir):
         raise NotADirectoryError(f"Input directory not found: {input_dir}")
     runs = []
     used_slugs = set()
+    skipped_rollouts = 0
     for summary_path in sorted(input_dir.rglob("summary.yaml")):
         d = summary_path.parent
         if is_rollout_run(d, input_dir):
@@ -92,6 +93,7 @@ def discover_runs(input_dir):
             # real runs, but there are hundreds of them and they are not what
             # someone comparing models asked about. Point the tool at the
             # .optimize dir to get them.
+            skipped_rollouts += 1
             continue
         summary = load_yaml(summary_path)
         run = {
@@ -109,6 +111,10 @@ def discover_runs(input_dir):
         if html_path.exists():
             run["html_report"] = str(html_path)
         runs.append(run)
+    if skipped_rollouts:
+        # stderr: `discover` prints its JSON manifest on stdout.
+        print(f"note: skipped {skipped_rollouts} optimization rollout dir(s) under {input_dir}; "
+              "point the tool at the .optimize root to compare them", file=sys.stderr)
     return runs
 
 
