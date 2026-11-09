@@ -109,10 +109,13 @@ Create an isolated workspace with the test cases and output directories:
 python3 ${CLAUDE_SKILL_DIR}/scripts/workspace.py \
   --config <config> \
   --run-id <id> \
-  [--cases <id> [<id> ...]]
+  [--cases <id> [<id> ...]] \
+  [--json]
 ```
 
 The script prints `WORKSPACE: <path>`, `CASES: <count>`, `BATCH: <path>`. Report these to the user. If `inputs.tools` is configured, it also prints `HOOKS: N tool interceptors configured`.
+
+`--json` (for CI) prints one JSON object on stdout instead and sends the text to stderr. See `references/data-pipeline.md` for its fields.
 
 If the case count is 0, stop — the filter matched nothing.
 
