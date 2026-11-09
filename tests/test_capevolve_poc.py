@@ -271,22 +271,29 @@ def test_plumbing_protects_judge_material_and_run_records_but_not_the_local_skil
                        for n in ("prompts", "ctx", "history", "reference", "judges")}
 
 
-def test_copy_mode_plumbing_skips_repositories_and_caches(tmp_path):
+def test_plumbing_copies_skip_repositories_caches_and_nested_links(tmp_path):
     """Like every other copy into a rollout (_copy_tree_local, the runner's
     plugin staging): a vendored checkout linked as plumbing must not drag its
-    .git history and bytecode into a tree uploaded into every trial."""
+    .git history, bytecode or nested links into the rollout's tree."""
     target = tmp_path / "vendor"
     (target / ".git").mkdir(parents=True)
     (target / ".git/config").write_text("x", encoding="utf-8")
     (target / "__pycache__").mkdir()
     (target / "__pycache__/m.cpython-311.pyc").write_text("x", encoding="utf-8")
     (target / "m.py").write_text("X = 1", encoding="utf-8")
+    # A link nested under a permitted target is not followed either: intake
+    # validated the target, not what lies beneath it.
+    gold = tmp_path / "gold"
+    gold.mkdir()
+    (gold / "answers.yaml").write_text("secret", encoding="utf-8")
+    (target / "nested").symlink_to(gold, target_is_directory=True)
     staged = tmp_path / "staged/skills/demo/scripts"
     staged.mkdir(parents=True)
-    artifact.restore_plumbing(tmp_path / "staged", "", [{"path": "skills/demo/scripts/vendor", "target": str(target)}], "copy")
+    artifact.restore_plumbing(tmp_path / "staged", "", [{"path": "skills/demo/scripts/vendor", "target": str(target)}])
     copied = staged / "vendor"
     assert (copied / "m.py").is_file()
     assert not (copied / ".git").exists() and not (copied / "__pycache__").exists()
+    assert not (copied / "nested").exists()
 
 
 def test_staged_candidate_runs_with_its_plumbing_restored(tmp_path):
@@ -309,43 +316,39 @@ def test_staged_candidate_runs_with_its_plumbing_restored(tmp_path):
     artifact.snapshot_candidate(components, seed)
     assert not (seed / "demo/scripts/agent_eval").exists()
 
-    def _run_staged(workspace, mode=None):
+    def _run_staged(workspace, restore=False):
         workspace.mkdir()
         artifact.stage_candidate(workspace, seed, "skills", components)
-        if mode:
-            artifact.restore_plumbing(workspace, "", links, mode)
+        if restore:
+            artifact.restore_plumbing(workspace, "", links)
         return subprocess.run([sys.executable, str(workspace / "skills/demo/scripts/run.py")],
                               capture_output=True, text=True, cwd=tmp_path)
 
     # Without the plumbing: the script cannot run. This is what a rollout measured.
     assert _run_staged(tmp_path / "ws-bare").returncode != 0
 
-    # Case workspace: a link, as a normal /eval-run workspace has (it symlinks
-    # .claude/skills to the project). Also what agent_eval._bootstrap needs —
-    # it finds the harness venv relative to its own REAL path.
-    proc = _run_staged(tmp_path / "ws", "symlink")
+    # A rollout-private COPY — never a link back into the checkout, which
+    # would let this rollout's agent write into code every later rollout
+    # runs. The script runs against it all the same.
+    proc = _run_staged(tmp_path / "ws", restore=True)
     staged = tmp_path / "ws/skills/demo/scripts/agent_eval"
-    assert staged.is_symlink() and staged.resolve() == (project / "agent_eval").resolve()
+    assert staged.is_dir() and not staged.is_symlink()
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout.strip() == "plumbed"
-
-    # A plugin (re-staged by the runner with symlinks=False) or a container
-    # upload: a real copy, never a link out of the tree.
-    proc = _run_staged(tmp_path / "ws-plugin", "copy")
-    staged = tmp_path / "ws-plugin/skills/demo/scripts/agent_eval"
-    assert staged.is_dir() and not staged.is_symlink()
-    assert proc.returncode == 0 and proc.stdout.strip() == "plumbed"
+    # Writes through the staged path stay in the rollout.
+    (staged / "scratch.txt").write_text("x", encoding="utf-8")
+    assert not (project / "agent_eval/scratch.txt").exists()
 
     # Only the mirrored prefix is this tree's business.
     other = tmp_path / "ws-other"
     other.mkdir()
-    assert artifact.restore_plumbing(other, "elsewhere", links, "copy") == []
+    assert artifact.restore_plumbing(other, "elsewhere", links) == []
 
     # The candidate wins on collision: a proposer that put real content at
     # the link's path made an edit, and the edit is what gets measured.
     (seed / "demo/scripts/agent_eval").mkdir()
     (seed / "demo/scripts/agent_eval/__init__.py").write_text("VALUE = 'mine'\n", encoding="utf-8")
-    proc = _run_staged(tmp_path / "ws-collide", "symlink")
+    proc = _run_staged(tmp_path / "ws-collide", restore=True)
     assert proc.returncode == 0 and proc.stdout.strip() == "mine"
 
 
@@ -374,7 +377,7 @@ def test_a_skill_md_only_candidate_still_gets_its_plumbing(tmp_path):
     rollout._materialize_runtime_resources({"project_root": str(project), "runtime_resources": []}, workspace)
     assert not (workspace / ".claude/skills/demo/scripts/agent_eval").exists()   # the copy dropped it
     artifact.stage_candidate(workspace, candidate, ".claude/skills/demo", components)
-    artifact.restore_plumbing(workspace, "", links, "symlink")
+    artifact.restore_plumbing(workspace, "", links)
 
     assert (workspace / ".claude/skills/demo/SKILL.md").read_text() == "candidate"
     proc = subprocess.run([sys.executable, str(workspace / ".claude/skills/demo/scripts/run.py")],

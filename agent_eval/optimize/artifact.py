@@ -162,8 +162,9 @@ def _reject_symlinks(path: Path) -> None:
                 raise ValueError(f"candidate files must not contain symlinks: {child}")
 
 
-def restore_plumbing(staged_root: Path, prefix: str, plumbing_links: list[dict], mode: str) -> list[Path]:
-    """Put back the symlinks every copy on the way into a rollout left out.
+def restore_plumbing(staged_root: Path, prefix: str, plumbing_links: list[dict]) -> list[Path]:
+    """Put back, as rollout-private copies, the symlinks every copy on the way
+    into a rollout left out.
 
     ``plumbing_links`` is intake's list (``intake.plumbing_links``): the
     project-authored symlinks, as project-relative paths, whose target
@@ -180,24 +181,23 @@ def restore_plumbing(staged_root: Path, prefix: str, plumbing_links: list[dict],
     tree's business. Call it after the candidate overlay, since that
     replaces whole directories.
 
-    ``mode`` is what the agent would have had in a normal ``/eval-run`` of
-    the same layout. ``"symlink"`` for the case workspace, whose
-    ``.claude/skills`` a normal workspace build symlinks to the project — a
-    link is also what ``agent_eval._bootstrap`` needs, since it finds the
-    harness venv relative to its own *real* path. ``"copy"`` for a plugin:
-    the runner re-stages every plugin into the workspace with
-    ``symlinks=False`` (in-plugin targets become content, links that escape
-    the plugin are refused — ``claude_code.stage_plugin_dir``), so a link to
-    the checkout would be dropped on the way, and content is exactly what a
-    normal run of a plugin layout gets; likewise for a tree uploaded into a
-    container, where there is no checkout to point at.
+    Always a copy, never a link back into the checkout — even in the case
+    workspace, where a normal ``/eval-run`` *does* symlink ``.claude/skills``
+    to the project. A search loop is not one run: a link would let any
+    rollout's agent, or the candidate's own scripts, write into shared code
+    that then persists into every later rollout and the baseline — a
+    contamination channel, and for a target like ``agent_eval`` (the judge
+    engine's own package) a reward-hacking one. A copy also lets the nested
+    links under a permitted target be filtered, which a link cannot. The
+    cost is the one ``agent_eval._bootstrap`` pays for any staged copy
+    (it finds the harness venv relative to its own real path): the same as a
+    normal run of a plugin layout, where the runner materializes in-plugin
+    links as content anyway (``claude_code.stage_plugin_dir``).
 
     The candidate wins on collision: if the proposer put real content at a
     link's path, or removed the directory that held it, nothing is restored
     there — that is its edit to make.
     """
-    if mode not in ("symlink", "copy"):
-        raise ValueError(f"plumbing mode must be 'symlink' or 'copy', not {mode!r}")
     staged_root = Path(staged_root)
     # "." is what relative_to() yields for the project root itself.
     base = relative_path(prefix, "plumbing prefix") if prefix not in ("", ".") else Path()
@@ -214,9 +214,7 @@ def restore_plumbing(staged_root: Path, prefix: str, plumbing_links: list[dict],
         target = Path(link["target"])
         if target.is_symlink() or not target.exists():
             continue
-        if mode == "symlink":
-            location.symlink_to(target, target_is_directory=target.is_dir())
-        elif target.is_dir():
+        if target.is_dir():
             # The same filter every other copy into a rollout applies
             # (_copy_tree_local, the runner's plugin staging): no nested
             # repositories or bytecode caches travel, and no links.

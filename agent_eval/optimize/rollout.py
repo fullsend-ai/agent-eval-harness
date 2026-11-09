@@ -253,13 +253,13 @@ def _private_plugin(manifest: dict, candidate_dir: Path, plugin: Path) -> None:
         plugin, candidate_dir, (project_root / manifest["apply_to"]).relative_to(source).as_posix(),
         manifest["candidate"],
     )
-    # Copies, not links: the runner re-stages this plugin into the workspace
-    # with symlinks=False, which drops a link to the checkout and would have
-    # materialized an in-plugin one anyway (artifact.restore_plumbing).
+    # Rollout-private copies of the plumbing links every copy above dropped
+    # (artifact.restore_plumbing): the runner re-stages this plugin into the
+    # workspace with symlinks=False anyway.
     if source.resolve().is_relative_to(project_root.resolve()):
         artifact.restore_plumbing(
             plugin, source.resolve().relative_to(project_root.resolve()).as_posix(),
-            manifest.get("plumbing_links") or [], "copy",
+            manifest.get("plumbing_links") or [],
         )
 
 
@@ -273,15 +273,15 @@ def _skills_plugin(manifest: dict, candidate_dir: Path, plugin: Path) -> None:
     _copy_skills(manifest.get("skill_roots") or [skill_root], plugin / "skills")
     apply_rel = (project_root / manifest["apply_to"]).relative_to(skill_root)
     artifact.stage_candidate(plugin, candidate_dir, (Path("skills") / apply_rel).as_posix(), manifest["candidate"])
-    # Copies, not links: this plugin is uploaded into the container, where a
-    # link into the local checkout would dangle. plugin/skills flattens every
-    # skill root, so map each root's links onto it in turn.
+    # Rollout-private copies of the plumbing links (this plugin is uploaded
+    # into the container). plugin/skills flattens every skill root, so map
+    # each root's links onto it in turn.
     for root in manifest.get("skill_roots") or [skill_root]:
         root = Path(root).resolve()
         if root.is_relative_to(project_root.resolve()):
             artifact.restore_plumbing(
                 plugin / "skills", root.relative_to(project_root.resolve()).as_posix(),
-                manifest.get("plumbing_links") or [], "copy",
+                manifest.get("plumbing_links") or [],
             )
 
 
@@ -385,10 +385,11 @@ def _execute_local_steps(
             manifest["apply_to"],
             manifest["candidate"],
         )
-        # The workspace mirrors the project's .claude/ tree, which a normal
-        # /eval-run symlinks to the project — so links, as the agent would
-        # have had them (artifact.restore_plumbing).
-        artifact.restore_plumbing(candidate_workspace, "", manifest.get("plumbing_links") or [], "symlink")
+        # The workspace mirrors the project's .claude/ tree. Copies, not the
+        # links a normal /eval-run would have: a link back into the checkout
+        # would let one rollout write into code every later rollout runs
+        # (artifact.restore_plumbing).
+        artifact.restore_plumbing(candidate_workspace, "", manifest.get("plumbing_links") or [])
 
     execute_args = [
         "--workspace", str(workspace),
