@@ -1,6 +1,6 @@
 {
   "name": "agent-eval-harness",
-  "version": "1.62.3",
+  "version": "1.63.0",
   "description": "Agent and skill evaluation harness with MLflow integration",
   "author": {
     "name": "fullsend-ai"

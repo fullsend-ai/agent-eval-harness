@@ -1,3 +1,15 @@
+# [1.63.0](https://github.com/fullsend-ai/agent-eval-harness/compare/v1.62.3...v1.63.0) (2026-11-09)
+
+
+### Bug Fixes
+
+* **eval-run:** fail case-mode runs when any case exits non-zero ([93b456f](https://github.com/fullsend-ai/agent-eval-harness/commit/93b456ff914fbe136c775deaf52468ce88ed7bbc)), closes [#300](https://github.com/fullsend-ai/agent-eval-harness/issues/300)
+
+
+### Features
+
+* **eval-run:** add --json output to workspace.py ([18c1f6d](https://github.com/fullsend-ai/agent-eval-harness/commit/18c1f6d7c878cb25b33bcdea1032f2f8498f41b0)), closes [#301](https://github.com/fullsend-ai/agent-eval-harness/issues/301)
+
 ## [1.62.3](https://github.com/fullsend-ai/agent-eval-harness/compare/v1.62.2...v1.62.3) (2026-11-06)
 
 
