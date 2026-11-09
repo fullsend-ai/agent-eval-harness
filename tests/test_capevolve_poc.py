@@ -218,10 +218,25 @@ def test_plumbing_protects_judge_material_and_run_records_but_not_the_local_skil
     (tmp_path / "eval/prompts/quality.md").write_text("Expected answer: 42", encoding="utf-8")
     (tmp_path / "rubrics").mkdir()
     (tmp_path / "rubrics/ctx.md").write_text("gold-ish", encoding="utf-8")
+    (tmp_path / "reference").mkdir()
+    (tmp_path / "reference/answers.md").write_text("case-1: 42", encoding="utf-8")
+    (tmp_path / "eval_judges").mkdir()
+    (tmp_path / "eval_judges/__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "eval_judges/quality.py").write_text("EXPECTED = {'case-1': 'gold'}\n"
+                                                      "def score(outputs): return True, 'ok'\n", encoding="utf-8")
     eval_yaml = tmp_path / "eval.yaml"
     eval_yaml.write_text(eval_yaml.read_text() + """  - name: rubric
     prompt_file: eval/prompts/quality.md
     context: [rubrics/ctx.md]
+    feedback_type: bool
+  - name: grounded
+    prompt: Judge it.
+    feedback_type: bool
+    agent:
+      context: [reference]
+  - name: coded
+    module: eval_judges.quality
+    function: score
     feedback_type: bool
 """, encoding="utf-8")
     (tmp_path / "eval/runs/bench/r1").mkdir(parents=True)
@@ -235,15 +250,25 @@ def test_plumbing_protects_judge_material_and_run_records_but_not_the_local_skil
     (skill / "scripts/prompts").symlink_to("../../../../eval/prompts")
     (skill / "scripts/ctx").symlink_to("../../../../rubrics")
     (skill / "scripts/history").symlink_to("../../../../eval/runs")
+    (skill / "scripts/reference").symlink_to("../../../../reference")     # an agent judge's grounding
+    (skill / "scripts/judges").symlink_to("../../../../eval_judges")      # a code judge's source
+    # Intra-skill plumbing of a SKILL.md-only candidate: the rest of the
+    # skill directory is staged from the project as-is, so a link to it
+    # resolves to the same content and must come back.
+    (skill / "templates").mkdir()
+    (skill / "templates/t.md").write_text("tpl", encoding="utf-8")
+    (skill / "scripts/templates").symlink_to("../templates")
     from agent_eval.config import EvalConfig
     config = EvalConfig.from_yaml("eval.yaml")
     components = [{"dest": "SKILL.md", "source": str(skill / "SKILL.md"), "is_dir": False}]
 
     links, warnings = intake.plumbing_links(tmp_path, config, components, [".claude/skills/pipeline"])
 
-    assert [l["path"] for l in links] == [".claude/skills/pipeline/scripts/shared"]
+    assert [l["path"] for l in links] == [".claude/skills/pipeline/scripts/shared",
+                                          ".claude/skills/pipeline/scripts/templates"]
     dropped = {w.split(" ")[2] for w in warnings}
-    assert dropped == {".claude/skills/pipeline/scripts/" + n for n in ("prompts", "ctx", "history")}
+    assert dropped == {".claude/skills/pipeline/scripts/" + n
+                       for n in ("prompts", "ctx", "history", "reference", "judges")}
 
 
 def test_copy_mode_plumbing_skips_repositories_and_caches(tmp_path):

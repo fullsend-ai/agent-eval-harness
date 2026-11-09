@@ -280,11 +280,24 @@ def _measurement_paths(project_root: Path, config: EvalConfig) -> list[Path]:
         if config_path.parent != root:
             paths.append(config_path.parent)
     for judge in config.judges or []:
-        for named in [getattr(judge, "prompt_file", "") or "", *(getattr(judge, "context", None) or [])]:
+        agent = getattr(judge, "agent", None) or {}
+        named_all = [getattr(judge, "prompt_file", "") or "",
+                     *(getattr(judge, "context", None) or []),
+                     # An agent judge's grounding material: staged into the
+                     # judge's .context/ from the same project-root-relative
+                     # paths (score.py _stage_agent_workspace).
+                     *((agent.get("context") if isinstance(agent, dict) else None) or [])]
+        for named in named_all:
             if not isinstance(named, str) or not named:
                 continue
             named_path = Path(named)
             paths.append((named_path if named_path.is_absolute() else root / named_path).resolve())
+        # A code judge's source: score.py imports `module` with the project
+        # root on sys.path, so it is a file or a package under the root.
+        module = getattr(judge, "module", "") or ""
+        if isinstance(module, str) and module:
+            base = root / Path(*module.split("."))
+            paths += [base.resolve(), base.with_suffix(".py").resolve()]
     return paths
 
 
@@ -329,8 +342,12 @@ def plumbing_links(
     # replaced in the staged tree.
     forbidden = _measurement_paths(root, config)
     for component in components:
-        source = Path(component["source"]).resolve()
-        forbidden.append(source if component.get("is_dir") else source.parent)
+        # The seed home is exactly what the candidate replaces: the whole tree
+        # for a directory component, only the file for a file component — the
+        # rest of that skill directory is staged from the project as-is, so a
+        # link to it (scripts/templates -> ../templates) resolves to the same
+        # content either way and must come back.
+        forbidden.append(Path(component["source"]).resolve())
     bases: list[Path] = []
     for entry in roots:
         base = root / str(entry).rstrip("/")
