@@ -48,7 +48,18 @@ optimize = [
     # The live dashboard cap-evolve launches during a run (on by default, see
     # --dashboard in agent-eval-capevolve). Same pin, same checkout.
     "capevolve-dashboard @ git+https://github.com/skillberry-ai/cap-evolve.git@520ecbe8b9963588eb8d53e3ae29a4ccc1f8436c#subdirectory=dashboard/backend",
+    # The observer backends. engines/capevolve.py writes an mlflow observer
+    # into capevolve.yaml whenever the eval config has an experiment, and
+    # cap-evolve-core does not carry the backend — without this the campaign
+    # runs to completion against an empty experiment. Dependency-free on its
+    # own; mlflow itself comes from this project's [mlflow] extra.
+    "capevolve-telemetry @ git+https://github.com/skillberry-ai/cap-evolve.git@520ecbe8b9963588eb8d53e3ae29a4ccc1f8436c#subdirectory=capevolve_telemetry",
 ]
+# Every extra whose dependencies come from an index. `optimize` is
+# deliberately NOT folded in: it pins cap-evolve by git SHA, and a VCS
+# requirement in `all` would make the ordinary install need git plus
+# reachable GitHub. Ask for it by name — `pip install -e '.[all,optimize]'`,
+# which is what CI and `/eval-setup --optimize` do.
 all = [
     "mlflow[genai]>=3.5",
     "anthropic[vertex]>=0.77",

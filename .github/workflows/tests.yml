@@ -22,7 +22,11 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: pip install -e ".[all,test]"
+        # `optimize` is named explicitly: it is a git-pinned extra and so is
+        # kept out of `all`. Without it the cap_evolve-guarded tests in
+        # tests/test_capevolve_poc.py skip, and the bridge is never checked
+        # against the real contract it is written to.
+        run: pip install -e ".[all,optimize,test]"
 
       - name: Run tests
         run: pytest tests/ -v

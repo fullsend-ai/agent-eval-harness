@@ -132,9 +132,12 @@ cap-evolve's `run_target` thread pool instead of always running serially.
   `eval.yaml` rejects any key cap-evolve's own search config owns
   (`num_trials`, `gate_*`, `split_*`, `max_usd`, `protected_paths`,
   `observers`, etc.). `protected_paths: default` is always generated (a real
-  cap-evolve sentinel — omitting it leaves dataset/judge files fully
-  editable by the optimizer); `observers: [{backend: mlflow, ...}]` is
-  generated when the project's `eval.yaml` has an `mlflow:` block.
+  cap-evolve sentinel expanding to `integrity.DEFAULT_PATTERNS`, matched
+  within the capability workdir — it is not what seals the dataset, the eval
+  config or the judges; keeping those outside the optimizer-visible tree is);
+  `observers: [{backend: mlflow, ...}]` is generated when the project's
+  `eval.yaml` has an `mlflow:` block — the backend itself ships in
+  `capevolve-telemetry`, and scaffolding warns when it is not importable.
 - cap-evolve has no native `status`/`apply`/detach/background mode —
   `cap-evolve run` blocks synchronously end-to-end. `engines/capevolve.py`
   builds that layer on the harness side: a detached subprocess
