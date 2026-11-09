@@ -10,15 +10,22 @@ Usage:
         --config eval.yaml \\
         --run-id test-001 \\
         [--cases case-001] \\
-        [--symlinks scripts,.claude,CLAUDE.md]
+        [--symlinks scripts,.claude,CLAUDE.md] \\
+        [--json]
 
 Project resources are linked into each workspace from DEFAULT_SYMLINKS plus
 the config's ``execution.symlinks`` entries; ``--symlinks`` replaces both.
+
+By default the prepared workspace is reported as text lines (``WORKSPACE:``,
+``CASES:``, ...). ``--json`` instead writes one JSON object describing it to
+stdout and routes all progress/hook text to stderr (see ``_prepare``).
 """
 
 import agent_eval._bootstrap  # noqa: F401 — auto-activate venv
 
 import argparse
+import contextlib
+import json
 import os
 import re
 import shutil
@@ -58,8 +65,34 @@ def main():
         "the defaults (scripts,.claude,CLAUDE.md,.context,skills) AND the "
         "config's execution.symlinks",
     )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Write one JSON object describing the prepared workspace to "
+        "stdout; progress and hook messages go to stderr",
+    )
     args = parser.parse_args()
 
+    if not args.json:
+        _prepare(args)
+        return
+
+    # Anything the preparation prints (text summary, HOOKS: lines) goes to
+    # stderr so stdout carries only the JSON object. Failures exit nonzero
+    # (sys.exit / StagingError) before anything is written to stdout.
+    with contextlib.redirect_stdout(sys.stderr):
+        result = _prepare(args)
+    print(json.dumps(result))
+
+
+def _prepare(args):
+    """Create the workspace for *args* and return a summary of it.
+
+    The summary dict has ``workspace`` (absolute path), ``mode`` (``batch``,
+    ``case`` or ``in-repo``), ``case_count`` and ``cases``, plus
+    ``batch_file`` (batch mode) or ``repo`` (in-repo mode). The text lines
+    are printed as before regardless.
+    """
     # Validate git is available (required for workspace creation)
     if GIT_BIN is None:
         print("ERROR: git executable not found in PATH", file=sys.stderr)
@@ -116,10 +149,8 @@ def main():
         workspace_mode = getattr(config.runner, "workspace_mode", None)
         is_prompt_mode = config.is_prompt_mode()
         if is_prompt_mode and workspace_mode == "repo":
-            _create_in_repo_workspace(workspace, case_dirs, config, args)
-        else:
-            _create_per_case_workspace(workspace, case_dirs, config, args)
-        return
+            return _create_in_repo_workspace(workspace, case_dirs, config, args)
+        return _create_per_case_workspace(workspace, case_dirs, config, args)
 
     # ── Batch mode (below) ───────────────────────────────────────
 
@@ -203,6 +234,13 @@ def main():
     print(f"WORKSPACE: {workspace}")
     print(f"CASES: {len(case_dirs)}")
     print(f"BATCH: {workspace / 'batch.yaml'}")
+    return {
+        "workspace": str(workspace),
+        "mode": "batch",
+        "case_count": len(case_dirs),
+        "cases": case_order,
+        "batch_file": str(workspace / "batch.yaml"),
+    }
 
 
 def _create_per_case_workspace(workspace, case_dirs, config, args):
@@ -315,6 +353,18 @@ def _create_per_case_workspace(workspace, case_dirs, config, args):
     print(f"CASES: {len(case_dirs)}")
     for entry in case_order:
         print(f"  {entry['case_id']}: {workspace / 'cases' / entry['case_id']}")
+    return {
+        "workspace": str(workspace),
+        "mode": "case",
+        "case_count": len(case_dirs),
+        "cases": [
+            {
+                "case_id": e["case_id"],
+                "workspace": str(workspace / "cases" / e["case_id"]),
+            }
+            for e in case_order
+        ],
+    }
 
 
 def _resolve_symlink_names(config, args):
@@ -480,6 +530,16 @@ def _create_in_repo_workspace(workspace, case_dirs, config, args):
     print(f"CASES: {len(case_dirs)}")
     for entry in case_order:
         print(f"  {entry['case_id']}: workspace/cases/{entry['case_id']}")
+    return {
+        "workspace": str(workspace),
+        "mode": "in-repo",
+        "case_count": len(case_dirs),
+        "cases": [
+            {"case_id": e["case_id"], "workspace": str(cases_dir / e["case_id"])}
+            for e in case_order
+        ],
+        "repo": str(project_root),
+    }
 
 
 def _snapshot_repo_state(repo_root):

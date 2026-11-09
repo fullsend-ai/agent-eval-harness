@@ -64,6 +64,21 @@ When `execution.mode` is `case` (default), workspace.py creates a separate works
 
 Each case gets ALL files from the dataset case directory (not just input.yaml), plus symlinked project resources and hooks. The skill runs in the case workspace as its working directory.
 
+### Machine-readable output (`--json`)
+
+By default workspace.py reports the workspace as text lines (`WORKSPACE:`, `MODE:`, `CASES:`, `BATCH:`, `REPO:`). With `--json` it writes one JSON object to stdout instead. The text lines and `HOOKS:` progress go to stderr, so stdout stays parseable. Fields:
+
+| Field | Modes | Meaning |
+|---|---|---|
+| `workspace` | all | Absolute path of the created workspace (`/tmp/agent-eval/{run-id}`) |
+| `mode` | all | `batch`, `case` or `in-repo` |
+| `case_count` | all | Number of selected cases (the `CASES:` value) |
+| `cases` | all | One object per case with `case_id`. Case and in-repo modes add `workspace` (absolute path of the case dir). Batch mode adds `entry_count` (entries in batch.yaml) and omits cases with no readable input file |
+| `batch_file` | batch | Absolute path of `batch.yaml` |
+| `repo` | in-repo | Repository the agents run in |
+
+Failures still exit nonzero with `ERROR:` on stderr and print nothing to stdout.
+
 ## 2. Workspace → Execution
 
 **What execute.py does**:
