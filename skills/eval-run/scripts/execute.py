@@ -1062,6 +1062,16 @@ def _list_step_output_files(case_ws, config):
     return files
 
 
+def _aggregate_exit_codes(exit_codes):
+    """Collapse exit codes into one: the first non-zero code, else 0.
+
+    A failure is any non-zero code, including negative runner codes (e.g. a
+    timeout or launch failure of -1). ``max()`` would mask those behind a 0.
+    ``None`` counts as 0.
+    """
+    return next((ec for ec in exit_codes if ec), 0)
+
+
 def _aggregate_step_metrics(step_metrics):
     """Roll per-step RunResult dicts up into one case-level result dict."""
     results = list(step_metrics.values())
@@ -1086,8 +1096,7 @@ def _aggregate_step_metrics(step_metrics):
     # A case fails if any step did. max() would mask a negative failure code
     # (e.g. a runner timeout of -1) behind a later 0, so surface the first
     # non-zero exit code instead.
-    exit_codes = [r.get("exit_code") or 0 for r in results]
-    worst_exit = next((ec for ec in exit_codes if ec != 0), 0)
+    worst_exit = _aggregate_exit_codes(r.get("exit_code") for r in results)
     # Concatenate step denial lists in step order (dedup by tool_use_id in
     # case a step result was double-counted) so the case-level entry reports
     # denials like a single-step case does, instead of hiding them in steps.
@@ -2104,7 +2113,9 @@ def _execute_per_case(args, config, runner, runner_cls,
     else:
         total_cost, cases_priced = _sum_reported_costs(case_results), None
     total_turns = sum(r.get("num_turns") or 0 for r in case_results.values())
-    worst_exit = max((r["exit_code"] for r in case_results.values()), default=0)
+    # Any failing case fails the run. max() would mask a negative runner code
+    # (e.g. a timeout of -1) behind another case's 0.
+    worst_exit = _aggregate_exit_codes(r["exit_code"] for r in case_results.values())
     # Ensure exit code reflects repo verification failure
     if repo_verification_failed:
         worst_exit = max(worst_exit, 1)
