@@ -100,6 +100,16 @@ def stage_plugin_dir(plugin_dir: Path, workspace: Path) -> Path:
     so the staged tree cannot point back outside the workspace. Idempotent
     per workspace: an existing destination is reused; a partial copy never
     becomes the destination (copy into a temp sibling, then rename).
+
+    One host path is still disclosed, on purpose: ``AGENT_EVAL_HARNESS_ROOT``
+    (``_build_env``) names the harness checkout so that the staged copies of
+    ``agent_eval`` this function produces can activate its ``.eval-venv``
+    (``agent_eval._bootstrap``). That is a trade-off, not an oversight — the
+    copies cannot run their third-party imports without some real location,
+    ``AGENT_EVAL_RUNS_DIR`` already discloses a sibling host path, and Bash
+    was never path-scoped — but it means an agent that goes looking can find
+    the harness install. What this staging hides is the *plugin's* real
+    location, which is a different thing: the project under evaluation.
     """
     plugin = Path(plugin_dir).resolve()
     dest = workspace / ".staged-plugins" / plugin.name
