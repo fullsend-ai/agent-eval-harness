@@ -31,10 +31,12 @@ from agent_eval.events import (
 )
 from score import UNLISTABLE_KEY, escape_log_text
 
-# Files/dirs created by the harness infrastructure, not by the skill
-_HARNESS_PATHS = {
-    ".claude", ".git", ".work", ".staged-plugins", "subagents", "hooks",
-    "stdout.log", "stderr.log",
+# Harness-created paths excluded from collection into _modified/
+_HARNESS_DIRS = {
+    ".claude", ".fullsend-runs", ".git", ".work", ".staged-plugins", "subagents", "hooks",
+}
+_HARNESS_FILES = {
+    "output/stdout.log", "output/stderr.log",
     "run_result.json", "batch.yaml", "case_order.yaml",
 }
 
@@ -576,7 +578,7 @@ def _collect_modified_files(case_dir, config):
             continue
         if ".." in parts:
             continue
-        if parts[0] in _HARNESS_PATHS:
+        if parts[0] in _HARNESS_DIRS or "/".join(parts) in _HARNESS_FILES:
             continue
         if any(parts[:len(op)] == op for op in output_prefixes):
             continue
