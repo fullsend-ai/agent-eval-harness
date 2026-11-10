@@ -1,3 +1,10 @@
+## [1.63.1](https://github.com/fullsend-ai/agent-eval-harness/compare/v1.63.0...v1.63.1) (2026-11-10)
+
+
+### Bug Fixes
+
+* **eval-run:** correct internal file filtering ([d00a2d6](https://github.com/fullsend-ai/agent-eval-harness/commit/d00a2d6db02bbdc84af972959173ccac876c9900))
+
 # [1.63.0](https://github.com/fullsend-ai/agent-eval-harness/compare/v1.62.3...v1.63.0) (2026-11-09)
 
 
