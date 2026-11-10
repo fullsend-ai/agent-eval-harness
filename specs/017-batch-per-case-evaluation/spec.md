@@ -228,7 +228,7 @@ and it does not fail every case on a total it was never meant to compare.
 
 **This changes existing batch-mode behavior, and that is intended.** #306 allows changes
 that are made explicitly. Batch evals with cost or token judges stop judging the batch
-total against a per-case cap. Their thresholds report `n/a` until the author either
+total against a per-case cap. Their score thresholds report `n/a` until the author either
 moves to D1 or rewrites the judge against `batch_cost_usd`. The change ships with a
 CHANGELOG entry and the config-load warning in D3. The key is `execution_mode`, not
 "`per_case` is absent", so older or non-batch `run_result.json` files without a
@@ -238,8 +238,11 @@ CHANGELOG entry and the config-load warning in D3. The key is `execution_mode`, 
 
 When `execution.mode: batch` is set and a `builtin: cost_budget` judge is configured,
 `EvalConfig` warns: per-case cost is unavailable in a shared batch invocation, the judge
-will abstain on every case of a multi-case run, any threshold on it will report `n/a`,
-and `mode: case` with `batch_input: true` measures per-case cost. This follows the
+will abstain on every case of a multi-case run, a score threshold on it (`min_pass_rate`)
+will report `n/a`, and `mode: case` with `batch_input: true` measures per-case cost.
+`max_error_rate` is not a score threshold: abstentions are not errors, so a config whose
+only threshold on the cost judge is `max_error_rate` still passes when every case
+abstains. The warning is the only signal in that case. This follows the
 warning pattern of C:2983-2999. Custom `check:` judges that read `cost_usd` cannot be
 detected statically. They get `null` and the `cost_unavailable_reason` field, and D2's
 report text covers them.
@@ -270,7 +273,7 @@ designed there rather than duplicated here.
 | `mode: case`, `batch_input: true` | New. Ordinary case mode plus a one-entry `batch.yaml` per case |
 | `mode: batch`, one case | Unchanged per-case values, plus the `batch_*` fields |
 | `mode: batch`, many cases, no cost/token/duration judges | Unchanged scores. The report shows per-case cost as unavailable and the batch total at run level |
-| `mode: batch`, many cases, cost judge | **Changed (explicit):** the judge abstains on every case and thresholds on it report `n/a`, instead of judging the batch total per case |
+| `mode: batch`, many cases, cost judge | **Changed (explicit):** the judge abstains on every case and score thresholds on it (`min_pass_rate`) report `n/a`, instead of judging the batch total per case. `max_error_rate` alone still passes, since abstentions are not errors |
 | Harbor, `mode: batch` config | Unchanged (already one task per case). Harbor additionally honours `batch_input` under `mode: case` |
 | `run_result.json` without `execution_mode: batch` | Unchanged fallback |
 
@@ -284,7 +287,9 @@ designed there rather than duplicated here.
 3. A multi-case batch `run_result.json` with `cost_usd: 60.0`: every case record has
    `cost_usd: null`, `cost_source: "unavailable"`, `cost_unavailable_reason:
    "shared-invocation"` and `batch_cost_usd: 60.0`. `cost_budget` abstains on every
-   case. A `min_pass_rate` threshold on it yields an `n/a` regression, never a pass.
+   case. A `min_pass_rate` threshold on it yields an `n/a` regression, never a pass. A
+   config whose only threshold on it is `max_error_rate` still passes, because
+   abstentions are not errors.
 4. A one-case batch `run_result.json` with `cost_usd: 6.0`: the case record has
    `cost_usd: 6.0`, and `cost_budget` judges it.
 5. A `run_result.json` with no `execution_mode` and no `per_case` keeps today's
