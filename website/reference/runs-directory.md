@@ -322,9 +322,10 @@ A case produces outputs in two distinct ways, and the harness collects both:
     ```
 
 !!! warning "`_modified/` excludes harness scaffolding"
-    Paths under `.work`, `.staged-plugins/`, `subagents/`, and `hooks/` are
-    skipped when building `_modified/`, so a skill's own transcripts, hook
-    files, and the harness's staged plugin copies don't leak in as "edits".
+    Known harness and runner scaffolding is skipped when building `_modified/`,
+    so a skill's own transcripts, hook files, and the harness's staged plugin
+    copies don't leak in as "edits". Declared `outputs[].path` artifacts are
+    collected separately.
 
 ```mermaid
 flowchart LR

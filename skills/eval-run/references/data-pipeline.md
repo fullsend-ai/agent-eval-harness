@@ -141,7 +141,7 @@ $AGENT_EVAL_RUNS_DIR/{id}/
 
 ### In-place file edits
 
-Skills that modify input files using the Edit tool (rather than writing to an output directory) are handled automatically. `workspace.py` creates a git commit of the initial workspace state before execution. After execution, `collect.py` runs `git diff HEAD` (plus `git ls-files --others` for new files) to detect modified files and copies them to a `_modified/` directory under each case's run output. No extra `outputs` config is needed. Harness-created paths (`.claude/`, `.git/`, `.work/`, `.staged-plugins/`, `subagents/`, `hooks/`, logs) and directories declared in `outputs[].path` are excluded, so only files the skill itself modified or created appear in `_modified/`.
+Skills that modify input files using the Edit tool (rather than writing to an output directory) are handled automatically. `workspace.py` creates a git commit of the initial workspace state before execution. After execution, `collect.py` runs `git diff HEAD` (plus `git ls-files --others` for new files) to detect modified files and copies them to a `_modified/` directory under each case's run output. No extra `outputs` config is needed. Known harness and runner scaffolding is excluded from the automatic `_modified/` collection, while directories declared in `outputs[].path` are collected separately.
 
 ## 4. Collection → Scoring
 
