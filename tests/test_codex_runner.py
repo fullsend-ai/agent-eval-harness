@@ -563,6 +563,16 @@ def test_codex_env_is_allowlisted_resolves_refs_and_skips_none(monkeypatch):
     assert env["COPIED"] == "resolved"
     assert env["HOOK"] == "3"
     assert "UNRELATED_HOST_SECRET" not in env
+    # The harness names its own checkout for the agent's skill scripts
+    # (staged copies of agent_eval find .eval-venv through it); an explicit
+    # operator value is forwarded instead.
+    from agent_eval._bootstrap import HARNESS_ROOT_ENV, harness_root
+    monkeypatch.delenv(HARNESS_ROOT_ENV, raising=False)   # ambient in harness-launched sessions
+    assert runner._build_env()[HARNESS_ROOT_ENV] == harness_root()
+    monkeypatch.setenv(HARNESS_ROOT_ENV, "/elsewhere/harness")
+    assert runner._build_env()[HARNESS_ROOT_ENV] == "/elsewhere/harness"
+    monkeypatch.setenv(HARNESS_ROOT_ENV, "")                 # blank counts as unset
+    assert runner._build_env()[HARNESS_ROOT_ENV] == harness_root()
     assert "MISSING" not in env
     assert "NULL" not in env
     assert "HOOK_NULL" not in env

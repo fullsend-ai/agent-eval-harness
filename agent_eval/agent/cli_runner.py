@@ -2,6 +2,7 @@
 
 import json
 import os
+from agent_eval._bootstrap import ensure_harness_root
 import re
 import shlex
 import subprocess
@@ -230,6 +231,9 @@ class CliRunner(EvalRunner):
     def _build_env(self, extra_env=None) -> dict:
         """Build subprocess environment: inherit env, add extras."""
         env = os.environ.copy()
+        # Staged copies of agent_eval have no venv beside them; name the real
+        # checkout for _bootstrap (see claude_code._build_env).
+        ensure_harness_root(env)
         for k, v in self._extra_env.items():
             resolved = resolve_env_value(v)
             if resolved is not None:

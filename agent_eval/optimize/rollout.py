@@ -19,6 +19,7 @@ import agent_eval._bootstrap  # noqa: F401 — activate harness venv before thir
 import argparse
 import json
 import os
+from agent_eval._bootstrap import ensure_harness_root
 import shutil
 import subprocess
 import sys
@@ -35,6 +36,12 @@ from agent_eval.optimize import artifact, export, intake, redact
 
 def _child_env() -> dict[str, str]:
     env = dict(os.environ)
+    # The children stage agent_eval copies for the agent's skill scripts (the
+    # restored plumbing, the runner's plugin staging); a copy has no venv
+    # beside it. Name the real checkout so _bootstrap still finds .eval-venv;
+    # an operator's explicit value wins. (Placed here, above the sentinel
+    # lines, so it merges cleanly with the comment #299 appends below them.)
+    ensure_harness_root(env)
     # The sentinel records bootstrap completion in this process, not in a
     # newly spawned process.
     env.pop("_AGENT_EVAL_BOOTSTRAP_DONE", None)

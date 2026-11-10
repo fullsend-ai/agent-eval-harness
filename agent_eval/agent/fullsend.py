@@ -56,6 +56,7 @@ OpenShell versions, sandbox image, agent harness commit) for the run-level
 
 import json
 import os
+from agent_eval._bootstrap import ensure_harness_root
 import re
 import shlex
 import shutil
@@ -569,6 +570,9 @@ class FullsendRunner(EvalRunner):
 
         env = os.environ.copy()
         env.update(entries)
+        # Staged copies of agent_eval have no venv beside them; name the real
+        # checkout for _bootstrap (see claude_code._build_env).
+        ensure_harness_root(env)
         returncode, console_out, console_err, duration = self._run(
             cmd, workspace, env, timeout_s)
 

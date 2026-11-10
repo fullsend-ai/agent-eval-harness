@@ -194,7 +194,7 @@ environment — it executes agent-generated tool calls, so it forwards only an
 | Model aliases | `ANTHROPIC_DEFAULT_OPUS_MODEL`, `ANTHROPIC_DEFAULT_SONNET_MODEL`, `ANTHROPIC_DEFAULT_HAIKU_MODEL`, `CLAUDE_CODE_SUBAGENT_MODEL` |
 | Vertex | `CLAUDE_CODE_USE_VERTEX`, `ANTHROPIC_VERTEX_PROJECT_ID`, `CLOUD_ML_REGION`, `CLAUDE_CODE_SKIP_VERTEX_AUTH`, `ANTHROPIC_VERTEX_BASE_URL`, `GOOGLE_APPLICATION_CREDENTIALS`, `GOOGLE_CLOUD_PROJECT`, `CLOUDSDK_CONFIG`, `CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE` |
 | Claude Code tuning | `CLAUDE_CODE_MAX_RETRIES`, `CLAUDE_CODE_AUTO_COMPACT_WINDOW`, `CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS` |
-| Harness | `MLFLOW_TRACKING_URI`, `MLFLOW_EXPERIMENT_NAME`, `AGENT_EVAL_RUNS_DIR` |
+| Harness | `MLFLOW_TRACKING_URI`, `MLFLOW_EXPERIMENT_NAME`, `AGENT_EVAL_RUNS_DIR`, `AGENT_EVAL_HARNESS_ROOT` (defaulted to the harness checkout when absent — see [environment variables](../reference/environment-variables.md)) |
 
 **Not** on the list: `CLAUDE_CODE_USE_BEDROCK`, `AWS_REGION` and every other `AWS_*`
 credential — Bedrock on this runner needs explicit `runner.env` entries (only the
@@ -293,7 +293,8 @@ protections. Use the default isolated workspace for Codex evals.
 Codex starts from an exact-name allowlist rather than the full host environment; the
 provider names on it are `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_ORG_ID`,
 `OPENAI_ORGANIZATION`, `OPENAI_PROJECT`, `OPENAI_MODEL`, `CODEX_HOME` and
-`CODEX_API_KEY` (plus the OS baseline, the MLflow variables and `AGENT_EVAL_RUNS_DIR`).
+`CODEX_API_KEY` (plus the OS baseline, the MLflow variables, `AGENT_EVAL_RUNS_DIR` and
+`AGENT_EVAL_HARNESS_ROOT`, the last defaulted to the harness checkout when absent).
 Anthropic and GCP credentials are deliberately not forwarded — LLM judges run in the
 harness process, not in the agent's. The model id is passed verbatim to
 `codex exec --model`, so `provider:/` ids do not apply and an `openrouter:/` skill

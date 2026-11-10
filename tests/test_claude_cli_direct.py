@@ -188,6 +188,15 @@ def test_build_env_without_a_binding_or_plan(monkeypatch):
     assert not (set(env) & MANAGED_ENV_KEYS) and env["RUNNER_OK"] == "1" and env["HOOK_OK"] == "1"
     env = ClaudeCodeRunner(subagent_model="claude-sonnet-4-5")._build_env()
     assert env["CLAUDE_CODE_USE_VERTEX"] == "1" and env["CLAUDE_CODE_SUBAGENT_MODEL"] == "claude-sonnet-4-5"
+    # The harness names its own checkout for the agent's skill scripts (a
+    # staged copy of agent_eval finds .eval-venv through it); an explicit
+    # operator value is forwarded instead, and a plan does not strip it.
+    from agent_eval._bootstrap import HARNESS_ROOT_ENV, harness_root
+    monkeypatch.delenv(HARNESS_ROOT_ENV, raising=False)   # ambient in harness-launched sessions
+    assert ClaudeCodeRunner()._build_env()[HARNESS_ROOT_ENV] == harness_root()
+    monkeypatch.setenv(HARNESS_ROOT_ENV, "/elsewhere/harness")
+    assert ClaudeCodeRunner()._build_env()[HARNESS_ROOT_ENV] == "/elsewhere/harness"
+    assert ClaudeCodeRunner(provider_plan=make_plan())._build_env()[HARNESS_ROOT_ENV] == "/elsewhere/harness"
 
 
 def test_vertex_credential_locations_stay_home_under_a_plan(monkeypatch):

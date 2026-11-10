@@ -3,6 +3,7 @@
 import errno
 import json
 import os
+from agent_eval._bootstrap import HARNESS_ROOT_ENV, ensure_harness_root
 import re
 import shutil
 import stat
@@ -862,7 +863,7 @@ class ClaudeCodeRunner(EvalRunner):
         "GOOGLE_APPLICATION_CREDENTIALS", "GOOGLE_CLOUD_PROJECT",
         "CLOUDSDK_CONFIG", "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE",
         "MLFLOW_TRACKING_URI", "MLFLOW_EXPERIMENT_NAME",
-        "AGENT_EVAL_RUNS_DIR",
+        "AGENT_EVAL_RUNS_DIR", HARNESS_ROOT_ENV,
     }
 
     # Forwarded from the ambient environment only without a provider plan: the
@@ -899,6 +900,11 @@ class ClaudeCodeRunner(EvalRunner):
         if self._plan is not None:
             ambient = ambient - self._VERTEX_CREDENTIAL_KEYS - self._VERTEX_PLACEHOLDER_KEYS
         env = {k: v for k, v in os.environ.items() if k in ambient}
+        # The agent's skill scripts import agent_eval from wherever they were
+        # staged — a copy has no venv beside it. Name the real checkout so
+        # _bootstrap can still activate .eval-venv (fallback only there). An
+        # operator's explicit value, forwarded above, wins (a blank one does not).
+        ensure_harness_root(env)
         for k, v in self._env.items():
             if v is None:
                 continue

@@ -2,6 +2,7 @@
 
 import json
 import os
+from agent_eval._bootstrap import HARNESS_ROOT_ENV, ensure_harness_root
 import shutil
 import signal
 import subprocess
@@ -42,7 +43,7 @@ class CodexRunner(EvalRunner):
         "OPENAI_ORGANIZATION", "OPENAI_PROJECT", "OPENAI_MODEL",
         "CODEX_HOME", "CODEX_API_KEY",
         "MLFLOW_TRACKING_URI", "MLFLOW_EXPERIMENT_NAME",
-        "AGENT_EVAL_RUNS_DIR",
+        "AGENT_EVAL_RUNS_DIR", HARNESS_ROOT_ENV,
     }
 
     @classmethod
@@ -495,6 +496,11 @@ class CodexRunner(EvalRunner):
     def _build_env(self, extra_env: Optional[dict] = None) -> dict:
         env = {key: value for key, value in os.environ.items()
                if key in self._SAFE_ENV_KEYS}
+        # The agent's skill scripts import agent_eval from wherever they were
+        # staged — a copy has no venv beside it. Name the real checkout so
+        # _bootstrap can still activate .eval-venv (fallback only there). An
+        # operator's explicit value, forwarded above, wins (a blank one does not).
+        ensure_harness_root(env)
         for key, value in self._env.items():
             if value is None:
                 continue

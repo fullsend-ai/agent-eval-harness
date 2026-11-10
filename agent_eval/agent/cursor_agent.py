@@ -17,6 +17,7 @@ are not accepted here; use the common runner fields instead.
 
 import json
 import os
+from agent_eval._bootstrap import HARNESS_ROOT_ENV, ensure_harness_root
 import re
 import shlex
 import shutil
@@ -67,6 +68,7 @@ _SAFE_ENV_KEYS = {
     "PATH", "HOME", "USER", "SHELL", "LANG", "LC_ALL", "TERM",
     "CURSOR_API_KEY", "CURSOR_API_ENDPOINT", "CURSOR_AGENT_BIN",
     "MLFLOW_TRACKING_URI", "MLFLOW_EXPERIMENT_NAME", "AGENT_EVAL_RUNS_DIR",
+    HARNESS_ROOT_ENV,
 }
 _CURSOR_PERMISSION_RE = re.compile(
     r"^\s*(Read|Grep|Glob|Edit|Write|Bash|Shell|WebFetch|WebSearch|Mcp)\((.*)\)\s*$"
@@ -655,6 +657,11 @@ class CursorAgentRunner(EvalRunner):
         """Build the same allowlisted baseline used by the CLI runners."""
         env = {key: value for key, value in os.environ.items()
                if key in _SAFE_ENV_KEYS}
+        # The agent's skill scripts import agent_eval from wherever they were
+        # staged — a copy has no venv beside it. Name the real checkout so
+        # _bootstrap can still activate .eval-venv (fallback only there). An
+        # operator's explicit value, forwarded above, wins (a blank one does not).
+        ensure_harness_root(env)
 
         def apply(values) -> None:
             for key, value in (values or {}).items():

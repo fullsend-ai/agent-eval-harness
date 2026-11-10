@@ -195,7 +195,9 @@ required, and both have been forgotten before:
    import** in any script that uses a third-party package (`yaml`, `mlflow`,
    `anthropic`, `jinja2`, `pandas`, …) or imports `agent_eval`. It puts
    `.eval-venv`'s site-packages on `sys.path`, or re-execs into the venv
-   interpreter on an ABI mismatch. It must precede the third-party imports —
+   interpreter on an ABI mismatch; the venv is found beside the package's real
+   location, else under `$AGENT_EVAL_HARNESS_ROOT` (set by the runners). It
+   must precede the third-party imports —
    including ones deferred inside functions, which still need the venv when they run.
 
 Stdlib-only scripts need neither. `scripts/ensure_deps.py` is exempt: it *creates*
@@ -252,14 +254,10 @@ surfaces the statistics section when `anova.json` is present — but stays stand
 dependency) for manual/CI-produced run sets.
 
 ### Prompt Mode Workflow (Agentic Documentation Testing)
-```text
-/eval-setup                            # Setup: dependencies, MLflow, API keys
-/eval-analyze --prompt examples/openshift-agentic-docs.md # Analyze: analyze docs, generate synthetic-generation eval.yaml
-/eval-dataset                          # Dataset: generate test cases from templates
-/eval-run --model sonnet               # Run: test agent against documentation
-/eval-review --run-id <id>             # Review: analyze documentation effectiveness
-/eval-mlflow --run-id <id>             # MLflow: sync dataset, log results
-```
+
+Same sequence, with `--skill my-skill` replaced by
+`--prompt examples/openshift-agentic-docs.md` at the `/eval-analyze` step: that generates a
+synthetic-generation eval.yaml, and `/eval-dataset` builds the cases from its seeds.
 
 ## Tests
 
