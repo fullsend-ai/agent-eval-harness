@@ -2,7 +2,6 @@
 
 import json
 import os
-from agent_eval._bootstrap import ensure_harness_root
 import re
 import shlex
 import subprocess
@@ -14,6 +13,7 @@ from typing import Optional, Union
 
 import yaml
 
+from agent_eval._bootstrap import _SENTINEL, ensure_harness_root
 from agent_eval.config import resolve_env_value
 
 from .base import EvalRunner, RunResult
@@ -231,9 +231,10 @@ class CliRunner(EvalRunner):
     def _build_env(self, extra_env=None) -> dict:
         """Build subprocess environment: inherit env, add extras."""
         env = os.environ.copy()
-        # Staged copies of agent_eval have no venv beside them; name the real
-        # checkout for _bootstrap (see claude_code._build_env).
-        ensure_harness_root(env)
+        # The harness process has already bootstrapped, and the sentinel that
+        # records it would make every skill script in the child skip activation
+        # — including the staged-copy fallback. It is per-process; strip it.
+        env.pop(_SENTINEL, None)
         for k, v in self._extra_env.items():
             resolved = resolve_env_value(v)
             if resolved is not None:
@@ -241,6 +242,12 @@ class CliRunner(EvalRunner):
         if extra_env:
             for k, v in extra_env.items():
                 env[k] = str(v)
+        # Last, after every overlay: the agent's skill scripts import agent_eval
+        # from wherever they were staged, and a copy has no venv beside it, so
+        # name the real checkout for _bootstrap (fallback only there). A
+        # non-blank value from the ambient env, runner.env or a hook wins; a
+        # blank one from any of them counts as unset.
+        ensure_harness_root(env)
         return env
 
     @staticmethod

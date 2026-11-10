@@ -2,7 +2,6 @@
 
 import json
 import os
-from agent_eval._bootstrap import HARNESS_ROOT_ENV, ensure_harness_root
 import shutil
 import signal
 import subprocess
@@ -12,6 +11,7 @@ import warnings
 from pathlib import Path
 from typing import Optional
 
+from agent_eval._bootstrap import HARNESS_ROOT_ENV, ensure_harness_root
 from agent_eval.config import (
     resolve_env_value, resolve_plugin_dir, resolve_plugin_skill_roots)
 
@@ -496,11 +496,6 @@ class CodexRunner(EvalRunner):
     def _build_env(self, extra_env: Optional[dict] = None) -> dict:
         env = {key: value for key, value in os.environ.items()
                if key in self._SAFE_ENV_KEYS}
-        # The agent's skill scripts import agent_eval from wherever they were
-        # staged — a copy has no venv beside it. Name the real checkout so
-        # _bootstrap can still activate .eval-venv (fallback only there). An
-        # operator's explicit value, forwarded above, wins (a blank one does not).
-        ensure_harness_root(env)
         for key, value in self._env.items():
             if value is None:
                 continue
@@ -511,6 +506,12 @@ class CodexRunner(EvalRunner):
             for key, value in extra_env.items():
                 if value is not None:
                     env[key] = str(value)
+        # Last, after every overlay: the agent's skill scripts import agent_eval
+        # from wherever they were staged, and a copy has no venv beside it, so
+        # name the real checkout for _bootstrap (fallback only there). A
+        # non-blank value from the ambient env, runner.env or a hook wins; a
+        # blank one from any of them counts as unset.
+        ensure_harness_root(env)
         return env
 
     @staticmethod

@@ -197,6 +197,10 @@ def test_build_env_without_a_binding_or_plan(monkeypatch):
     monkeypatch.setenv(HARNESS_ROOT_ENV, "/elsewhere/harness")
     assert ClaudeCodeRunner()._build_env()[HARNESS_ROOT_ENV] == "/elsewhere/harness"
     assert ClaudeCodeRunner(provider_plan=make_plan())._build_env()[HARNESS_ROOT_ENV] == "/elsewhere/harness"
+    monkeypatch.delenv(HARNESS_ROOT_ENV)
+    # A blank value through runner.env or a hook's extra_env counts as unset too.
+    assert ClaudeCodeRunner(env={HARNESS_ROOT_ENV: ""})._build_env()[HARNESS_ROOT_ENV] == harness_root()
+    assert ClaudeCodeRunner()._build_env(extra_env={HARNESS_ROOT_ENV: ""})[HARNESS_ROOT_ENV] == harness_root()
 
 
 def test_vertex_credential_locations_stay_home_under_a_plan(monkeypatch):

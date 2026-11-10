@@ -3,7 +3,6 @@
 import errno
 import json
 import os
-from agent_eval._bootstrap import HARNESS_ROOT_ENV, ensure_harness_root
 import re
 import shutil
 import stat
@@ -24,6 +23,7 @@ from .stream_capture import (
     classify_stream_errors,
     generation_ids_for_run, message_ids_for_run,
 )
+from agent_eval._bootstrap import HARNESS_ROOT_ENV, ensure_harness_root
 from agent_eval.tools.permissions import compile_permission_rules
 from agent_eval.config import (
     resolve_env_value, resolve_plugin_dir, resolve_plugin_skill_roots)
@@ -900,11 +900,6 @@ class ClaudeCodeRunner(EvalRunner):
         if self._plan is not None:
             ambient = ambient - self._VERTEX_CREDENTIAL_KEYS - self._VERTEX_PLACEHOLDER_KEYS
         env = {k: v for k, v in os.environ.items() if k in ambient}
-        # The agent's skill scripts import agent_eval from wherever they were
-        # staged — a copy has no venv beside it. Name the real checkout so
-        # _bootstrap can still activate .eval-venv (fallback only there). An
-        # operator's explicit value, forwarded above, wins (a blank one does not).
-        ensure_harness_root(env)
         for k, v in self._env.items():
             if v is None:
                 continue
@@ -931,6 +926,12 @@ class ClaudeCodeRunner(EvalRunner):
             # put a managed key back into the process env (CWE-15).
             for k in MANAGED_ENV_KEYS:
                 env.pop(k, None)
+        # Last, after every overlay: the agent's skill scripts import agent_eval
+        # from wherever they were staged, and a copy has no venv beside it, so
+        # name the real checkout for _bootstrap (fallback only there). A
+        # non-blank value from the ambient env, runner.env or a hook wins; a
+        # blank one from any of them counts as unset.
+        ensure_harness_root(env)
         return env
 
 

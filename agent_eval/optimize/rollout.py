@@ -19,7 +19,6 @@ import agent_eval._bootstrap  # noqa: F401 — activate harness venv before thir
 import argparse
 import json
 import os
-from agent_eval._bootstrap import ensure_harness_root
 import shutil
 import subprocess
 import sys
@@ -30,6 +29,7 @@ from pathlib import Path
 
 import yaml
 
+from agent_eval._bootstrap import ensure_harness_root
 from agent_eval.config import EvalConfig
 from agent_eval.optimize import artifact, export, intake, redact
 

@@ -303,6 +303,9 @@ def test_cursor_environment_matches_cli_runner_baseline(monkeypatch):
     assert runner._build_env()[HARNESS_ROOT_ENV] == harness_root()
     monkeypatch.setenv(HARNESS_ROOT_ENV, "/elsewhere/harness")
     assert runner._build_env()[HARNESS_ROOT_ENV] == "/elsewhere/harness"
+    monkeypatch.delenv(HARNESS_ROOT_ENV)
+    assert runner._build_env({HARNESS_ROOT_ENV: ""})[HARNESS_ROOT_ENV] == harness_root()   # blank hook value
+    assert _runner(monkeypatch, env={HARNESS_ROOT_ENV: ""})._build_env()[HARNESS_ROOT_ENV] == harness_root()
 
 
 def test_cursor_execute_success_collects_output_and_metrics(tmp_path, monkeypatch):

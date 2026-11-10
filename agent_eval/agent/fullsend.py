@@ -56,7 +56,6 @@ OpenShell versions, sandbox image, agent harness commit) for the run-level
 
 import json
 import os
-from agent_eval._bootstrap import ensure_harness_root
 import re
 import shlex
 import shutil
@@ -70,6 +69,7 @@ from typing import Optional
 
 import yaml
 
+from agent_eval._bootstrap import _SENTINEL, ensure_harness_root
 from agent_eval.config import resolve_env_value, workspace_source_roots
 from .base import EvalRunner, RunResult, terminate_process_group
 from .stream_capture import (
@@ -570,6 +570,9 @@ class FullsendRunner(EvalRunner):
 
         env = os.environ.copy()
         env.update(entries)
+        # The harness's own bootstrap sentinel is per-process: carried into
+        # the launcher it would make every skill script skip activation.
+        env.pop(_SENTINEL, None)
         # Staged copies of agent_eval have no venv beside them; name the real
         # checkout for _bootstrap (see claude_code._build_env).
         ensure_harness_root(env)

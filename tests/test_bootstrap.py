@@ -385,3 +385,35 @@ def test_staged_copy_under_abi_mismatch_execs_into_the_named_venv(tmp_path):
                           capture_output=True, text=True, timeout=120)
     assert marker.exists(), f"no execv from the staged copy:\n{proc.stdout}\n{proc.stderr}"
     assert marker.read_text() == str(root / ".eval-venv" / "bin" / "python3")
+
+
+def test_staged_copy_activates_under_the_environment_a_runner_builds(tmp_path, monkeypatch):
+    """Not a hand-made env: the one CliRunner._build_env produces, with the
+    parent's bootstrap sentinel set as it always is in a harness process. The
+    runner must strip the sentinel and name the checkout, or the staged copy's
+    _activate returns before it ever reads the fallback."""
+    from agent_eval.agent.cli_runner import CliRunner
+    root = _make_fake_plugin(tmp_path, _RUNNING)
+    staged = tmp_path / "workspace" / "skills" / "demo" / "scripts"
+    staged.mkdir(parents=True)
+    shutil.copytree(root / "agent_eval", staged / "agent_eval")
+    site = str(root / ".eval-venv" / "lib" / f"python{_RUNNING}" / "site-packages")
+    script = staged / "run.py"
+    script.write_text(textwrap.dedent(f"""
+        import os, sys
+        sys.path.insert(0, os.path.dirname(__file__))
+        import agent_eval._bootstrap
+        want = {site!r}
+        print("VENV_ON_PATH=" + str(any(os.path.realpath(p) == os.path.realpath(want) for p in sys.path)))
+    """))
+    monkeypatch.setenv("_AGENT_EVAL_BOOTSTRAP_DONE", "1")
+    monkeypatch.delenv("PYTHONPATH", raising=False)
+    # The runner names ITS checkout (the real harness); for this test the
+    # "checkout" is the fake plugin root, passed as an explicit value.
+    monkeypatch.setenv(_bootstrap.HARNESS_ROOT_ENV, str(root))
+    env = CliRunner("echo hi")._build_env()
+    assert "_AGENT_EVAL_BOOTSTRAP_DONE" not in env and env[_bootstrap.HARNESS_ROOT_ENV] == str(root)
+    proc = subprocess.run([sys.executable, str(script)], cwd=str(staged), env=env,
+                          capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, f"child failed:\n{proc.stdout}\n{proc.stderr}"
+    assert "VENV_ON_PATH=True" in proc.stdout, proc.stdout
