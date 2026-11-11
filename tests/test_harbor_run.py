@@ -708,7 +708,7 @@ class _FastSession:
 
 
 def _harbor_plan_run(tmp_path, monkeypatch, *, judge=None, env="podman", returncode=17, fake_env=None,
-                     api_key_env=None, guardrail=False, pins=("novita",)):
+                     api_key_env=None, guardrail=False, pins=("novita",), write_job=None):
     from openrouter_fakes import FAKE_KEY, FAKE_MGMT_KEY, FakeOpenRouter, quiet_atexit
 
     _config(tmp_path)
@@ -735,6 +735,8 @@ def _harbor_plan_run(tmp_path, monkeypatch, *, judge=None, env="podman", returnc
     def fake_popen(command, **kwargs):
         captured["command"] = command
         captured["env"] = kwargs["env"]
+        if write_job is not None:
+            write_job(tmp_path / "jobs")
         return FakeProcess()
 
     monkeypatch.setattr(run_mod.subprocess, "Popen", fake_popen)
@@ -782,6 +784,53 @@ def test_harbor_podman_run_under_a_plan(tmp_path, monkeypatch, capsys):
     assert "ANTHROPIC_BASE_URL" in env["AGENT_EVAL_PODMAN_PLAN_EXCLUDE"]
     assert (tmp_path / "out" / "provider" / "routing_snapshot.json").exists()      # preflight ran first
     assert "Provider: openrouter direct | model: z-ai/glm-5.2:exacto" in capsys.readouterr().err
+
+
+def _write_job_with_transcript_only_generation_ids(jobs_dir):
+    """A Harbor job whose trial stream-json carries only ``msg_*`` ids (no
+    ``requestId``) while the persisted Claude session transcript, exported
+    under ``agent/sessions`` by the stock claude-code agent, has the
+    ``gen-*`` ids (issue #298)."""
+    trial = jobs_dir / "job-1" / "case-1__abc"
+    (trial / "verifier").mkdir(parents=True)
+    (trial / "verifier" / "reward.json").write_text(json.dumps({"reward": 1.0}))
+    (trial / "verifier" / "judges.json").write_text(json.dumps(
+        {"reward": 1.0, "per_judge": {"files_exist": {"value": True, "rationale": "ok"}}}))
+    agent = trial / "agent"
+    agent.mkdir()
+    (agent / "claude-code.txt").write_text("\n".join(json.dumps(ev) for ev in (
+        {"type": "system", "subtype": "init", "session_id": "s1", "claude_code_version": "2.1.314"},
+        {"type": "assistant", "message": {"id": "msg_1", "role": "assistant", "model": "z-ai/glm-5.2"}},
+        {"type": "assistant", "message": {"id": "msg_2", "role": "assistant", "model": "z-ai/glm-5.2"}},
+        {"type": "result", "session_id": "s1", "total_cost_usd": 0.5, "num_turns": 2, "duration_ms": 10},
+    )) + "\n")
+    session = agent / "sessions" / "projects" / "-app" / "s1.jsonl"
+    session.parent.mkdir(parents=True)
+    session.write_text("\n".join(json.dumps(ev) for ev in (
+        {"type": "assistant", "requestId": "gen-fake-1", "message": {"id": "msg_1", "role": "assistant"}},
+        {"type": "assistant", "requestId": "gen-fake-1", "message": {"id": "msg_1", "role": "assistant"}},
+        {"type": "assistant", "requestId": "gen-fake-2", "message": {"id": "msg_2", "role": "assistant"}},
+    )) + "\n")
+
+
+def test_harbor_plan_backfills_generation_ids_from_the_session_transcript(tmp_path, monkeypatch):
+    from agent_eval.providers.ledger import read_ledger
+
+    result, _, fake, _ = _harbor_plan_run(tmp_path, monkeypatch, returncode=0,
+                                          write_job=_write_job_with_transcript_only_generation_ids)
+    assert result == 0
+    out = tmp_path / "out"
+    run_result = json.loads((out / "run_result.json").read_text())
+    assert run_result["generation_ids"] == ["gen-fake-1", "gen-fake-2"]
+    assert run_result["message_ids"] == ["msg_1", "msg_2"]
+    rows = [r for r in read_ledger(out) if r.get("source") == "generation"]
+    assert sorted(r["gen_id"] for r in rows) == ["gen-fake-1", "gen-fake-2"]     # one row per generation
+    assert all(r["status"] == "ok" and r["provider"] == "novita" for r in rows)
+    assert all(r["case_id"] == "case-1" for r in rows)
+    assert set(fake.generation_calls) == {"gen-fake-1", "gen-fake-2"}
+    assert run_result["cost_source"] == "openrouter:generation"
+    assert run_result["routing"]["compliant"] == 2 and run_result["routing"]["violations"] == []
+    assert run_result["routing"]["unattributed"] == 0
 
 
 def test_harbor_keeps_the_verifier_key_only_for_an_openrouter_judge(tmp_path, monkeypatch):

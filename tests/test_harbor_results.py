@@ -567,3 +567,133 @@ def test_price_trials_joins_each_trial_against_its_own_ids():
     view = R.trial_costs(trials)
     assert [v["trial_dir"] for v in view] == ["c__1", "c__2", "d__1"] and "message_ids" not in view[0]
 
+
+
+# --- issue #298: generation ids from the persisted Claude session transcript -----
+
+def _write_trial_agent(agent_dir: Path, stream_events: list, sessions: dict | None = None) -> None:
+    """Write Harbor's captured stream-json plus persisted session transcripts
+    (``sessions/projects/<rel path>`` → raw text), as the stock claude-code
+    agent leaves them under ``CLAUDE_CONFIG_DIR=/logs/agent/sessions``."""
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    (agent_dir / "claude-code.txt").write_text(
+        "\n".join(json.dumps(ev) for ev in stream_events) + "\n")
+    for rel, text in (sessions or {}).items():
+        path = agent_dir / "sessions" / "projects" / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+
+
+def _single_step_trial(tmp_path: Path, name: str = "trial__case-1") -> Path:
+    tdir = tmp_path / "job" / name
+    (tdir / "verifier").mkdir(parents=True)
+    (tdir / "verifier" / "reward.json").write_text(json.dumps({"reward": 1.0}))
+    return tdir
+
+
+def _jsonl(*records) -> str:
+    return "\n".join(json.dumps(r) for r in records) + "\n"
+
+
+_MSG_ONLY_STREAM = [
+    {"type": "system", "subtype": "init", "session_id": "s1", "claude_code_version": "2.1.314"},
+    {"type": "assistant", "message": {"id": "msg_01", "role": "assistant", "model": "z-ai/glm-5.2"}},
+    {"type": "assistant", "message": {"id": "msg_02", "role": "assistant", "model": "z-ai/glm-5.2"}},
+    {"type": "result", "session_id": "s1", "total_cost_usd": 0.4, "num_turns": 2, "duration_ms": 10},
+]
+
+
+def test_generation_ids_recovered_from_persisted_session_transcript(tmp_path):
+    """Claude Code 2.1.314's shape: stream-json has only ``msg_*`` ids and no
+    ``requestId``; the persisted transcript carries the ``gen-*`` ids."""
+    tdir = _single_step_trial(tmp_path)
+    _write_trial_agent(tdir / "agent", _MSG_ONLY_STREAM, {
+        "-app/s1.jsonl": _jsonl(
+            {"type": "user", "message": {"role": "user", "content": "hi"}},
+            {"type": "assistant", "requestId": "gen-1",
+             "message": {"id": "msg_01", "role": "assistant"}},
+            {"type": "assistant", "requestId": "gen-1",          # one entry per content block
+             "message": {"id": "msg_01", "role": "assistant"}},
+            {"type": "assistant", "requestId": "gen-2",
+             "message": {"id": "msg_02", "role": "assistant"}}),
+        "-app/s1/subagents/agent-a1.jsonl": _jsonl(
+            {"type": "assistant", "requestId": "gen-sub-1",
+             "message": {"id": "msg_s1", "role": "assistant"}}),
+    })
+    record = R.parse_trial(tdir)
+    assert record["message_ids"] == ["msg_01", "msg_02"]
+    assert record["generation_ids"] == ["gen-1", "gen-2", "gen-sub-1"]
+    assert record["cost_usd"] == 0.4 and record["agent_version"] == "2.1.314"
+
+
+def test_stream_and_transcript_generation_ids_union_without_duplicates(tmp_path):
+    """The stream's ``requestId``, the legacy ``assistant.message.id`` and the
+    transcript are unioned; stream order first, an id in both counted once."""
+    tdir = _single_step_trial(tmp_path)
+    _write_trial_agent(tdir / "agent", [
+        {"type": "assistant", "requestId": "gen-b", "message": {"id": "msg_b"}},
+        {"type": "assistant", "message": {"id": "gen-legacy"}},
+    ], {"-app/s1.jsonl": _jsonl(
+        {"type": "assistant", "requestId": "gen-b", "message": {"id": "msg_b", "role": "assistant"}},
+        {"type": "assistant", "requestId": "gen-a", "message": {"id": "msg_a", "role": "assistant"}})})
+    record = R.parse_trial(tdir)
+    assert record["generation_ids"] == ["gen-b", "gen-legacy", "gen-a"]
+
+
+def test_stream_only_trial_without_transcript_is_unchanged(tmp_path):
+    tdir = _single_step_trial(tmp_path)
+    _write_trial_agent(tdir / "agent", [
+        {"type": "assistant", "requestId": "gen-1", "message": {"id": "msg_1"}}])
+    assert R.parse_trial(tdir)["generation_ids"] == ["gen-1"]
+    tdir2 = _single_step_trial(tmp_path, "trial__case-2")
+    _write_trial_agent(tdir2 / "agent", _MSG_ONLY_STREAM)
+    assert R.parse_trial(tdir2)["generation_ids"] == []
+
+
+def test_malformed_session_transcript_lines_are_skipped(tmp_path):
+    tdir = _single_step_trial(tmp_path)
+    _write_trial_agent(tdir / "agent", _MSG_ONLY_STREAM, {
+        "-app/s1.jsonl": "not json\n[1, 2]\n" + _jsonl(
+            {"type": "assistant", "requestId": 7, "message": "x"},
+            {"type": "assistant", "requestId": "gen-ok", "message": {"id": "msg_01"}}),
+        "-app/notes.txt": json.dumps({"type": "assistant", "requestId": "gen-not-jsonl"}),
+    })
+    (tdir / "agent" / "sessions" / "projects" / "-app" / "bad.jsonl").write_bytes(
+        b"\xff\xfe garbage\n" + json.dumps({"type": "assistant", "requestId": "gen-after"}).encode() + b"\n")
+    assert R.parse_trial(tdir)["generation_ids"] == ["gen-after", "gen-ok"]
+
+
+def test_session_transcript_symlinks_are_not_followed(tmp_path):
+    """The agent controls /logs/agent: a planted symlink must not make the
+    host parser read files outside the exported sessions directory."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "x.jsonl").write_text(_jsonl({"type": "assistant", "requestId": "gen-outside"}))
+    tdir = _single_step_trial(tmp_path)
+    _write_trial_agent(tdir / "agent", _MSG_ONLY_STREAM,
+                       {"-app/s1.jsonl": _jsonl({"type": "assistant", "requestId": "gen-in"})})
+    projects = tdir / "agent" / "sessions" / "projects"
+    (projects / "-app" / "link.jsonl").symlink_to(outside / "x.jsonl")
+    (projects / "linked-dir").symlink_to(outside, target_is_directory=True)
+    assert R.parse_trial(tdir)["generation_ids"] == ["gen-in"]
+
+    tdir2 = _single_step_trial(tmp_path, "trial__case-2")
+    _write_trial_agent(tdir2 / "agent", _MSG_ONLY_STREAM)
+    (tdir2 / "agent" / "sessions").mkdir()
+    (tdir2 / "agent" / "sessions" / "projects").symlink_to(outside, target_is_directory=True)
+    assert R.parse_trial(tdir2)["generation_ids"] == []
+
+
+def test_multi_step_trial_unions_session_transcript_ids_across_steps(tmp_path):
+    tdir = tmp_path / "job" / "trial__case-ms"
+    for step, gens in (("create", ["gen-a", "gen-b"]), ("assess", ["gen-b", "gen-c"])):
+        sdir = tdir / "steps" / step
+        (sdir / "verifier").mkdir(parents=True)
+        (sdir / "verifier" / "reward.json").write_text(json.dumps({"reward": 1.0}))
+        _write_trial_agent(sdir / "agent", _MSG_ONLY_STREAM, {
+            f"-app/{step}.jsonl": _jsonl(*({"type": "assistant", "requestId": g,
+                                            "message": {"id": f"msg_{g}", "role": "assistant"}}
+                                           for g in gens))})
+    record = R.parse_trial(tdir)
+    assert sorted(record["generation_ids"]) == ["gen-a", "gen-b", "gen-c"]
+    assert len(record["generation_ids"]) == 3

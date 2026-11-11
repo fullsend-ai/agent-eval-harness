@@ -15,6 +15,8 @@ import json
 from datetime import datetime
 from pathlib import Path
 
+from agent_eval.agent.stream_capture import extract_generation_ids
+
 # Stands in for a step id on single-step trials, which have no steps/ dir.
 _WHOLE_TASK = "(whole task)"
 
@@ -190,13 +192,60 @@ def _extract_transcript_metrics(transcript_path: Path) -> dict:
     return result
 
 
+def _session_generation_ids(agent_dir: Path) -> list:
+    """OpenRouter generation ids from the trial's persisted Claude sessions.
+
+    The stock Harbor claude-code agent runs Claude Code with
+    ``CLAUDE_CONFIG_DIR=/logs/agent/sessions``, so the persisted session
+    transcripts (``sessions/projects/<cwd-slug>/<session>.jsonl`` and the
+    nested subagent transcripts) are exported with the trial's agent logs.
+    Some Claude Code versions omit ``requestId`` from stream-json but keep
+    it in these transcripts (spec 014 probe #28). The files are
+    agent-influenced: symlinks and paths resolving outside the sessions
+    directory are skipped, and malformed lines are ignored.
+    """
+    projects = agent_dir / "sessions" / "projects"
+    if projects.is_symlink() or not projects.is_dir():
+        return []
+    try:
+        root = projects.resolve(strict=True)
+    except OSError:
+        return []
+    ids: set = set()
+    for transcript in sorted(root.rglob("*.jsonl")):
+        if transcript.is_symlink():
+            continue
+        try:
+            resolved = transcript.resolve(strict=True)
+        except OSError:
+            continue
+        if not resolved.is_file() or not resolved.is_relative_to(root):
+            continue
+        try:
+            with open(resolved, errors="replace") as stream:
+                ids |= extract_generation_ids(stream)
+        except OSError:
+            continue
+    return sorted(ids)
+
+
 def _agent_transcript_metrics(agent_dir: Path) -> dict:
-    """Read the transcript emitted by the active stock Harbor agent."""
+    """Read the transcript emitted by the active stock Harbor agent.
+
+    Generation ids are the union of the captured stream-json (``requestId``
+    or the legacy ``assistant.message.id``) and the persisted Claude session
+    transcripts Harbor exports alongside it.
+    """
+    result = _empty_transcript_metrics()
     for name in ("claude-code.txt", "codex.txt"):
         path = agent_dir / name
         if path.is_file():
-            return _extract_transcript_metrics(path)
-    return _empty_transcript_metrics()
+            result = _extract_transcript_metrics(path)
+            break
+    for gen_id in _session_generation_ids(agent_dir):
+        if gen_id not in result["generation_ids"]:
+            result["generation_ids"].append(gen_id)
+    return result
 
 
 def _number(mapping: dict, key: str):
