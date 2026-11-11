@@ -14,10 +14,12 @@ Usage:
 import agent_eval._bootstrap  # noqa: F401 — auto-activate venv
 
 import argparse
+import errno
 import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -40,27 +42,181 @@ _HARNESS_FILES = {
     "run_result.json", "batch.yaml", "case_order.yaml",
 }
 
+# Every open beneath an agent-written root goes through these flags.
+# `O_NOFOLLOW` refuses a symlink as the final component and `O_DIRECTORY` a
+# non-directory; opening one component at a time relative to its parent's
+# descriptor means no component is ever resolved through a link. `O_NONBLOCK`
+# stops a FIFO swapped in for a file from wedging collection — the same
+# treatment as `agent_eval/hooks.py::_read_hook_output_file` (#264).
+_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+_ROOT_FLAGS = os.O_RDONLY | os.O_DIRECTORY | _CLOEXEC
+_DIR_FLAGS = _ROOT_FLAGS | os.O_NOFOLLOW
+_FILE_FLAGS = (os.O_RDONLY | os.O_NOFOLLOW | _CLOEXEC
+               | getattr(os, "O_NONBLOCK", 0))
 
 
+def _open_dir_at(root_fd, parts):
+    """A descriptor for the directory *parts* beneath *root_fd*, link-free.
 
-def _confined(root: Path, path: Path) -> bool:
-    """True if *path* sits under *root* with no symlink on the way.
+    Each component is opened relative to its parent's descriptor with
+    `O_NOFOLLOW | O_DIRECTORY`, so a symlink anywhere on the way — including
+    one swapped in after an earlier look — fails the open (`ENOTDIR` /
+    `ELOOP`) instead of being followed. Confinement is a property of how the
+    path is opened rather than of a check made beforehand, which is what
+    closes the window a pathname check leaves before the pathname is reused.
+    Raises `OSError`; the caller owns the returned descriptor.
+    """
+    fd = os.dup(root_fd)
+    try:
+        for part in parts:
+            child = os.open(part, _DIR_FLAGS, dir_fd=fd)
+            os.close(fd)
+            fd = child
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
 
-    Decided from the path components before anything is traversed or copied
-    (the same order `score.py::_resolve_under` uses): a symlinked output
-    root, or a symlinked ancestor of it, would otherwise hand `os.scandir`
-    a directory outside the workspace and pull its files into the artifacts.
-    An `OSError` while checking counts as "not confined".
+
+def _locate_at(root_fd, parts):
+    """What the declared output *parts* beneath *root_fd* is, before any
+    traversal or copy.
+
+    ``None`` when it does not exist. That is decided following links, as
+    `Path.exists()` did, so a missing output or a dangling link is still
+    "nothing to collect" rather than a loss. Otherwise ``"dir"``, ``"file"``,
+    or ``"refused"`` when it exists but cannot be reached link-free: a
+    symlinked output root or ancestor, a non-regular file, or a component
+    that cannot be opened. The caller records a refused output as lost.
+    """
+    if not parts:
+        return "dir"
+    try:
+        os.stat(os.path.join(*parts), dir_fd=root_fd)
+    except OSError as e:
+        if e.errno in (errno.ENOENT, errno.ENOTDIR, errno.ELOOP):
+            return None
+        return "refused"
+    try:
+        parent = _open_dir_at(root_fd, parts[:-1])
+    except OSError:
+        return "refused"
+    try:
+        try:
+            fd = os.open(parts[-1], _DIR_FLAGS, dir_fd=parent)
+        except NotADirectoryError:
+            pass  # a file — or a symlink, which Linux reports the same way
+        except OSError:
+            return "refused"
+        else:
+            os.close(fd)
+            return "dir"
+        try:
+            fd = os.open(parts[-1], _FILE_FLAGS, dir_fd=parent)
+        except OSError:
+            return "refused"
+        try:
+            return "file" if stat.S_ISREG(os.fstat(fd).st_mode) else "refused"
+        finally:
+            os.close(fd)
+    finally:
+        os.close(parent)
+
+
+def _dirent_kind(entry):
+    """``"dir"``, ``"file"`` or ``None`` (a symlink, or anything else).
+
+    Never follows a link. On a descriptor-based `os.scandir` the type comes
+    from the directory entry itself, falling back to an `lstat` relative to
+    the same descriptor.
+    """
+    if entry.is_symlink():
+        return None
+    if entry.is_dir(follow_symlinks=False):
+        return "dir"
+    if entry.is_file(follow_symlinks=False):
+        return "file"
+    return None
+
+
+def _walk_at(root_fd, parts=()):
+    """``(files, unlistable)`` beneath the directory *parts* of *root_fd*,
+    as paths relative to *root_fd*.
+
+    `Path.rglob` does **not** raise on a directory it cannot open: it yields
+    the entry and nothing beneath it. The workspace is agent-written, so a
+    `chmod 000` on an output sub-directory silently kept its contents out of
+    the case directory — where the scoring pass's own listability probe
+    (`score.py::_require_listable`, #276) would have caught them. Collection
+    runs earlier, so it has to notice: a directory that cannot be opened or
+    listed is returned in *unlistable*, never dropped.
+
+    Symlinks are neither descended into nor returned, matching what `rglob`
+    did. Every directory is opened through `_open_dir_at`, so one swapped
+    for a link mid-walk is unlistable rather than followed.
+    """
+    files, unlistable = [], []
+    stack = [tuple(parts)]
+    while stack:
+        cur = stack.pop()
+        try:
+            fd = _open_dir_at(root_fd, cur)
+            try:
+                with os.scandir(fd) as entries:
+                    children = sorted((e.name, _dirent_kind(e))
+                                      for e in entries)
+            finally:
+                os.close(fd)
+        except OSError:
+            unlistable.append(Path(*cur))
+            continue
+        for name, kind in children:
+            if kind == "dir":
+                stack.append(cur + (name,))
+            elif kind == "file":
+                files.append(Path(*cur, name))
+    return sorted(files), sorted(unlistable)
+
+
+def _copy_at(root_fd, parts, dest):
+    """Copy the regular file *parts* beneath *root_fd* to *dest*.
+
+    False — nothing copied — when it cannot be opened link-free or is not a
+    regular file. The bytes are read from the descriptor that was opened and
+    checked with `fstat`, never from a second open by pathname: a swap of the
+    file, or of any directory above it, for a symlink before the open is
+    refused by the open, and a swap after it changes nothing, because the
+    file is already held. Mode and timestamps carry over as `shutil.copy2`
+    did.
     """
     try:
-        cur = root
-        for part in path.relative_to(root).parts:
-            cur = cur / part
-            if cur.is_symlink():
-                return False
-        return path.resolve().is_relative_to(root.resolve())
-    except (OSError, ValueError):
+        parent = _open_dir_at(root_fd, parts[:-1])
+        try:
+            fd = os.open(parts[-1], _FILE_FLAGS, dir_fd=parent)
+        finally:
+            os.close(parent)
+    except OSError:
         return False
+    # Check the kind before wrapping the descriptor: `fdopen` on a directory
+    # raises, and a path swapped from file to directory since it was listed
+    # must be refused (False), not abort collection. Until `fdopen` owns the
+    # descriptor, this block is responsible for closing it.
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            os.close(fd)
+            return False
+        src = os.fdopen(fd, "rb")
+    except OSError:
+        os.close(fd)
+        return False
+    with src:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        with open(dest, "wb") as out:
+            shutil.copyfileobj(src, out)
+    os.utime(dest, ns=(st.st_atime_ns, st.st_mtime_ns))
+    os.chmod(dest, stat.S_IMODE(st.st_mode))
+    return True
 
 
 def _note_lost(results, output_dir, case_id, rel):
@@ -89,42 +245,116 @@ def _note_lost(results, output_dir, case_id, rel):
 
 
 def _walk_output_files(src: Path, root: Path = None):
-    """``(files, unlistable)`` under *src*.
+    """``(files, unlistable)`` under *src*, as paths — `_walk_at` for a
+    caller holding a pathname rather than a descriptor.
 
-    `Path.rglob` does **not** raise on a directory it cannot open: it yields
-    the entry and nothing beneath it. The workspace is agent-written, so a
-    `chmod 000` on an output sub-directory silently kept its contents out of
-    the case directory — where the scoring pass's own listability probe
-    (`score.py::_require_listable`, #276) would have caught them. Collection
-    runs earlier, so it has to notice.
-
-    Symlinked directories are not descended into, matching what `rglob` did.
-    When *root* is given, *src* itself must be confined under it (see
-    `_confined`); otherwise nothing is traversed and *src* is reported as
-    lost, because evidence the agent routed through a link cannot be
-    collected safely.
+    When *root* is given, *src* is reached from it link-free, so a symlinked
+    *src* or ancestor is reported unlistable and nothing beneath it is
+    traversed: evidence the agent routed through a link cannot be collected
+    safely.
     """
-    if root is not None and not _confined(root, src):
+    src = Path(src)
+    base = Path(root) if root is not None else src
+    try:
+        parts = src.relative_to(base).parts
+        base_fd = os.open(base, _ROOT_FLAGS)
+    except (OSError, ValueError):
         return [], [src]
-    files, unlistable = [], []
-    stack = [src]
-    while stack:
-        directory = stack.pop()
-        try:
-            with os.scandir(directory) as entries:
-                children = sorted(entries, key=lambda e: e.name)
-        except OSError:
-            unlistable.append(directory)
+    try:
+        files, unlistable = _walk_at(base_fd, parts)
+    finally:
+        os.close(base_fd)
+    return [base / f for f in files], [base / d for d in unlistable]
+
+
+def _collect_outputs(root_fd, outputs, output_dir, results, loss_cases,
+                     assign):
+    """Collect every declared output beneath one source root.
+
+    The only collection routine. Batch mode (`main`) and per-case mode
+    (`_collect_per_case`) differ in their arguments, not in their code, so
+    an invariant stated here holds for both — three findings on #291 were
+    "the per-case loop had it, the batch loop did not".
+
+    *root_fd*: a descriptor for the source root — the workspace in batch
+    mode, ``cases/<id>`` in per-case mode. Everything beneath it is opened
+    through `_open_dir_at` / `_copy_at`, never by pathname.
+
+    *loss_cases*: the cases a loss beneath this root is charged to. Per-case,
+    the one case. Batch, every case in case_order: output reaches cases
+    through `batch_pattern` / grouping, so a directory that could not be
+    listed cannot be attributed — any file inside might have mapped to any
+    of them. Over-attributing is the safe direction: a false block is
+    recoverable (fix the directory, re-collect), a silent loss is the bug.
+
+    *assign(files, output_cfg)*: maps the collected files (paths relative to
+    the root) to ``{case_id: [files]}`` — positional / `batch_pattern` for
+    batch, one-to-one for per-case.
+
+    Invariants, each held here and nowhere else:
+
+    - a tool-only output (no filesystem path) is skipped;
+    - what an output root is, and whether it can be reached link-free, is
+      decided before anything beneath it is traversed or copied, and a
+      refused root is a loss, not a skip (`_locate_at`);
+    - a directory that cannot be listed is recorded, never silently skipped
+      (`_walk_at`);
+    - nothing is read except through a descriptor opened link-free
+      (`_copy_at`), and a file that cannot be is recorded;
+    - every loss goes through `_note_lost`, which also keeps the case in
+      the run and escapes the agent-controlled path before it is logged.
+    """
+    for output_cfg in outputs:
+        if not output_cfg.path:
+            # Tool-only output: no filesystem path. Defaulting it to "."
+            # walked the whole root, so an unreadable directory unrelated to
+            # any declared output — a private scratch dir — was recorded as
+            # lost evidence against every case and blocked the run.
             continue
-        for entry in children:
-            path = Path(entry.path)
-            if entry.is_symlink():
+        out_path = _safe_path_component(output_cfg.path, "output path")
+        parts = Path(out_path).parts
+        kind = _locate_at(root_fd, parts)
+        if kind is None:
+            continue
+        if kind == "dir":
+            files, unlistable = _walk_at(root_fd, parts)
+            base = len(parts)
+        elif kind == "file":
+            files, unlistable = [Path(out_path)], []
+            base = len(parts) - 1
+        else:
+            files, unlistable, base = [], [Path(out_path)], 0
+
+        for d in unlistable:
+            for case_id in loss_cases:
+                _note_lost(results, output_dir, case_id, d)
+
+        if not files:
+            continue
+
+        for case_id, matched_files in assign(files, output_cfg).items():
+            if not matched_files:
                 continue
-            if entry.is_dir(follow_symlinks=False):
-                stack.append(path)
-            elif entry.is_file(follow_symlinks=False):
-                files.append(path)
-    return sorted(files), sorted(unlistable)
+            case_output = output_dir / "cases" / case_id / out_path
+            case_output.mkdir(parents=True, exist_ok=True)
+            for rel in matched_files:
+                # Preserve subdirectory structure below the output root.
+                dest = case_output.joinpath(*rel.parts[base:])
+                if not _copy_at(root_fd, rel.parts, dest):
+                    _note_lost(results, output_dir, case_id, rel)
+            results.setdefault(case_id, {})[out_path] = len(matched_files)
+
+
+def _map_batch(files, output_cfg, case_order):
+    """Batch `assign` for `_collect_outputs`: the output's `batch_pattern`
+    when configured, otherwise prefix grouping mapped positionally."""
+    if output_cfg.batch_pattern:
+        return _collect_batch(files, case_order, output_cfg.batch_pattern)
+    mapping = {}
+    for entry, group in zip(case_order, _group_files(files, len(case_order))):
+        cid = entry["case_id"] if isinstance(entry, dict) else entry
+        mapping[cid] = group
+    return mapping
 
 
 def _safe_path_component(value, field):
@@ -168,85 +398,22 @@ def main():
     results = {}
 
     # Validate case IDs from case_order
+    case_ids = []
     for entry in case_order:
         cid = entry["case_id"] if isinstance(entry, dict) else entry
         _safe_path_component(cid, "case_id")
+        case_ids.append(cid)
 
-    # Collect from each output path defined in config (directory or file)
-    for output_cfg in config.outputs:
-        if not output_cfg.path:
-            # Tool-only output: no filesystem path, same as the per-case
-            # branch. Defaulting it to "." walked the whole workspace, so an
-            # unreadable directory with nothing to do with any declared
-            # output — a private scratch dir — was recorded as lost evidence
-            # against every case and blocked the run. `rglob` ignored such
-            # directories silently, so that false block would be new here.
-            continue
-        out_path = _safe_path_component(output_cfg.path, "output path")
-        src = workspace / out_path
-        if not src.exists():
-            continue
-
-        # Handle single-file output paths
-        if src.is_file():
-            files = [src]
-            src_dir = src.parent
-            if not _confined(workspace, src):
-                files, unlistable = [], [src]
-            else:
-                unlistable = []
-        else:
-            src_dir = src
-            # Get all files in the output directory (including subdirs).
-            # Not `rglob`: it silently skips a directory it cannot open.
-            files, unlistable = _walk_output_files(src_dir, workspace)
-
-        # Batch output reaches cases through `batch_pattern` / grouping, so a
-        # directory we could not list cannot be attributed to one case: any
-        # file inside it might have mapped to any of them. Record it against
-        # EVERY case in case_order. Over-attributing is the safe direction —
-        # a false block is recoverable (fix the directory, re-collect), a
-        # silent loss is the bug this guards against.
-        for d in unlistable:
-            for entry in case_order:
-                cid = entry["case_id"] if isinstance(entry, dict) else entry
-                _note_lost(results, output_dir, cid, d.relative_to(workspace))
-
-        if not files:
-            continue
-
-        if output_cfg.batch_pattern:
-            # Batch mode: use the configured pattern to map files to cases
-            mapping = _collect_batch(files, case_order, output_cfg.batch_pattern)
-        else:
-            # Auto-detect mode: group files by common prefix
-            groups = _group_files(files, len(case_order))
-            mapping = {}
-            for i, group in enumerate(groups):
-                if i >= len(case_order):
-                    break
-                entry = case_order[i]
-                cid = entry["case_id"] if isinstance(entry, dict) else entry
-                mapping[cid] = group
-
-        for case_id, matched_files in mapping.items():
-            if not matched_files:
-                continue
-            case_output = output_dir / "cases" / case_id / out_path
-            case_output.mkdir(parents=True, exist_ok=True)
-
-            for src_file in matched_files:
-                if not _confined(workspace, src_file):
-                    _note_lost(results, output_dir, case_id,
-                               src_file.relative_to(workspace))
-                    continue
-                # Preserve subdirectory structure relative to src_dir
-                rel = src_file.relative_to(src_dir)
-                dest = case_output / rel
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(src_file, dest)
-
-            results.setdefault(case_id, {})[out_path] = len(matched_files)
+    # The workspace root is the harness's own (`--workspace`), so it is
+    # opened as given; everything beneath it is agent-written.
+    ws_fd = os.open(workspace, _ROOT_FLAGS)
+    try:
+        _collect_outputs(
+            ws_fd, config.outputs, output_dir, results, case_ids,
+            lambda files, output_cfg: _map_batch(files, output_cfg,
+                                                 case_order))
+    finally:
+        os.close(ws_fd)
 
     # Save collection summary
     with open(output_dir / "collection.json", "w") as f:
@@ -300,84 +467,58 @@ def _collect_per_case(workspace, output_dir, config):
     output_dir.mkdir(parents=True, exist_ok=True)
     results = {}
 
-    for case_dir in sorted(d for d in cases_dir.iterdir() if d.is_dir()):
-        case_id = case_dir.name
-        # `is_dir()` follows symlinks, so `cases/<id> -> /outside` reaches
-        # here and every path under it then resolves "under" that root. The
-        # confinement check below is relative to the case dir, so the root
-        # itself has to be checked against the workspace — the same ordering
-        # mistake one level up.
-        if not _confined(workspace, case_dir):
-            # Record it like every other unconfined path in this file, and
-            # keep the case in the run. Warning and moving on would hand the
-            # agent the suppression this whole change exists to stop: replace
-            # your case directory with a symlink and the unfavourable
-            # artifacts are simply never collected. Worse, with nothing
-            # copied there is no `cases/<id>` for `_get_case_dirs` to find,
-            # so the case would leave the denominator entirely rather than
-            # being marked incomplete.
-            _note_lost(results, output_dir, case_id, case_dir.name)
-            continue
-
-        for output_cfg in config.outputs:
-            if not output_cfg.path:
-                continue  # Skip tool-only outputs (no filesystem path)
-            out_path = _safe_path_component(output_cfg.path, "output path")
-            src = case_dir / out_path
-
-            if not src.exists():
+    ws_fd = os.open(workspace, _ROOT_FLAGS)
+    try:
+        for case_dir in sorted(d for d in cases_dir.iterdir() if d.is_dir()):
+            case_id = case_dir.name
+            # The case directory is the source root, and it is agent-written
+            # too: `is_dir()` follows symlinks, so `cases/<id> -> /outside`
+            # reaches here. Opening it link-free from the workspace refuses
+            # that (and a `cases` link above it) before anything is read.
+            try:
+                case_fd = _open_dir_at(ws_fd, ("cases", case_id))
+            except OSError:
+                # Record it like every other refused path, and keep the case
+                # in the run. Warning and moving on would hand the agent a
+                # suppression: replace your case directory with a symlink and
+                # the unfavourable artifacts are simply never collected —
+                # and with no `cases/<id>` for `_get_case_dirs` to find, the
+                # case would leave the denominator instead of being marked
+                # incomplete.
+                _note_lost(results, output_dir, case_id, case_id)
                 continue
+            try:
+                _collect_outputs(
+                    case_fd, config.outputs, output_dir, results, [case_id],
+                    lambda files, _output_cfg, cid=case_id: {cid: files})
 
-            if src.is_file():
-                if _confined(case_dir, src):
-                    files, unlistable = [src], []
-                else:
-                    files, unlistable = [], [src]
-                src_base = src.parent
-            else:
-                files, unlistable = _walk_output_files(src, case_dir)
-                src_base = src
-            for d in unlistable:
-                _note_lost(results, output_dir, case_id,
-                           d.relative_to(case_dir))
+                # Collect files modified in-place during execution. A path
+                # `_copy_at` refuses — unreadable, or swapped for a link
+                # since the git scan vetted it — is evidence lost, recorded
+                # like every other refused path, and not counted as collected.
+                modified = _collect_modified_files(case_dir, config)
+                if modified:
+                    mod_output = output_dir / "cases" / case_id / "_modified"
+                    mod_output.mkdir(parents=True, exist_ok=True)
+                    copied = 0
+                    for rel_path, _abs_path in modified:
+                        if _copy_at(case_fd, Path(rel_path).parts,
+                                    mod_output / rel_path):
+                            copied += 1
+                        else:
+                            _note_lost(results, output_dir, case_id,
+                                       rel_path)
+                    if copied:
+                        results.setdefault(case_id, {})["_modified"] = copied
+            finally:
+                os.close(case_fd)
 
-            if not files:
-                continue
-
-            case_output = output_dir / "cases" / case_id / out_path
-            case_output.mkdir(parents=True, exist_ok=True)
-
-            for f in files:
-                # Reject symlinks (CWE-59) and anything that does not resolve
-                # under the case root through a link-free path.
-                if f.is_symlink():
-                    continue
-                if not _confined(case_dir, f):
-                    _note_lost(results, output_dir, case_id,
-                               f.relative_to(case_dir))
-                    continue
-                rel = f.relative_to(src_base)
-                dest = case_output / rel
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(f, dest)
-
-            results.setdefault(case_id, {})[out_path] = len(files)
-
-        # Collect files modified in-place during execution
-        modified = _collect_modified_files(case_dir, config)
-        if modified:
-            mod_output = output_dir / "cases" / case_id / "_modified"
-            mod_output.mkdir(parents=True, exist_ok=True)
-            for rel_path, abs_path in modified:
-                dest = mod_output / rel_path
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(abs_path, dest)
-            results.setdefault(case_id, {})["_modified"] = len(modified)
-
-        # Generate events.json from stdout.log
-        if config.traces.events:
-            _generate_events_json(case_dir, output_dir / "cases" / case_id,
-                                  config)
+            # Generate events.json from stdout.log
+            if config.traces.events:
+                _generate_events_json(case_dir, output_dir / "cases" / case_id,
+                                      config)
+    finally:
+        os.close(ws_fd)
 
     # Save collection summary
     with open(output_dir / "collection.json", "w") as f:
