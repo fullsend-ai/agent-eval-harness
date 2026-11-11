@@ -684,6 +684,28 @@ def test_session_transcript_symlinks_are_not_followed(tmp_path):
     assert R.parse_trial(tdir2)["generation_ids"] == []
 
 
+def test_symlinked_sessions_directory_is_not_followed(tmp_path):
+    """A planted ``sessions`` symlink must not move the containment root to a
+    host directory holding unrelated transcripts."""
+    outside = tmp_path / "outside"
+    (outside / "projects" / "-app").mkdir(parents=True)
+    (outside / "projects" / "-app" / "x.jsonl").write_text(
+        _jsonl({"type": "assistant", "requestId": "gen-outside"}))
+    tdir = _single_step_trial(tmp_path)
+    _write_trial_agent(tdir / "agent", _MSG_ONLY_STREAM)
+    (tdir / "agent" / "sessions").symlink_to(outside, target_is_directory=True)
+    assert R.parse_trial(tdir)["generation_ids"] == []
+
+
+def test_deeply_nested_session_transcript_line_is_skipped(tmp_path):
+    tdir = _single_step_trial(tmp_path)
+    deep = "[" * 100000 + "]" * 100000 + "\n"
+    _write_trial_agent(tdir / "agent", _MSG_ONLY_STREAM, {
+        "-app/s1.jsonl": deep + _jsonl(
+            {"type": "assistant", "requestId": "gen-ok", "message": {"id": "msg_01"}})})
+    assert R.parse_trial(tdir)["generation_ids"] == ["gen-ok"]
+
+
 def test_multi_step_trial_unions_session_transcript_ids_across_steps(tmp_path):
     tdir = tmp_path / "job" / "trial__case-ms"
     for step, gens in (("create", ["gen-a", "gen-b"]), ("assess", ["gen-b", "gen-c"])):

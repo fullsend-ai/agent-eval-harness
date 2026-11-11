@@ -201,15 +201,22 @@ def _session_generation_ids(agent_dir: Path) -> list:
     nested subagent transcripts) are exported with the trial's agent logs.
     Some Claude Code versions omit ``requestId`` from stream-json but keep
     it in these transcripts (spec 014 probe #28). The files are
-    agent-influenced: symlinks and paths resolving outside the sessions
-    directory are skipped, and malformed lines are ignored.
+    agent-influenced: a symlink at any component from the trial ``agent/``
+    directory down to ``projects``, and any path resolving outside the
+    ``projects`` directory (or outside ``agent/``), is skipped, and
+    malformed lines are ignored.
     """
-    projects = agent_dir / "sessions" / "projects"
-    if projects.is_symlink() or not projects.is_dir():
+    sessions = agent_dir / "sessions"
+    projects = sessions / "projects"
+    if (agent_dir.is_symlink() or sessions.is_symlink()
+            or projects.is_symlink() or not projects.is_dir()):
         return []
     try:
+        agent_root = agent_dir.resolve(strict=True)
         root = projects.resolve(strict=True)
     except OSError:
+        return []
+    if not root.is_relative_to(agent_root):
         return []
     ids: set = set()
     for transcript in sorted(root.rglob("*.jsonl")):
