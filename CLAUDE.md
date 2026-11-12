@@ -44,16 +44,10 @@ execution:
 ```
 
 **Implemented flavor - Agentic Documentation Testing** (see `examples/openshift-agentic-docs.md`):
-- Documentation effectiveness: Can agents navigate and use your docs?
-- Pattern understanding: Can agents identify and apply code patterns?
-- Constraint compliance: Do agents respect documented rules?
-- API usage: Can agents call APIs with the right fields and structure from documentation alone?
-
-Includes builtin documentation generation prompts (navigation, anti-pattern, authoring, component-usage, architecture) for structured evaluation. See `agent_eval/prompts/docs/`.
+can agents navigate your docs, apply the patterns in them, respect their rules, and call an API
+with the right fields from them alone? Builtin generation prompts for it live in `agent_eval/prompts/docs/`.
 
 **Extensible to other scenarios**: Code generation, API pattern validation, reasoning quality, custom agent benchmarks.
-
-Prompt mode provides direct agent invocation with LLM rubric judges and flexible evaluation criteria.
 
 ## Architecture
 
@@ -97,6 +91,15 @@ agent_eval/              # Python package (config, runner, state)
     stats/
       anova.py           # Repeated-measures, mixed-effects, one-way ANOVA
       pareto.py          # Cost/quality Pareto frontier
+  optimize/              # Engine-agnostic optimization; imports no search engine
+    intake.py            # Skill-source discovery, runtime resources, NEEDED blocks
+    artifact.py          # Candidate resolve/validate/snapshot (skips symlinks)/overlay
+    rollout.py           # One case x candidate -> reward + redacted feedback
+    export.py            # Rollout -> run dir under <runs>/.optimize/; is_rollout_run filter
+    redact.py            # Judge outcomes without gold (feedback_rationale opts in)
+  engines/               # Search-engine coupling — the only cap-evolve imports
+    capevolve.py         # agent-eval-capevolve: scaffold, launch, status, apply
+    _bridge_template.py  # CapabilityAdapter the generated adapters/adapter.py extends
 
 skills/eval-setup/       # Skill: environment setup
   SKILL.md               # Dependencies, MLflow, API keys, directories
@@ -252,14 +255,10 @@ surfaces the statistics section when `anova.json` is present — but stays stand
 dependency) for manual/CI-produced run sets.
 
 ### Prompt Mode Workflow (Agentic Documentation Testing)
-```text
-/eval-setup                            # Setup: dependencies, MLflow, API keys
-/eval-analyze --prompt examples/openshift-agentic-docs.md # Analyze: analyze docs, generate synthetic-generation eval.yaml
-/eval-dataset                          # Dataset: generate test cases from templates
-/eval-run --model sonnet               # Run: test agent against documentation
-/eval-review --run-id <id>             # Review: analyze documentation effectiveness
-/eval-mlflow --run-id <id>             # MLflow: sync dataset, log results
-```
+
+Same sequence, with `--skill my-skill` replaced by
+`--prompt examples/openshift-agentic-docs.md` at the `/eval-analyze` step: that generates a
+synthetic-generation eval.yaml, and `/eval-dataset` builds the cases from its seeds.
 
 ## Tests
 
@@ -280,7 +279,7 @@ E2E tests invoke real Claude API calls against a fake Jira skill fixture to veri
 
 ## Brainstorms
 
-The `brainstorm/` directory contains exploratory ideas and design thinking. These are just ideas, not reflected in the code. Do not treat brainstorm content as implemented features or current architecture. Implemented brainstorms are moved to `brainstorm/attic/`.
+`brainstorm/` holds exploratory ideas, not implemented features and not current architecture — never cite it as either. Implemented ones move to `brainstorm/attic/`.
 
 ## Remaining Work
 

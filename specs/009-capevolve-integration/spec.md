@@ -132,9 +132,12 @@ cap-evolve's `run_target` thread pool instead of always running serially.
   `eval.yaml` rejects any key cap-evolve's own search config owns
   (`num_trials`, `gate_*`, `split_*`, `max_usd`, `protected_paths`,
   `observers`, etc.). `protected_paths: default` is always generated (a real
-  cap-evolve sentinel — omitting it leaves dataset/judge files fully
-  editable by the optimizer); `observers: [{backend: mlflow, ...}]` is
-  generated when the project's `eval.yaml` has an `mlflow:` block.
+  cap-evolve sentinel expanding to `integrity.DEFAULT_PATTERNS`, matched
+  within the capability workdir — it is not what seals the dataset, the eval
+  config or the judges; keeping those outside the optimizer-visible tree is);
+  `observers: [{backend: mlflow, ...}]` is generated when the project's
+  `eval.yaml` has an `mlflow:` block — the backend itself ships in
+  `capevolve-telemetry`, and scaffolding warns when it is not importable.
 - cap-evolve has no native `status`/`apply`/detach/background mode —
   `cap-evolve run` blocks synchronously end-to-end. `engines/capevolve.py`
   builds that layer on the harness side: a detached subprocess
@@ -293,12 +296,11 @@ entry skill invokes live in more than one skill root (e.g. some in
 `.claude/skills`, some in a plugin). An explicit `optimize:` block covering one
 root works today; a multi-root candidate would need one `apply_to` per root.
 
-**CI smoke test.** `tests/test_capevolve_poc.py` has a test that builds a
-Task/Rollout/Score and runs real `cap_evolve.check` against a fixture, but
-it's `skipif`-guarded on `cap_evolve` being importable, and
-`.github/workflows/tests.yml` only installs `.[all,test]` — `optimize` is
-deliberately excluded from `[all]`, so the smoke test never actually runs in
-CI today.
+**CI smoke test.** Resolved. `tests/test_capevolve_poc.py` runs real
+`cap_evolve.check` against a fixture Task/Rollout/Score, `skipif`-guarded on
+`cap_evolve` being importable; `.github/workflows/tests.yml` installs
+`.[all,optimize,test]` so it runs on every CI run (`all` keeps excluding the
+git-pinned `optimize` extra on purpose).
 
 **Gate-resolution figure in `--dry-run`.** Showing a concrete resolvable-delta
 number (e.g. "at 10 val cases this gate resolves Δ ≳ 0.07") needs an assumed

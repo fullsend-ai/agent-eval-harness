@@ -587,6 +587,44 @@ class TestInlineJudgeFieldValidation:
         assert "strat_key" in captured.err
         assert "source_key" in captured.err
 
+    def test_stale_field_probe_reads_records_from_the_same_runs_dir(
+            self, tmp_path, monkeypatch):
+        """With an explicit run location (score.py judges --run-dir, used for
+        optimization rollouts) the probe must re-read the case records from
+        that runs_dir — it reads the run-level run_result.json for execution
+        metadata. A failure inside the probe is swallowed per case, so a
+        mis-threaded argument there goes silent, not loud."""
+        import score as score_mod
+        config = EvalConfig(name="test", skill="test")
+        config.outputs = [OutputConfig(path="artifacts")]
+        # Same shape as the stale-frontmatter case: a field ref plus a content
+        # key is what arms the probe; the field never exists, so it fails
+        # everywhere and the probe runs.
+        config.judges = [JudgeConfig(name="always_fails", check=(
+            "import yaml\n"
+            "task = outputs['artifacts_content']\n"
+            "fm = yaml.safe_load(task.split('---', 2)[1])\n"
+            "if not fm.get('missing_key'):\n"
+            "    return False, 'bad missing_key'\n"
+            "return True, 'ok'"))]
+        case_dir = tmp_path / "run-7" / "cases" / "case-001"
+        (case_dir / "artifacts").mkdir(parents=True)
+        (case_dir / "artifacts" / "result.md").write_text("---\nk: v\n---\nbody\n")
+        seen = []
+        real = score_mod.load_case_record
+
+        def spy(case_dir_, config_, run_id=None, runs_dir=None, **kw):
+            seen.append(runs_dir)
+            return real(case_dir_, config_, run_id=run_id, runs_dir=runs_dir, **kw)
+
+        monkeypatch.setattr(score_mod, "load_case_record", spy)
+        judges = load_judges(config)
+        runs_dir = tmp_path
+        score_cases(judges, [case_dir], config, run_id="run-7", runs_dir=runs_dir)
+        # Scoring's own read, then the probe's (the judge failed everywhere).
+        assert len(seen) >= 2, seen
+        assert all(r == runs_dir for r in seen), seen
+
     @pytest.mark.parametrize("label,snippet,expected", [
         # Every literal reference counts. Intent is deliberately NOT inferred:
         # `if fm.get("x"): return True` and `... return False` are the same

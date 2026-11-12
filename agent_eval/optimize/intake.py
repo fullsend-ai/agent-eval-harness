@@ -231,6 +231,167 @@ def _top_level_name(path: Path, project_root: Path) -> str | None:
     return rel.parts[0] if rel.parts else None
 
 
+def _measurement_names(project_root: Path, config: EvalConfig, components: list[dict]) -> set[str]:
+    """Top-level project names a rollout must never copy into the agent's view:
+    the dataset (gold answers), the run records, every eval config or profile
+    (judge prompts and checks), test suites (judge fixtures), the harness's
+    own reserved names, and the directories holding the candidate's seed
+    skills (a copy would hand the agent stale files next to the live
+    candidate)."""
+    from agent_eval.config import discover_configs
+    from agent_eval.workspace_provisioning import DEFAULT_RESERVED_NAMES
+
+    root = Path(project_root).resolve()
+    excluded = {".git", ".capevolve", ".claude", "test", "tests", *DEFAULT_RESERVED_NAMES}
+    measurement = [config.resolve_path(config.dataset.path),
+                   root / os.environ.get("AGENT_EVAL_RUNS_DIR", "eval/runs")]
+    measurement += [d.path for d in discover_configs(root, include_profiles=True)]
+    candidate_homes = [Path(c["source"]) for c in components]
+    for path in measurement + candidate_homes:
+        name = _top_level_name(path, root)
+        if name:
+            excluded.add(name)
+    return excluded
+
+
+def _measurement_paths(project_root: Path, config: EvalConfig) -> list[Path]:
+    """Absolute paths a rollout must never hand the agent, for a by-path
+    check: the dataset, the run records (the configured root and the default
+    one — earlier runs' review.yaml and judge rationale can quote gold), every
+    eval config / profile and the directory holding it, the judge material a
+    config names (``prompt_file``, ``context``, resolved against the project
+    root as score.py does), test suites, ``.git`` and ``.capevolve``.
+
+    Deliberately not the harness's reserved workspace names: that set holds
+    ``.claude``, and the project-local skill tree lives there — a link to
+    ``.claude/skills/_shared`` is exactly the kind of plumbing this is for.
+    """
+    from agent_eval.config import discover_configs
+
+    root = Path(project_root).resolve()
+    paths = [root / name for name in (".git", ".capevolve", "test", "tests")]
+    paths.append(Path(config.resolve_path(config.dataset.path)).resolve())
+    runs = Path(os.environ.get("AGENT_EVAL_RUNS_DIR", "eval/runs"))
+    paths.append((runs if runs.is_absolute() else root / runs).resolve())
+    paths.append(root / "eval" / "runs")
+    for found in discover_configs(root, include_profiles=True):
+        config_path = Path(found.path).resolve()
+        paths.append(config_path)
+        if config_path.parent != root:
+            paths.append(config_path.parent)
+    for judge in config.judges or []:
+        agent = getattr(judge, "agent", None) or {}
+        named_all = [getattr(judge, "prompt_file", "") or "",
+                     *(getattr(judge, "context", None) or []),
+                     # An agent judge's grounding material: staged into the
+                     # judge's .context/ from the same project-root-relative
+                     # paths (score.py _stage_agent_workspace).
+                     *((agent.get("context") if isinstance(agent, dict) else None) or [])]
+        for named in named_all:
+            if not isinstance(named, str) or not named:
+                continue
+            named_path = Path(named)
+            paths.append((named_path if named_path.is_absolute() else root / named_path).resolve())
+        # A code judge's source: score.py imports `module` with the project
+        # root on sys.path, so it is a file or a package under the root.
+        module = getattr(judge, "module", "") or ""
+        if isinstance(module, str) and module:
+            base = root / Path(*module.split("."))
+            paths += [base.resolve(), base.with_suffix(".py").resolve()]
+    return paths
+
+
+def plumbing_links(
+    project_root: Path, config: EvalConfig, components: list[dict], roots: list[str],
+) -> tuple[list[dict], list[str]]:
+    """The symlinks under *roots* that a rollout should put back, and the
+    ones it will not.
+
+    Everything that reaches a rollout's view of the skill tree is copied
+    without links (``_copy_tree_local``, the candidate snapshot): a link is the
+    wrong thing to carry into per-rollout workspaces and containers. But some
+    of them are how the skill works at all — this repo's
+    ``scripts/agent_eval -> ../../../agent_eval`` is the import plumbing every
+    skill script needs. Those are restored at staging time (``artifact.
+    stage_candidate``), under the same rule ``runtime_resources`` applies to
+    everything else that enters the agent's view: the target resolves inside
+    the project and outside its measurement material. Anything else —
+    dangling, looping, escaping the project, the project root itself, or
+    pointing at the dataset / run records / eval configs / tests / a seed
+    skill home — is dropped, and named in the returned warnings so the author
+    hears about it once.
+
+    *roots* are project-relative directories: ``apply_to`` (the skill
+    directory, or the skill root holding several) plus every skill root the
+    rollout copies alongside it — not the candidate components, because a
+    candidate that is just ``SKILL.md`` still needs the rest of its skill
+    directory to run, and the sibling skills the entry skill invokes need
+    theirs. Paths come back project-relative so each staging site can map
+    them onto whatever part of the project it mirrors.
+
+    Returns ``([{"path": <project-relative posix>, "target": <abs>}], [warning, ...])``.
+    """
+    root = Path(project_root).resolve()
+    # By PATH, not by top-level name as runtime_resources does: that rule
+    # copies whole top-level directories, so it must keep out any directory
+    # holding measurement material or seed skills. A plumbing target is one
+    # directory or file, so a link to shared code elsewhere under the skill
+    # tree (.claude/skills/_shared, a sibling skill's lib) is fine; what is
+    # not is a target inside measurement material, or inside a seed home —
+    # the project's copy of a candidate component, which the candidate has
+    # replaced in the staged tree.
+    forbidden = _measurement_paths(root, config)
+    for component in components:
+        # The seed home is exactly what the candidate replaces: the whole tree
+        # for a directory component, only the file for a file component — the
+        # rest of that skill directory is staged from the project as-is, so a
+        # link to it (scripts/templates -> ../templates) resolves to the same
+        # content either way and must come back.
+        forbidden.append(Path(component["source"]).resolve())
+    bases: list[Path] = []
+    for entry in roots:
+        base = root / str(entry).rstrip("/")
+        if base.is_dir() and base not in bases:
+            bases.append(base)
+    links, dropped, seen = [], [], set()
+    for base in bases:
+        if any(other != base and base.is_relative_to(other) for other in bases):
+            continue  # already covered by an enclosing root
+        for link in sorted(p for p in base.rglob("*") if p.is_symlink()):
+            rel = link.relative_to(root).as_posix()
+            if rel in seen:
+                continue
+            seen.add(rel)
+            label = rel
+            try:
+                target = link.resolve(strict=True)
+            except (OSError, RuntimeError):  # missing target; symlink loop
+                dropped.append(f"{label} (dangling or looping)")
+                continue
+            if not target.is_relative_to(root):
+                dropped.append(f"{label} (points outside the project: {target})")
+                continue
+            if target == root:
+                dropped.append(f"{label} (points at the project root itself)")
+                continue
+            # Either direction: a target inside measurement material, or one
+            # that CONTAINS it (a link to the dataset's parent would copy the
+            # cases along).
+            hit = next((f for f in forbidden
+                        if target == f or target.is_relative_to(f) or f.is_relative_to(target)), None)
+            if hit is not None:
+                dropped.append(f"{label} (points at or around measurement material or a seed skill "
+                               f"home: {os.path.relpath(hit, root)})")
+                continue
+            links.append({"path": rel, "target": str(target)})
+    warnings = [
+        f"candidate symlink {entry} is not carried into rollouts; if the skill needs what it "
+        "points at, inline the content or name it in optimize.candidate"
+        for entry in dropped
+    ]
+    return links, warnings
+
+
 def runtime_resources(
     project_root: Path, config: EvalConfig, components: list[dict],
 ) -> tuple[list[str], list[str]]:
@@ -246,22 +407,8 @@ def runtime_resources(
     agent-visible workspace. Names the harness writes into the workspace
     itself (e.g. ``hooks/`` for tool interception) are never overwritten.
     """
-    from agent_eval.config import discover_configs
-    from agent_eval.workspace_provisioning import DEFAULT_RESERVED_NAMES
-
     root = Path(project_root).resolve()
-    excluded = {".git", ".capevolve", ".claude", "test", "tests", *DEFAULT_RESERVED_NAMES}
-    measurement = [config.resolve_path(config.dataset.path),
-                   root / os.environ.get("AGENT_EVAL_RUNS_DIR", "eval/runs")]
-    measurement += [d.path for d in discover_configs(root, include_profiles=True)]
-    # The candidate reaches the run on its own path (staged into the workspace,
-    # or a private plugin copy): a copy of the directory holding its seed
-    # skills would hand the agent stale files next to the live candidate.
-    candidate_homes = [Path(c["source"]) for c in components]
-    for path in measurement + candidate_homes:
-        name = _top_level_name(path, root)
-        if name:
-            excluded.add(name)
+    excluded = _measurement_names(root, config, components)
     # A real /eval-run workspace also links a project's own execution.symlinks
     # entries (spec, workspace.py:_resolve_symlink_names) on top of the
     # defaults. Without reading them here too, a benchmark that declares one

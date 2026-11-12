@@ -30,7 +30,7 @@ comparison view with LLM-written analysis.
 
 | Flag | Default | Effect |
 | --- | --- | --- |
-| `<input-dir>` | — (required) | Scanned **recursively** for any subdirectory containing a `summary.yaml`. |
+| `<input-dir>` | — (required) | Scanned **recursively** for any subdirectory containing a `summary.yaml`; optimization rollouts are skipped (noted on stderr) unless you point at their `.optimize` root. |
 | `--output <path>` | `<input-dir>/comparison-report` | Where the report is written. |
 | `--title <text>` | `Model Comparison` | Report title shown in the header. |
 | `--overview <text>` | omitted | Optional context paragraph shown at the top. When absent, the section is omitted. |
@@ -55,7 +55,8 @@ python3 ${CLAUDE_SKILL_DIR}/scripts/compare.py discover <input-dir>
 ```
 
 The scanner walks `<input-dir>` recursively, treating **every directory that
-contains a `summary.yaml`** as a run. It prints a JSON manifest with each run's
+contains a `summary.yaml`** as a run — except [cap-evolve rollouts](optimize-capevolve.md#relationship-to-the-rest-of-the-pipeline),
+which it skips with a note on stderr unless `<input-dir>` is their `.optimize` root. It prints a JSON manifest with each run's
 directory, resolved model, cost and its `cost_source`, judge scores, and whether an HTML
 report is present. Runs are grouped by model (from `run_result.json`, falling back to the
 `run_id`), so several runs of one model aggregate together.

@@ -14,6 +14,11 @@ venv/
 eval/runs/
 tmp/
 
+# cap-evolve campaigns: a generated project tree, the out-of-tree manifest,
+# and run dirs. `store: git` makes each run dir its own repository, which a
+# parent repo would otherwise swallow as an unusable embedded clone.
+.capevolve/
+
 # MLflow
 mlflow.db
 mlruns/

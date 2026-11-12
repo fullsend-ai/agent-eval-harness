@@ -43,7 +43,8 @@ Optional extras (installed into the same environment):
 | `evalhub` | The EvalHub platform adapter | `pip install -e '.[evalhub]'` |
 | `openai` | The OpenAI SDK: the Responses API runner, and `openai:/` / `openrouter:/` judges (the session hook adds it to `.eval-venv` by itself when a judge model needs it) | `pip install -e '.[openai]'` |
 | `anova` | The statistics behind [`/eval-anova`](../guides/eval-anova.md) (scipy, statsmodels, pandas, pingouin) | `pip install -e '.[anova]'` |
-| `all` | Everything above | `pip install -e '.[all]'` |
+| `optimize` | The cap-evolve engine behind [`/eval-optimize --engine cap-evolve`](../guides/optimize-capevolve.md): `cap-evolve-core`, the dashboard and the telemetry backend, pinned to one commit from git | `pip install -e '.[optimize]'` (or `/eval-setup --optimize`) |
+| `all` | Everything above **except `optimize`** — it is pinned by git SHA, and a VCS requirement in `all` would make the ordinary install need git and reachable GitHub; name it alongside: `.[all,optimize]` | `pip install -e '.[all]'` |
 
 ## 2. Provide model credentials
 

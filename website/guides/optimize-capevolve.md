@@ -41,10 +41,12 @@ That's the whole idea. The rest of this page is the mechanics and a real example
 /eval-setup --optimize
 ```
 
-This installs `cap-evolve-core` (and `capevolve-dashboard`, for the live dashboard
-every campaign starts by default) into the harness's own venv and fetches
-cap-evolve's skills tree (phases, algorithms, templates) at a pinned commit —
-nothing to check out yourself. Needs Python 3.11+ in the harness venv;
+This installs `cap-evolve-core` (plus `capevolve-dashboard`, for the live dashboard
+every campaign starts by default, and `capevolve-telemetry`, the MLflow observer
+backend the generated spec names whenever your eval config has an `mlflow:`
+experiment) into the harness's own venv and fetches cap-evolve's skills tree
+(phases, algorithms, templates) at a pinned commit — nothing to check out
+yourself. MLflow itself comes from the harness's own `[mlflow]` extra. Needs Python 3.11+ in the harness venv;
 `/eval-setup --optimize` rebuilds it with a newer interpreter if needed.
 
 ## A real end-to-end example
@@ -341,8 +343,8 @@ campaign after a failed attempt is safe — a failed apply cleans up its own bra
   venv's Python is older than 3.11. Run `/eval-setup --optimize`.
 - **A campaign shows `measurements.n_scored: 0`** — every rollout failed before
   producing a measurement. Check the campaign's `log_file` and the `opt-*` run
-  directories under your configured runs dir for the underlying error; `--apply` is
-  refused until a campaign actually measures something. (This happened once while
+  directories under `$AGENT_EVAL_RUNS_DIR/.optimize/<eval-name>/` for the underlying
+  error; `--apply` is refused until a campaign actually measures something. (This happened once while
   writing this guide — the demo judge's code read a variable, `case_dir`, that
   the harness's inline `check:` scorer never provides; the fix was to read
   `outputs["case_dir"]` or, better, the pre-parsed `outputs["annotations"]` the
@@ -363,8 +365,34 @@ campaign after a failed attempt is safe — a failed apply cleans up its own bra
 ## Relationship to the rest of the pipeline
 
 A cap-evolve campaign produces a standard harness run directory per rollout
-(`run_result.json`, `summary.yaml`, `report.html`, transcripts) — readable by
-[`/eval-compare`](eval-compare.md) and [`/eval-mlflow`](eval-mlflow.md) like any other
-run. [`/eval-anova`](eval-anova.md) doesn't yet understand a campaign's rollouts as a
-matrix (different `condition.json` schema) — run it over ordinary `/eval-run` runs
-instead.
+(`run_result.json`, `summary.yaml`, `report.html`, transcripts, a `condition.json`
+naming the candidate and case) in a **parallel runs root**:
+`$AGENT_EVAL_RUNS_DIR/.optimize/<eval-name>/<run-id>`. A campaign is
+`|val| × num_trials × (iterations + 1)` of them, so they are kept out of the
+ordinary runs dir — and [`/eval-compare`](eval-compare.md) and
+[`/eval-anova`](eval-anova.md) skip them when sweeping a runs dir (including the
+flat `opt-*` rollouts that releases up to 1.62.x wrote next to your other runs).
+
+To browse every rollout's own `report.html` (and include them in a comparison),
+point `/eval-compare` at the rollout root: `/eval-compare eval/runs/.optimize/<eval-name>`
+— it groups by model, so the search *curve* itself is cap-evolve's: `--status`,
+the run's `history.jsonl`/`report.md`, or the dashboard. To run a `--run-id` script
+on one rollout, name its directory with `--run-dir` instead — `score.py judges`,
+`report.py`, `log_results.py` and `attach_feedback.py` all take it (the basename is
+the run id; everything else still resolves under your ordinary runs dir):
+
+```bash
+python3 skills/eval-mlflow/scripts/log_results.py \
+  --run-dir eval/runs/.optimize/<eval-name>/opt-case-3-cand_2-0-1a2b3c4d --config eval.yaml
+```
+
+Don't re-point `AGENT_EVAL_RUNS_DIR` at `.optimize` for a session instead: your next
+`/eval-run` would land in there (and be skipped as a rollout), and your next campaign
+would nest a second `.optimize` inside it. `--status` reports the directory as
+`rollouts_dir`. Rollouts a v1.62.x campaign left flat under `eval/runs/<eval-name>/opt-*`
+are skipped too; to inspect those, move them once:
+`mkdir -p eval/runs/.optimize/<eval-name> && mv eval/runs/<eval-name>/opt-* eval/runs/.optimize/<eval-name>/`.
+
+`/eval-anova` doesn't understand a campaign's rollouts as a matrix (their
+`condition.json` records provenance, not factor levels) — run it over ordinary
+`/eval-run` runs instead.
