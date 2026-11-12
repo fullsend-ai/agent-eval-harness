@@ -160,10 +160,19 @@ def test_an_all_errored_judge_reports_the_real_cause(tmp_path):
     assert "skipped" not in regs[0].detail
 
 
-def test_a_genuinely_skipped_judge_still_says_skipped(tmp_path):
+def test_a_legacy_summary_without_a_skip_count_still_says_skipped(tmp_path):
+    """Summaries written before `skipped_cases` existed cannot tell an
+    all-skipped judge from a wrong-type threshold, so they keep failing."""
     current = {"q": {"mean": None, "values": [], "errored_cases": 0}}
     regs = sc.detect_regressions(current, {"q": {"min_mean": 1.0}})
     assert "skipped for all cases" in regs[0].detail
+
+
+def test_a_judge_skipped_for_every_case_is_not_applicable(tmp_path):
+    current = {"q": {"mean": None, "pass_rate": None, "scored_cases": 0,
+                     "errored_cases": 0, "incomplete_cases": 0,
+                     "skipped_cases": 3}}
+    assert sc.detect_regressions(current, {"q": {"min_mean": 1.0}}) == []
 
 
 def test_max_error_rate_gates_a_shrinking_sample(tmp_path):

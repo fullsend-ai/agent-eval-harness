@@ -3651,7 +3651,7 @@ def score_cases(judges, case_dirs, config, run_id=None, samples_override=None, r
         return {"per_case": {}, "aggregated": {n: {"values": [], "mean": None, "pass_rate": None} for n, *_ in judges}}
     per_case = {}
     aggregated = {name: {"values": [], "errored_cases": 0,
-                         "incomplete_cases": 0}
+                         "incomplete_cases": 0, "skipped_cases": 0}
                   for name, *_ in judges}
     _reset_tool_choice_fallbacks()
     _reset_verdict_state()
@@ -3703,10 +3703,15 @@ def score_cases(judges, case_dirs, config, run_id=None, samples_override=None, r
                     annotations = rec.get("annotations", {})
                     if not eval(condition, {"__builtins__": {}},
                                 {"annotations": annotations, "outputs": rec}):
+                        # `skipped` marks a deliberate skip explicitly, so
+                        # the aggregate can count it without inferring it
+                        # from a missing value (which an invalid result
+                        # also produces).
                         case_results[name] = {
                             "value": None,
                             "rationale": f"Skipped: condition '{condition}' is false",
                             "judge_type": judge_type,
+                            "skipped": True,
                         }
                         continue
                 except Exception as e:
@@ -3863,6 +3868,11 @@ def score_cases(judges, case_dirs, config, run_id=None, samples_override=None, r
                         # threshold diagnostics conflated into "skipped".
                         aggregated[name]["errored_cases"] = (
                             aggregated[name].get("errored_cases", 0) + 1)
+                    elif result.get("skipped"):
+                        # Only an `if:` that evaluated false. A condition that
+                        # raised carries an `error` and is counted above.
+                        aggregated[name]["skipped_cases"] = (
+                            aggregated[name].get("skipped_cases", 0) + 1)
                 print(f"  [{completed}/{len(case_dirs)}] {case_id}", flush=True)
 
     # Compute aggregates
@@ -5619,8 +5629,37 @@ def _unavailable_reason(current, metric, kind):
     if errored:
         return (f"{metric} unavailable — judge errored on {errored} case"
                 f"{'s' if errored != 1 else ''}; see the per-case rationales")
+    if "skipped_cases" in current:
+        # A summary that counts skips can tell the causes apart: an all-skipped
+        # judge is not applicable and never reaches here (see
+        # `judge_not_applicable`), so values without a metric are a wrong-type
+        # threshold, and no values at all are results that carried none.
+        if current.get("scored_cases"):
+            return f"{metric} unavailable — not {kind}"
+        return f"{metric} unavailable — no case produced a value"
+    # Older summaries do not record skips, so the two causes stay merged.
     return (f"{metric} unavailable — judge skipped for all cases "
             f"or not {kind}")
+
+
+def judge_not_applicable(current):
+    """Whether a judge's `if:` condition was false for every selected case.
+
+    Such a judge was deliberately inapplicable, so its score thresholds
+    (`min_pass_rate`, `min_mean`) are neither a pass nor a regression. Read
+    only from the explicit `skipped_cases` count that `score_cases` records
+    for a condition that evaluated false — never inferred from a missing
+    mean — so any error, incomplete evidence or result without a value keeps
+    the judge applicable. Summaries written before `skipped_cases` existed
+    have no count and are never treated as not applicable.
+    """
+    if not isinstance(current, dict) or not current.get("skipped_cases"):
+        return False
+    return not (current.get("scored_cases") or current.get("values")
+                or current.get("errored_cases")
+                or current.get("incomplete_cases")
+                or current.get("mean") is not None
+                or current.get("pass_rate") is not None)
 
 
 # Default for `detect_regressions(pairwise=...)`: the caller has no pairwise
@@ -5735,12 +5774,15 @@ def detect_regressions(current_results, thresholds, baseline_results=None,
         if current is None:
             continue
         incomplete = current.get("incomplete_cases") or 0
+        # A judge whose `if:` was false for every selected case has nothing to
+        # gate: its score thresholds are not applicable rather than breached.
+        not_applicable = judge_not_applicable(current)
         # When a threshold is configured but its metric is unavailable (None),
         # surface it as a regression instead of silently skipping — a missing
-        # metric usually means the judge was skipped for all cases or the
-        # threshold targets the wrong judge type (e.g. min_pass_rate on a
-        # numeric judge, whose pass_rate is always None).
-        if "min_pass_rate" in threshold:
+        # metric means the judge errored, produced no value, or the threshold
+        # targets the wrong judge type (e.g. min_pass_rate on a numeric judge,
+        # whose pass_rate is always None).
+        if "min_pass_rate" in threshold and not not_applicable:
             rate = current.get("pass_rate")
             if rate is None:
                 regressions.append(Regression(
@@ -5799,7 +5841,7 @@ def detect_regressions(current_results, thresholds, baseline_results=None,
                 "omitted evidence from the judge's workspace (see "
                 "`staging_skips`); a score over the remaining cases is not a "
                 "measurement of the agent"))
-        if "min_mean" in threshold:
+        if "min_mean" in threshold and not not_applicable:
             mean = current.get("mean")
             if mean is None:
                 regressions.append(Regression(
@@ -5827,6 +5869,19 @@ def detect_regressions(current_results, thresholds, baseline_results=None,
                                 judge_name, f"{key}_vs_baseline",
                                 str(base_val), str(curr_val), "Degraded vs baseline"))
     return regressions
+
+
+def _print_not_applicable(current_results, thresholds, indent=""):
+    """Name each thresholded judge whose score thresholds were not evaluated
+    because its `if:` was false for every case — so a waived gate is visible
+    in the CLI output, not mistaken for a pass."""
+    for judge_name, threshold in thresholds.items():
+        current = current_results.get(judge_name)
+        if (isinstance(threshold, dict) and judge_not_applicable(current)
+                and ("min_pass_rate" in threshold or "min_mean" in threshold)):
+            print(f"{indent}NOT APPLICABLE: [{judge_name}] `if:` false for "
+                  f"all {current['skipped_cases']} cases; score thresholds "
+                  "not evaluated")
 
 
 # ---------------------------------------------------------------------------
@@ -5999,6 +6054,9 @@ def cmd_judges(args):
             print(f"  {name}: pass_rate={rate:.1%}{st_note}")
         elif mean is not None:
             print(f"  {name}: mean={mean:.2f}{st_note}")
+        elif judge_not_applicable(agg):
+            print(f"  {name}: not applicable (`if:` false for all "
+                  f"{agg['skipped_cases']} cases)")
 
     _merge_summary(args.run_id, "judges", {
         name: {k: v for k, v in agg.items() if k != "values"}
@@ -6055,6 +6113,7 @@ def cmd_judges(args):
                       f"{r.baseline_value} -> {r.current_value}")
         else:
             print("\n  REGRESSIONS: 0")
+        _print_not_applicable(current_agg, config.thresholds, indent="  ")
         # The comparison `min_win_rate` gates runs after this step.
         if any(isinstance(t, dict) and "min_win_rate" in t
                for t in config.thresholds.values()):
@@ -6169,9 +6228,11 @@ def cmd_regression(args):
         for r in regressions:
             print(f"  [{r.judge_name}] {r.metric}: "
                   f"{r.baseline_value} -> {r.current_value}")
+        _print_not_applicable(current_agg, config.thresholds)
         sys.exit(1)
     else:
         print("REGRESSIONS: 0")
+        _print_not_applicable(current_agg, config.thresholds)
 
 
 def main():

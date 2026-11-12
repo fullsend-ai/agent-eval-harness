@@ -45,13 +45,12 @@ use must match the **value type the judge produces**.
 
 ## Match the key to the judge's value type
 
-This is the most common misconfiguration. A `min_pass_rate` on a numeric judge, or a
-`min_mean` on a judge that was skipped for every case, has **no metric to compare** — and
-that is *not* silently ignored.
+This is the most common misconfiguration. A `min_pass_rate` on a numeric judge has
+**no metric to compare** — and that is *not* silently ignored.
 
 !!! warning "A missing metric is reported AS a regression"
-    When a configured threshold's metric is `None` (the judge was skipped for all cases,
-    it **errored** on all of them, or the key targets the wrong judge type), the harness
+    When a configured threshold's metric is `None` (the judge **errored** on every case,
+    no case produced a value, or the key targets the wrong judge type), the harness
     records it as a regression with an `n/a` value rather than skipping it. The rationale:
     a threshold you asked for but that can never evaluate is a mistake worth surfacing,
     not hiding.
@@ -63,9 +62,29 @@ that is *not* silently ignored.
 
     The detail names the cause: *"pass_rate unavailable — judge errored on 12 cases; see
     the per-case rationales"* when every value was rejected (by its `score_range`, say),
-    or *"…judge skipped for all cases or not a boolean judge"* when the judge genuinely
-    never ran. Fix the first by looking at the rationales, the second by switching to
-    `min_mean` for a numeric judge or by loosening an `if:` that skipped every case.
+    *"…not a boolean judge"* for a wrong-type key, or *"…no case produced a value"* when
+    the judge returned no value at all. Fix the first by looking at the rationales, the
+    second by switching to `min_mean` for a numeric judge.
+
+!!! note "A judge skipped by its `if:` for every case is not applicable"
+    When a judge's [`if:` condition](../reference/config/judges.md#conditional-judges-if) is false for every
+    selected case — running a subset with no triage cases against a triage-only judge,
+    say — its `min_pass_rate` and `min_mean` are **not applicable**: neither a pass nor a
+    regression. The scoring command prints
+    `NOT APPLICABLE: [triage] `if:` false for all 3 cases; score thresholds not evaluated`,
+    and the report shows `N/A`.
+
+    This holds only when every selected case was explicitly skipped by its condition.
+    A condition that raised, a judge error, incomplete evidence or a result without a
+    value keeps the judge applicable, so those still regress, as does a wrong-type key
+    (`min_win_rate` on a non-pairwise judge). When at least one case is scored, the
+    thresholds apply to the scored cases as usual.
+
+    The distinction comes from `skipped_cases` in `summary.yaml`. A summary written
+    before that field existed (or a Harbor/EvalHub summary, which does not record it)
+    keeps the old behavior: the threshold regresses with *"…judge skipped for all cases
+    or not a boolean judge"*. If a suite must have at least one applicable case, enforce
+    that separately: a not-applicable judge does not prove coverage.
 
 !!! warning "Partial errors shrink the sample — gate them with `max_error_rate`"
     A judge that errors on *some* cases still produces a `mean` — over the survivors only.
@@ -104,7 +123,10 @@ flowchart TD
     C --> E[min_mean -> mean]
     C --> F[min_win_rate -> win_rate]
     C --> EC[max_error_rate -> error_rate]
-    D & E & F --> G{metric is None?}
+    D & E --> NA{if: false for every case?}
+    NA -- yes --> N[not applicable]
+    NA -- no --> G
+    F --> G{metric is None?}
     G -- yes --> R1[regression: n/a]
     G -- no --> H{metric < threshold?}
     H -- yes --> R2[regression]

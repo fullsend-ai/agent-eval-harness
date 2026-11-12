@@ -1537,12 +1537,20 @@ def _render_scoring_summary(summary, config, baseline_summary=None):
         pass_rate = agg.get("pass_rate")
         mean = agg.get("mean")
 
+        try:
+            not_applicable = _judge_not_applicable(agg)
+        except Exception:
+            not_applicable = False
+
         if pass_rate is not None:
             metric_name = "pass_rate"
             metric_val = f"{pass_rate:.0%}"
         elif mean is not None:
             metric_name = "mean"
             metric_val = f"{mean:.2f}"
+        elif not_applicable:
+            metric_name = "—"
+            metric_val = f"skipped ({agg['skipped_cases']} cases)"
         else:
             metric_name = "—"
             metric_val = "—"
@@ -1575,9 +1583,10 @@ def _render_scoring_summary(summary, config, baseline_summary=None):
 
         # The column shows one representative bound; which one is cosmetic.
         if isinstance(thresh, dict):
-            if "min_pass_rate" in thresh and pass_rate is not None:
+            if "min_pass_rate" in thresh and (pass_rate is not None
+                                              or not_applicable):
                 thresh_str = f"&ge; {_esc(_pct(thresh['min_pass_rate']))}"
-            elif "min_mean" in thresh and mean is not None:
+            elif "min_mean" in thresh and (mean is not None or not_applicable):
                 thresh_str = f"&ge; {_esc(str(thresh['min_mean']))}"
             elif "min_win_rate" in thresh:
                 thresh_str = f"&ge; {_esc(_pct(thresh['min_win_rate']))}"
@@ -1593,6 +1602,11 @@ def _render_scoring_summary(summary, config, baseline_summary=None):
         if judge_name in _breached:
             status_cls = "fail"
             status_label = "FAIL"
+        elif not_applicable:
+            # `if:` false for every case: its score thresholds were waived by
+            # the detector, which is neither a pass nor a regression.
+            status_cls = "skip"
+            status_label = "N/A"
         elif thresh_str != "—" and _breach_known:
             # A satisfied threshold is a PASS even when the metric it gates on
             # isn't one this table displays (win_rate, error rate).
@@ -1696,6 +1710,14 @@ def _detect_regressions(judges, thresholds, pairwise=None):
     """
     from score import detect_regressions
     return detect_regressions(judges, thresholds, pairwise=pairwise)
+
+
+def _judge_not_applicable(agg):
+    """score.py's test for a judge whose `if:` was false for every case — the
+    same one `detect_regressions` waives score thresholds on, so the report's
+    N/A agrees with the scoring command."""
+    from score import judge_not_applicable
+    return judge_not_applicable(agg)
 
 
 def _render_regressions(summary, config):
