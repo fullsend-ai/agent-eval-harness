@@ -162,6 +162,31 @@ def test_a_wrong_type_threshold_still_fails(tmp_path):
         {"triage": na}, {"triage": {"min_win_rate": 0.5}})] == ["win_rate"]
 
 
+def test_a_wrong_type_threshold_fails_on_an_all_skipped_numeric_judge(tmp_path):
+    judge = ("  - name: triage\n"
+             "    feedback_type: float\n"
+             "    score_range: [0, 1]\n"
+             "    if: \"annotations.get('triage')\"\n"
+             "    check: \"return (0.5, 'numeric')\"\n")
+    agg = _score(tmp_path, judge, [False, False])
+    assert agg["skipped_cases"] == 2 and agg["value_kind"] == "numeric"
+    for live in (agg, _persisted(agg)):
+        regs = sc.detect_regressions({"triage": live},
+                                     {"triage": {"min_pass_rate": 0.5}})
+        assert [r.metric for r in regs] == ["pass_rate"]
+        assert regs[0].detail == "pass_rate unavailable — not a boolean judge"
+        # `min_mean` fits a numeric judge, so it is still waived.
+        assert sc.detect_regressions({"triage": live},
+                                     {"triage": {"min_mean": 0.5}}) == []
+
+
+def test_an_undeclared_judge_type_keeps_the_exemption(tmp_path):
+    agg = _score(tmp_path, BOOL_JUDGE, [False, False])
+    assert "value_kind" not in agg
+    assert sc.detect_regressions({"triage": agg},
+                                 {"triage": {"min_pass_rate": 0.5}}) == []
+
+
 @pytest.mark.parametrize("label,agg", [
     ("all errored", {"mean": None, "pass_rate": None, "scored_cases": 0,
                      "errored_cases": 2, "skipped_cases": 1}),

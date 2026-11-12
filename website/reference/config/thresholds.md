@@ -80,7 +80,10 @@ data:
 The one exception is a judge whose `if:` condition was false for **every** selected
 case: its `min_pass_rate` and `min_mean` are **not applicable** — neither a pass nor a
 regression. It is read from `skipped_cases` and `selected_cases` in `summary.yaml` (equal
-counts); a summary without those fields keeps failing as before. See
+counts); a summary without those fields keeps failing as before. A `min_pass_rate`
+on a judge that declares a numeric type (`feedback_type: int`/`float` or a
+`score_range`, recorded as `value_kind` in `summary.yaml`) is still a wrong-type
+failure. See
 [not applicable judges](../../concepts/thresholds.md#match-the-key-to-the-judges-value-type).
 
 ```mermaid

@@ -1359,6 +1359,18 @@ def _numeric_bounds(jc):
     return (lo, hi, is_int)
 
 
+def _declared_value_kind(jc):
+    """The value type a judge's config declares: ``"bool"``, ``"numeric"`` or
+    None when it declares neither (`feedback_type` is optional and never
+    inferred, so an undeclared judge is not assumed to be either)."""
+    ft = getattr(jc, "feedback_type", "")
+    if ft == "bool":
+        return "bool"
+    if ft in ("int", "float") or getattr(jc, "score_range", None):
+        return "numeric"
+    return None
+
+
 def _coerce_number(value, is_int):
     """Cast a parsed score to the judge's feedback_type."""
     return int(round(float(value))) if is_int else float(value)
@@ -3677,6 +3689,12 @@ def score_cases(judges, case_dirs, config, run_id=None, samples_override=None, r
     judge_bounds = {jc.name: _numeric_bounds(jc)
                     for jc in config.judges if jc.score_range}
     load_files = _judges_read_files(judges)
+    # Recorded so an all-skipped judge cannot hide a wrong-type threshold: with
+    # no values there is nothing else to tell a numeric judge from a boolean.
+    for jc in config.judges:
+        kind = _declared_value_kind(jc)
+        if kind and jc.name in aggregated:
+            aggregated[jc.name]["value_kind"] = kind
 
     def _score_case(case_dir):
         case_id = case_dir.name
@@ -5648,9 +5666,10 @@ def _unavailable_reason(current, metric, kind):
     if "skipped_cases" in current:
         # A summary that counts skips can tell the causes apart: an all-skipped
         # judge is not applicable and never reaches here (see
-        # `judge_not_applicable`), so values without a metric are a wrong-type
+        # `judge_not_applicable`, except a wrong-type `min_pass_rate` on a
+        # numeric judge), so values without a metric are a wrong-type
         # threshold, and no values at all are results that carried none.
-        if current.get("scored_cases"):
+        if current.get("scored_cases") or _all_cases_skipped(current):
             return f"{metric} unavailable — not {kind}"
         return f"{metric} unavailable — no case produced a value"
     # Older summaries do not record skips, so the two causes stay merged.
@@ -5658,16 +5677,14 @@ def _unavailable_reason(current, metric, kind):
             f"or not {kind}")
 
 
-def judge_not_applicable(current):
-    """Whether a judge's `if:` condition was false for every selected case.
+def _all_cases_skipped(current):
+    """Whether every selected case was an explicit `if:`-false skip.
 
-    Such a judge was deliberately inapplicable, so its score thresholds
-    (`min_pass_rate`, `min_mean`) are neither a pass nor a regression. Read
-    only from the explicit `skipped_cases` count that `score_cases` records
+    Read only from the explicit `skipped_cases` count that `score_cases` records
     for a condition that evaluated false — never inferred from a missing
     mean, and required to equal `selected_cases` — so any error, incomplete
-    evidence or result without a value keeps the judge applicable. Summaries written before `skipped_cases` existed
-    have no count and are never treated as not applicable.
+    evidence or result without a value is not a skip. Summaries written before
+    `skipped_cases` existed have no count and never qualify.
     """
     if not isinstance(current, dict) or not current.get("skipped_cases"):
         return False
@@ -5682,6 +5699,24 @@ def judge_not_applicable(current):
                 or current.get("incomplete_cases")
                 or current.get("mean") is not None
                 or current.get("pass_rate") is not None)
+
+
+def judge_not_applicable(current, metric=None):
+    """Whether a judge's `if:` condition was false for every selected case.
+
+    Such a judge was deliberately inapplicable, so its score thresholds
+    (`min_pass_rate`, `min_mean`) are neither a pass nor a regression. Any
+    error, incomplete evidence or result without a value keeps the judge
+    applicable (see `_all_cases_skipped`).
+
+    With `metric` (a threshold key), the exemption is withheld from a
+    threshold that can never measure the judge's declared value type:
+    `min_pass_rate` on a numeric judge stays a wrong-type failure.
+    """
+    if not _all_cases_skipped(current):
+        return False
+    return not (metric == "min_pass_rate"
+                and current.get("value_kind") == "numeric")
 
 
 # Default for `detect_regressions(pairwise=...)`: the caller has no pairwise
@@ -5798,13 +5833,14 @@ def detect_regressions(current_results, thresholds, baseline_results=None,
         incomplete = current.get("incomplete_cases") or 0
         # A judge whose `if:` was false for every selected case has nothing to
         # gate: its score thresholds are not applicable rather than breached.
-        not_applicable = judge_not_applicable(current)
+        pass_rate_na = judge_not_applicable(current, "min_pass_rate")
+        mean_na = judge_not_applicable(current, "min_mean")
         # When a threshold is configured but its metric is unavailable (None),
         # surface it as a regression instead of silently skipping — a missing
         # metric means the judge errored, produced no value, or the threshold
         # targets the wrong judge type (e.g. min_pass_rate on a numeric judge,
         # whose pass_rate is always None).
-        if "min_pass_rate" in threshold and not not_applicable:
+        if "min_pass_rate" in threshold and not pass_rate_na:
             rate = current.get("pass_rate")
             if rate is None:
                 regressions.append(Regression(
@@ -5863,7 +5899,7 @@ def detect_regressions(current_results, thresholds, baseline_results=None,
                 "omitted evidence from the judge's workspace (see "
                 "`staging_skips`); a score over the remaining cases is not a "
                 "measurement of the agent"))
-        if "min_mean" in threshold and not not_applicable:
+        if "min_mean" in threshold and not mean_na:
             mean = current.get("mean")
             if mean is None:
                 regressions.append(Regression(
@@ -5899,8 +5935,9 @@ def _print_not_applicable(current_results, thresholds, indent=""):
     in the CLI output, not mistaken for a pass."""
     for judge_name, threshold in thresholds.items():
         current = current_results.get(judge_name)
-        if (isinstance(threshold, dict) and judge_not_applicable(current)
-                and ("min_pass_rate" in threshold or "min_mean" in threshold)):
+        if (isinstance(threshold, dict)
+                and any(k in threshold and judge_not_applicable(current, k)
+                        for k in ("min_pass_rate", "min_mean"))):
             print(f"{indent}NOT APPLICABLE: [{judge_name}] `if:` false for "
                   f"all {current['skipped_cases']} cases; score thresholds "
                   "not evaluated")
