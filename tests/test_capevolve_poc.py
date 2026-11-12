@@ -466,6 +466,17 @@ def test_runtime_resources_resolved_by_intake_are_copied_into_runtime_workspace(
     assert (workspace / ".claude/settings.json").read_text() == "{}"
 
 
+def test_rollout_children_are_told_the_harness_root(monkeypatch):
+    """A rollout stages copies of agent_eval for the agent's skill scripts; a
+    copy has no venv beside it, so the children (and through the runner, the
+    agent) must be told which checkout's .eval-venv to use."""
+    from agent_eval._bootstrap import HARNESS_ROOT_ENV, harness_root
+    monkeypatch.delenv(HARNESS_ROOT_ENV, raising=False)
+    assert rollout._child_env()[HARNESS_ROOT_ENV] == harness_root()
+    monkeypatch.setenv(HARNESS_ROOT_ENV, "/operator/harness")
+    assert rollout._child_env()[HARNESS_ROOT_ENV] == "/operator/harness"
+
+
 def test_runtime_resource_names_cannot_escape_the_project(tmp_path):
     with pytest.raises(ValueError, match="runtime resource"):
         rollout._materialize_runtime_resources(

@@ -267,3 +267,153 @@ def test_bootstrap_symlink_realpath(tmp_path):
     assert "VENV_ON_PATH=True" in proc.stdout, (
         f"venv site-packages not on the child's sys.path — plugin_root was resolved "
         f"through the symlink instead of to the real tree\nstdout: {proc.stdout}")
+
+
+# ---------------------------------------------------------------------------
+# AGENT_EVAL_HARNESS_ROOT: a staged COPY of the package has no venv beside it
+# (the runner's plugin staging materializes scripts/agent_eval; a rollout's
+# restored plumbing is a copy too). The launching process names the real
+# checkout; _activate falls back to that venv — and only falls back.
+# ---------------------------------------------------------------------------
+
+def test_activate_falls_back_to_the_named_harness_root(clean_sentinel, monkeypatch):
+    seen = []
+
+    def lookup(root):
+        seen.append(root)
+        return (("/named/.eval-venv/bin/python3", [f"/named/.eval-venv/lib/python{_RUNNING}/site-packages"])
+                if root == "/named" else (None, []))
+
+    monkeypatch.setattr(_bootstrap, "_venv_python_and_site", lookup)
+    patched = []
+    monkeypatch.setattr(_bootstrap, "_patch_syspath", lambda dirs: patched.append(dirs))
+    monkeypatch.setenv(_bootstrap.HARNESS_ROOT_ENV, "/named")
+    _bootstrap._activate()
+    assert seen[1:] == ["/named"]                      # the realpath root first, then the named one
+    assert patched == [[f"/named/.eval-venv/lib/python{_RUNNING}/site-packages"]]
+
+
+def test_a_venv_beside_the_real_package_wins_over_the_named_root(clean_sentinel, monkeypatch):
+    """Fallback, never precedence: nothing that resolved before the variable
+    existed may resolve differently once it is set."""
+    seen = []
+    monkeypatch.setattr(_bootstrap, "_venv_python_and_site",
+                        lambda root: (seen.append(root), ("/real/.eval-venv/bin/python3",
+                                      [f"/real/.eval-venv/lib/python{_RUNNING}/site-packages"]))[1])
+    patched = []
+    monkeypatch.setattr(_bootstrap, "_patch_syspath", lambda dirs: patched.append(dirs))
+    monkeypatch.setenv(_bootstrap.HARNESS_ROOT_ENV, "/named")
+    _bootstrap._activate()
+    assert len(seen) == 1 and "/named" not in seen
+    assert patched == [[f"/real/.eval-venv/lib/python{_RUNNING}/site-packages"]]
+
+
+def test_harness_root_is_the_package_parent():
+    assert _bootstrap.harness_root() == os.path.dirname(os.path.dirname(os.path.realpath(_bootstrap.__file__)))
+
+
+def test_staged_copy_activates_the_named_harness_venv(tmp_path):
+    """End to end in a child process: agent_eval is a COPY under a skill's
+    scripts/ (no venv anywhere near it). Without the variable the venv is not
+    found — the staged-copy failure; with it, the real checkout's venv lands
+    on sys.path exactly as it does for the real package."""
+    root = _make_fake_plugin(tmp_path, _RUNNING)
+    staged = tmp_path / "workspace" / "skills" / "demo" / "scripts"
+    staged.mkdir(parents=True)
+    shutil.copytree(root / "agent_eval", staged / "agent_eval")   # the copy, as staging produces it
+    site = str(root / ".eval-venv" / "lib" / f"python{_RUNNING}" / "site-packages")
+    script = staged / "run.py"
+    script.write_text(textwrap.dedent(f"""
+        import os, sys
+        sys.path.insert(0, os.path.dirname(__file__))
+        import agent_eval._bootstrap as b
+        assert os.path.join("workspace", "skills") in b.__file__, b.__file__   # the copy, not the real package
+        want = {site!r}
+        print("VENV_ON_PATH=" + str(any(os.path.realpath(p) == os.path.realpath(want) for p in sys.path)))
+    """))
+
+    def run(named):
+        env = dict(os.environ)
+        env.pop("_AGENT_EVAL_BOOTSTRAP_DONE", None)
+        env.pop("PYTHONPATH", None)
+        env.pop(_bootstrap.HARNESS_ROOT_ENV, None)
+        if named:
+            env[_bootstrap.HARNESS_ROOT_ENV] = str(root)
+        proc = subprocess.run([sys.executable, str(script)], cwd=str(staged), env=env,
+                              capture_output=True, text=True, timeout=120)
+        assert proc.returncode == 0, f"child failed:\n{proc.stdout}\n{proc.stderr}"
+        return "VENV_ON_PATH=True" in proc.stdout
+
+    assert run(named=False) is False
+    assert run(named=True) is True
+
+
+def test_ensure_harness_root_treats_blank_as_unset():
+    """`export AGENT_EVAL_HARNESS_ROOT=` from a ${VAR:-} template must not switch
+    the fallback off: _activate ignores a blank value, so the producer must too."""
+    assert _bootstrap.ensure_harness_root({})[_bootstrap.HARNESS_ROOT_ENV] == _bootstrap.harness_root()
+    assert _bootstrap.ensure_harness_root({_bootstrap.HARNESS_ROOT_ENV: ""})[_bootstrap.HARNESS_ROOT_ENV] == _bootstrap.harness_root()
+    assert _bootstrap.ensure_harness_root({_bootstrap.HARNESS_ROOT_ENV: "/x"})[_bootstrap.HARNESS_ROOT_ENV] == "/x"
+
+
+def test_staged_copy_under_abi_mismatch_execs_into_the_named_venv(tmp_path):
+    """The developer-box case the feature exists for: system python running a
+    staged-copy script whose only venv is the named checkout's, built for a
+    different interpreter. The re-exec must target THAT venv's python."""
+    root = _make_fake_plugin(tmp_path)                       # python0.0: always a mismatch
+    staged = tmp_path / "workspace" / "skills" / "demo" / "scripts"
+    staged.mkdir(parents=True)
+    shutil.copytree(root / "agent_eval", staged / "agent_eval")
+    spy = textwrap.dedent("""
+        import os
+        def _spy(*a, **k):
+            with open(os.environ["EXECV_MARKER"], "w") as f:
+                f.write(a[0])
+            raise SystemExit("execv-attempted")
+        os.execv = _spy
+    """)
+    script = staged / "run.py"
+    script.write_text(spy + "import os, sys\nsys.path.insert(0, os.path.dirname(__file__))\n"
+                      "import agent_eval._bootstrap\nprint('NO EXEC')\n")
+    marker = tmp_path / "execv.marker"
+    env = dict(os.environ)
+    env.pop("_AGENT_EVAL_BOOTSTRAP_DONE", None)
+    env.pop("PYTHONPATH", None)
+    env["EXECV_MARKER"] = str(marker)
+    env[_bootstrap.HARNESS_ROOT_ENV] = str(root)
+    proc = subprocess.run([sys.executable, str(script)], cwd=str(staged), env=env,
+                          capture_output=True, text=True, timeout=120)
+    assert marker.exists(), f"no execv from the staged copy:\n{proc.stdout}\n{proc.stderr}"
+    assert marker.read_text() == str(root / ".eval-venv" / "bin" / "python3")
+
+
+def test_staged_copy_activates_under_the_environment_a_runner_builds(tmp_path, monkeypatch):
+    """Not a hand-made env: the one CliRunner._build_env produces, with the
+    parent's bootstrap sentinel set as it always is in a harness process. The
+    runner must strip the sentinel and name the checkout, or the staged copy's
+    _activate returns before it ever reads the fallback."""
+    from agent_eval.agent.cli_runner import CliRunner
+    root = _make_fake_plugin(tmp_path, _RUNNING)
+    staged = tmp_path / "workspace" / "skills" / "demo" / "scripts"
+    staged.mkdir(parents=True)
+    shutil.copytree(root / "agent_eval", staged / "agent_eval")
+    site = str(root / ".eval-venv" / "lib" / f"python{_RUNNING}" / "site-packages")
+    script = staged / "run.py"
+    script.write_text(textwrap.dedent(f"""
+        import os, sys
+        sys.path.insert(0, os.path.dirname(__file__))
+        import agent_eval._bootstrap
+        want = {site!r}
+        print("VENV_ON_PATH=" + str(any(os.path.realpath(p) == os.path.realpath(want) for p in sys.path)))
+    """))
+    monkeypatch.setenv("_AGENT_EVAL_BOOTSTRAP_DONE", "1")
+    monkeypatch.delenv("PYTHONPATH", raising=False)
+    # The runner names ITS checkout (the real harness); for this test the
+    # "checkout" is the fake plugin root, passed as an explicit value.
+    monkeypatch.setenv(_bootstrap.HARNESS_ROOT_ENV, str(root))
+    env = CliRunner("echo hi")._build_env()
+    assert "_AGENT_EVAL_BOOTSTRAP_DONE" not in env and env[_bootstrap.HARNESS_ROOT_ENV] == str(root)
+    proc = subprocess.run([sys.executable, str(script)], cwd=str(staged), env=env,
+                          capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, f"child failed:\n{proc.stdout}\n{proc.stderr}"
+    assert "VENV_ON_PATH=True" in proc.stdout, proc.stdout

@@ -30,6 +30,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from agent_eval._bootstrap import HARNESS_ROOT_ENV, ensure_harness_root
 from agent_eval.config import (
     resolve_env_value, resolve_plugin_dir, resolve_plugin_skill_roots)
 
@@ -67,6 +68,7 @@ _SAFE_ENV_KEYS = {
     "PATH", "HOME", "USER", "SHELL", "LANG", "LC_ALL", "TERM",
     "CURSOR_API_KEY", "CURSOR_API_ENDPOINT", "CURSOR_AGENT_BIN",
     "MLFLOW_TRACKING_URI", "MLFLOW_EXPERIMENT_NAME", "AGENT_EVAL_RUNS_DIR",
+    HARNESS_ROOT_ENV,
 }
 _CURSOR_PERMISSION_RE = re.compile(
     r"^\s*(Read|Grep|Glob|Edit|Write|Bash|Shell|WebFetch|WebSearch|Mcp)\((.*)\)\s*$"
@@ -671,6 +673,12 @@ class CursorAgentRunner(EvalRunner):
         # Code.  The CLI receives an argv list, so these values are not shell
         # source text.
         apply(extra_env)
+        # Last, after every overlay: the agent's skill scripts import agent_eval
+        # from wherever they were staged, and a copy has no venv beside it, so
+        # name the real checkout for _bootstrap (fallback only there). A
+        # non-blank value from the ambient env, runner.env or a hook wins; a
+        # blank one from any of them counts as unset.
+        ensure_harness_root(env)
         return env
 
     def _build_command(

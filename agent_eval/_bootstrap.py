@@ -31,6 +31,30 @@ import os
 import sys
 
 _SENTINEL = "_AGENT_EVAL_BOOTSTRAP_DONE"
+#: Names the harness checkout whose ``.eval-venv`` a skill script should use
+#: when the ``agent_eval`` it imported is a staged COPY with no venv beside it
+#: (a rollout's restored plumbing, the runner's plugin staging materializing
+#: ``scripts/agent_eval``). Set by the runners and the rollout runner for their
+#: children; a venv beside the real package always takes precedence.
+HARNESS_ROOT_ENV = "AGENT_EVAL_HARNESS_ROOT"
+
+
+def harness_root():
+    """The checkout this package really lives in — where its ``.eval-venv`` is."""
+    return os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+
+
+def ensure_harness_root(env):
+    """Name this checkout in *env* unless the caller already named one.
+
+    For the environment a runner or the rollout runner hands its children. A
+    blank value counts as unset — ``_activate`` treats it that way, and an
+    ``export AGENT_EVAL_HARNESS_ROOT=`` from a ``${VAR:-}`` template must not
+    silently switch the fallback off. Returns *env* for chaining.
+    """
+    if not env.get(HARNESS_ROOT_ENV):
+        env[HARNESS_ROOT_ENV] = harness_root()
+    return env
 
 
 def _venv_python_and_site(plugin_root):
@@ -92,6 +116,14 @@ def _activate():
     pkg_dir = os.path.dirname(os.path.realpath(__file__))
     plugin_root = os.path.dirname(pkg_dir)
     venv_python, site_dirs = _venv_python_and_site(plugin_root)
+    if not venv_python or not site_dirs:
+        # No venv beside the package: this is a staged copy of it. The
+        # process that launched us may name the real checkout — fall back to
+        # that venv. Fallback only, never precedence: whatever resolved
+        # before this variable existed still resolves exactly as it did.
+        named = os.environ.get(HARNESS_ROOT_ENV)
+        if named:
+            venv_python, site_dirs = _venv_python_and_site(named)
 
     # No venv (e.g. in-container harbor verifier / evalhub pod) — nothing to do.
     if not venv_python or not site_dirs:
