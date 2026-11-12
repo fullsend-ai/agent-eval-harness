@@ -39,8 +39,7 @@ def _child_env() -> dict[str, str]:
     # The children stage agent_eval copies for the agent's skill scripts (the
     # restored plumbing, the runner's plugin staging); a copy has no venv
     # beside it. Name the real checkout so _bootstrap still finds .eval-venv;
-    # an operator's explicit value wins. (Placed here, above the sentinel
-    # lines, so it merges cleanly with the comment #299 appends below them.)
+    # an operator's explicit value wins.
     ensure_harness_root(env)
     # The sentinel records bootstrap completion in this process, not in a
     # newly spawned process.
