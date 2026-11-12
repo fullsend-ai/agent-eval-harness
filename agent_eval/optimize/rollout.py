@@ -45,6 +45,13 @@ def _child_env() -> dict[str, str]:
     # The sentinel records bootstrap completion in this process, not in a
     # newly spawned process.
     env.pop("_AGENT_EVAL_BOOTSTRAP_DONE", None)
+    # Deliberately NOT re-pointing AGENT_EVAL_RUNS_DIR at the rollout root.
+    # execute.py forwards that variable into the agent under test, where a
+    # plugin shipping this repo's own Stop guard would then find the
+    # rollout's live execute.pid and block its own agent from stopping; and
+    # score.py harvests few-shot `examples:` from review.yaml under that
+    # root, which rollouts never have. The rollout's directory is passed
+    # explicitly instead (--run-dir on score.py and report.py).
     return env
 
 
@@ -200,9 +207,9 @@ def score_from_summary(
         raise ValueError("optimization requires an explicit eval.yaml 'reward:' configuration")
     reward, _metrics = compose_reward(per_case, judge_ranges=judge_ranges(config), reward_cfg=config.reward)
     # Judge rationale can contain expected/gold content. The proposer only
-    # ever sees score labels and the target-agent transcript — except for
-    # judges the eval author explicitly marked gold-free
-    # (feedback_rationale: true), which contribute a bounded excerpt.
+    # ever sees score labels — except for judges the eval author explicitly
+    # marked gold-free (feedback_rationale: true), which contribute a bounded
+    # excerpt. The target-agent transcript is not among them; see run_case.
     feedback = redact.build_redacted_feedback(
         per_case, reward,
         rationale_judges={j.name for j in config.judges or [] if j.feedback_rationale},
@@ -253,6 +260,14 @@ def _private_plugin(manifest: dict, candidate_dir: Path, plugin: Path) -> None:
         plugin, candidate_dir, (project_root / manifest["apply_to"]).relative_to(source).as_posix(),
         manifest["candidate"],
     )
+    # Rollout-private copies of the plumbing links every copy above dropped
+    # (artifact.restore_plumbing): the runner re-stages this plugin into the
+    # workspace with symlinks=False anyway.
+    if source.resolve().is_relative_to(project_root.resolve()):
+        artifact.restore_plumbing(
+            plugin, source.resolve().relative_to(project_root.resolve()).as_posix(),
+            manifest.get("plumbing_links") or [],
+        )
 
 
 def _skills_plugin(manifest: dict, candidate_dir: Path, plugin: Path) -> None:
@@ -265,15 +280,35 @@ def _skills_plugin(manifest: dict, candidate_dir: Path, plugin: Path) -> None:
     _copy_skills(manifest.get("skill_roots") or [skill_root], plugin / "skills")
     apply_rel = (project_root / manifest["apply_to"]).relative_to(skill_root)
     artifact.stage_candidate(plugin, candidate_dir, (Path("skills") / apply_rel).as_posix(), manifest["candidate"])
+    # Rollout-private copies of the plumbing links (this plugin is uploaded
+    # into the container). plugin/skills flattens every skill root, so map
+    # each root's links onto it in turn.
+    for root in manifest.get("skill_roots") or [skill_root]:
+        root = Path(root).resolve()
+        if root.is_relative_to(project_root.resolve()):
+            artifact.restore_plumbing(
+                plugin / "skills", root.relative_to(project_root.resolve()).as_posix(),
+                manifest.get("plumbing_links") or [],
+            )
 
 
 def _rollout_config(manifest: dict, private: Path, plugin: Path, files: list | None = None) -> Path:
-    """A per-rollout ``extends:`` overlay of the eval config that makes the
-    private plugin the runner's only plugin (``!replace``: the real one must
-    not load alongside it), plus optional shared workspace files."""
+    """A per-rollout ``extends:`` overlay of the eval config that swaps the
+    plugin owning the candidate for its private copy, plus optional shared
+    workspace files.
+
+    ``!replace`` rather than a merge, because the real owning plugin must not
+    load alongside its copy — two plugin roots offering the same skill name.
+    But only *that* plugin is displaced: every other entry of
+    ``runner.plugin_dirs`` is carried through, since the skill under test can
+    depend on skills from a sibling plugin and dropping them changes what is
+    being measured without saying so.
+    """
     extends = os.path.relpath(Path(manifest["eval_config"]).resolve(), private.resolve())
+    plugin_dirs = [str(plugin), *(manifest.get("other_plugin_dirs") or [])]
     text = (f"extends: {json.dumps(extends)}\n"
-            f"runner:\n  plugin_dirs: !replace\n  - {json.dumps(str(plugin))}\n")
+            "runner:\n  plugin_dirs: !replace\n"
+            + "".join(f"  - {json.dumps(entry)}\n" for entry in plugin_dirs))
     if files:
         text += yaml.safe_dump({"dataset": {"workspace": {"files": files}}}, sort_keys=False)
     path = private / "eval.yaml"
@@ -357,6 +392,11 @@ def _execute_local_steps(
             manifest["apply_to"],
             manifest["candidate"],
         )
+        # The workspace mirrors the project's .claude/ tree. Copies, not the
+        # links a normal /eval-run would have: a link back into the checkout
+        # would let one rollout write into code every later rollout runs
+        # (artifact.restore_plumbing).
+        artifact.restore_plumbing(candidate_workspace, "", manifest.get("plumbing_links") or [])
 
     execute_args = [
         "--workspace", str(workspace),
@@ -376,12 +416,18 @@ def _execute_local_steps(
         "--workspace", workspace,
         "--output", run_dir,
     )
+    # --run-dir, not --run-id: a rollout lives in the parallel runs root
+    # (export.runs_dir_for), not where $AGENT_EVAL_RUNS_DIR/<eval>/<run-id>
+    # would put it. The explicit directory keeps everything else these
+    # scripts resolve against the ordinary root — notably score.py's few-shot
+    # `examples:` harvest, which reads human review.yaml labels that only
+    # ordinary runs have.
     try:
         _run_script(
             manifest,
             "score.py",
             "judges",
-            "--run-id", run_id,
+            "--run-dir", run_dir,
             "--config", config_path,
             "--workspace", workspace,
         )
@@ -398,7 +444,7 @@ def _execute_local_steps(
     try:
         # The same report.html a plain /eval-run leaves (no model calls; the
         # Harbor substrate's agent_eval.harbor.run writes its own).
-        _run_script(manifest, "report.py", "--run-id", run_id, "--config", config_path)
+        _run_script(manifest, "report.py", "--run-dir", run_dir, "--config", config_path)
     except RuntimeError:
         pass  # a report is a convenience, never a reason to lose the measurement
 
@@ -542,10 +588,13 @@ def run_case(manifest: dict, task_id: str, candidate_dir: Path, seed: int, subst
     started = time.time()
     config = EvalConfig.from_yaml(manifest["eval_config"])
 
+    # The transcript is read for the run dir's sake and deliberately dropped
+    # below; see the rollout dict.
     if substrate.get("runner") == "harbor":
-        execution_error, output = _execute_harbor(manifest, substrate, task_id, candidate_dir, run_id, run_dir)
+        execution_error, _transcript = _execute_harbor(
+            manifest, substrate, task_id, candidate_dir, run_id, run_dir)
     else:
-        execution_error, output = _execute_local(manifest, task_id, candidate_dir, run_id, run_dir)
+        execution_error, _transcript = _execute_local(manifest, task_id, candidate_dir, run_id, run_dir)
 
     summary_path = run_dir / "summary.yaml"
     summary = (yaml.safe_load(summary_path.read_text(encoding="utf-8")) or {}) if summary_path.is_file() else {}
@@ -566,8 +615,17 @@ def run_case(manifest: dict, task_id: str, candidate_dir: Path, seed: int, subst
     export.write_condition(run_dir, condition)
     rollout = {
         "task_id": task_id,
-        "output": output,
-        "trace": output,
+        # No transcript, by design. A search engine persists Rollout.output
+        # and .trace into its run record, which sits inside the tree the
+        # proposer reads every iteration — and a target-agent transcript
+        # quotes the case input and everything the agent read on the way,
+        # gold included. Nothing here consumes it either: score() reads the
+        # composed reward and the redacted feedback out of metadata below.
+        # The generated INSTRUCTIONS.md tells the proposer transcripts are
+        # unavailable; this is the line that makes that true. The full
+        # transcript stays on disk under run_dir for a human to read.
+        "output": None,
+        "trace": None,
         "cost_usd": cost,
         "tokens": tokens,
         "error": error_message,

@@ -82,21 +82,44 @@ def validate_candidate_block(raw: dict, config: EvalConfig) -> tuple[dict, list[
     return block, components
 
 
-def _copy_without_symlinks(source: Path, destination: Path) -> None:
+def _copy_without_symlinks(source: Path, destination: Path) -> list[Path]:
+    """Copy *source* into *destination*, leaving every symlink behind.
+
+    A symlink *inside* the tree is skipped, not fatal. Skill packages in this
+    repo carry plumbing symlinks by convention — CLAUDE.md mandates
+    ``skills/<skill>/scripts/agent_eval -> ../../../agent_eval`` — so refusing
+    one made the harness's own skills unusable as an optimization candidate.
+    They are also exactly what must not travel: the snapshot is copied on into
+    per-rollout workspaces and into containers, where a link pointing out of
+    the tree either dangles or escapes it.
+
+    The *root* being a symlink stays a hard error. That one is an explicit
+    ``optimize.candidate.source`` aimed at a link rather than incidental
+    plumbing, and silently snapshotting nothing would be the worse failure.
+
+    Returns the symlinks that were skipped, so the caller can report them.
+    """
     if source.is_symlink():
         raise ValueError(f"candidate seed source must not be a symlink: {source}")
+    skipped: list[Path] = []
     if source.is_dir():
-        for child in source.rglob("*"):
-            if child.is_symlink():
-                raise ValueError(f"candidate seed source contains a symlink: {child}")
-        shutil.copytree(source, destination)
+        def _ignore(directory, names):
+            dropped = {name for name in names if Path(directory, name).is_symlink()}
+            skipped.extend(Path(directory, name) for name in sorted(dropped))
+            return dropped
+
+        shutil.copytree(source, destination, ignore=_ignore)
     else:
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, destination)
+    return skipped
 
 
-def snapshot_candidate(components: list[dict], destination: Path) -> None:
-    """Copy each resolved candidate component into *destination* (the seed capability)."""
+def snapshot_candidate(components: list[dict], destination: Path) -> list[str]:
+    """Copy each resolved candidate component into *destination* (the seed capability).
+
+    Returns the source-relative paths of any symlinks left behind.
+    """
     destination = Path(destination)
     if destination.exists():
         resolved = destination.resolve()
@@ -104,8 +127,15 @@ def snapshot_candidate(components: list[dict], destination: Path) -> None:
             raise ValueError(f"refusing to delete a protected directory: {resolved}")
         shutil.rmtree(destination)
     destination.mkdir(parents=True)
+    skipped: list[str] = []
     for component in components:
-        _copy_without_symlinks(Path(component["source"]), destination / component["dest"])
+        source = Path(component["source"])
+        for link in _copy_without_symlinks(source, destination / component["dest"]):
+            # Named by where it would have landed in the snapshot, so the
+            # path means the same thing for every component regardless of
+            # where on disk that component was seeded from.
+            skipped.append((Path(component["dest"]) / link.relative_to(source)).as_posix())
+    return skipped
 
 
 # ── Overlay: stage a candidate into an isolated rollout workspace ("make it live") ──
@@ -132,6 +162,74 @@ def _reject_symlinks(path: Path) -> None:
                 raise ValueError(f"candidate files must not contain symlinks: {child}")
 
 
+def restore_plumbing(staged_root: Path, prefix: str, plumbing_links: list[dict]) -> list[Path]:
+    """Put back, as rollout-private copies, the symlinks every copy on the way
+    into a rollout left out.
+
+    ``plumbing_links`` is intake's list (``intake.plumbing_links``): the
+    project-authored symlinks, as project-relative paths, whose target
+    resolves inside the project and outside its measurement material.
+    Nothing copied into a rollout carries one — ``_copy_tree_local``, the
+    candidate snapshot and the runner's own plugin staging all drop or
+    materialize links — but the skill still needs what they point at to run
+    (this repo's own ``scripts/agent_eval -> ../../../agent_eval`` is the
+    import plumbing every skill script depends on).
+
+    *staged_root* mirrors the project directory *prefix* (``""`` for the
+    project root itself): a link at project path ``<prefix>/<rest>`` is put
+    back at ``<staged_root>/<rest>``; links outside *prefix* are not this
+    tree's business. Call it after the candidate overlay, since that
+    replaces whole directories.
+
+    Always a copy, never a link back into the checkout — even in the case
+    workspace, where a normal ``/eval-run`` *does* symlink ``.claude/skills``
+    to the project. A search loop is not one run: a link would let any
+    rollout's agent, or the candidate's own scripts, write into shared code
+    that then persists into every later rollout and the baseline — a
+    contamination channel, and for a target like ``agent_eval`` (the judge
+    engine's own package) a reward-hacking one. A copy also lets the nested
+    links under a permitted target be filtered, which a link cannot. The
+    cost is the one ``agent_eval._bootstrap`` pays for any staged copy
+    (it finds the harness venv relative to its own real path): the same as a
+    normal run of a plugin layout, where the runner materializes in-plugin
+    links as content anyway (``claude_code.stage_plugin_dir``).
+
+    The candidate wins on collision: if the proposer put real content at a
+    link's path, or removed the directory that held it, nothing is restored
+    there — that is its edit to make.
+    """
+    staged_root = Path(staged_root)
+    # "." is what relative_to() yields for the project root itself.
+    base = relative_path(prefix, "plumbing prefix") if prefix not in ("", ".") else Path()
+    restored: list[Path] = []
+    for link in plumbing_links:
+        rel = relative_path(str(link["path"]), "plumbing link")
+        if base.parts:
+            if not rel.is_relative_to(base):
+                continue
+            rel = rel.relative_to(base)
+        location = staged_root / rel
+        if location.exists() or location.is_symlink() or not location.parent.is_dir():
+            continue
+        target = Path(link["target"])
+        if target.is_symlink() or not target.exists():
+            continue
+        if target.is_dir():
+            # The same filter every other copy into a rollout applies
+            # (_copy_tree_local, the runner's plugin staging): no nested
+            # repositories or bytecode caches travel, and no links.
+            bulk = shutil.ignore_patterns(".git", "node_modules", "__pycache__")
+            shutil.copytree(
+                target, location, symlinks=False,
+                ignore=lambda directory, names: (
+                    set(bulk(directory, names)) | {n for n in names if Path(directory, n).is_symlink()}),
+            )
+        else:
+            shutil.copy2(target, location)
+        restored.append(location)
+    return restored
+
+
 def stage_candidate(
     case_workspace: Path,
     candidate_dir: Path,
@@ -143,6 +241,8 @@ def stage_candidate(
     A normal workspace build symlinks project skill directories. Any such link
     along ``apply_to`` is detached into a workspace-local copy before candidate
     files are written, so concurrent rollouts never mutate the project.
+    Plumbing links are put back afterwards by the caller
+    (:func:`restore_plumbing`), since this replaces whole directories.
     """
     root = Path(case_workspace).resolve()
     candidate = Path(candidate_dir).resolve(strict=True)

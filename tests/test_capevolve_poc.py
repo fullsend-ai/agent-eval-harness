@@ -13,7 +13,7 @@ import pytest
 
 from agent_eval.engines import capevolve
 from agent_eval.engines import _bridge_template as bridge_template
-from agent_eval.optimize import artifact, intake, rollout
+from agent_eval.optimize import artifact, export, intake, rollout
 
 # cap-evolve's real templates/project, when a local install carries one
 # (an editable install, or $CAPEVOLVE_SKILLS_DIR next to a checkout).
@@ -95,6 +95,295 @@ def test_snapshot_candidate_refuses_to_delete_a_protected_directory(tmp_path, mo
     monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
     with pytest.raises(ValueError, match="protected directory"):
         artifact.snapshot_candidate([], tmp_path)
+
+
+def test_snapshot_candidate_skips_symlinks_instead_of_refusing_the_skill(tmp_path):
+    """The repo's own convention is a symlink inside every skill.
+
+    CLAUDE.md mandates ``skills/<skill>/scripts/agent_eval -> ../../../agent_eval``
+    so skill scripts can import the package. Hard-erroring on it meant the
+    harness's own skills could not be optimization candidates at all. Skip the
+    link, copy everything else, and report what was left behind — a snapshot
+    travels into rollout workspaces and containers, where a link out of the
+    tree would dangle anyway.
+    """
+    skill = tmp_path / "skills" / "demo"
+    (skill / "scripts").mkdir(parents=True)
+    (skill / "SKILL.md").write_text("seed", encoding="utf-8")
+    (skill / "scripts" / "run.py").write_text("print(1)", encoding="utf-8")
+    (tmp_path / "agent_eval").mkdir()
+    (skill / "scripts" / "agent_eval").symlink_to(tmp_path / "agent_eval", target_is_directory=True)
+
+    destination = tmp_path / "seed_capability"
+    skipped = artifact.snapshot_candidate(
+        [{"dest": "demo", "source": str(skill), "is_dir": True}], destination)
+
+    assert (destination / "demo/SKILL.md").read_text() == "seed"
+    assert (destination / "demo/scripts/run.py").is_file()
+    assert not (destination / "demo/scripts/agent_eval").exists()
+    assert skipped == ["demo/scripts/agent_eval"]
+
+
+def test_snapshot_candidate_still_refuses_a_symlinked_source_root(tmp_path):
+    """Incidental plumbing is skipped; an explicit candidate source aimed at a
+    link is a config mistake, and snapshotting nothing would be worse."""
+    real = tmp_path / "real"
+    real.mkdir()
+    (real / "SKILL.md").write_text("seed", encoding="utf-8")
+    link = tmp_path / "link"
+    link.symlink_to(real, target_is_directory=True)
+    with pytest.raises(ValueError, match="must not be a symlink"):
+        artifact.snapshot_candidate(
+            [{"dest": "demo", "source": str(link), "is_dir": True}], tmp_path / "seed")
+
+
+def test_plumbing_links_follow_the_runtime_resource_rule(tmp_path, monkeypatch):
+    """Which of a skill's symlinks come back as content in a rollout: the
+    same rule runtime_resources applies to everything else entering the
+    agent's view. Inside the project and outside measurement material —
+    yes; the dataset, outside the project, dangling — no, with a warning."""
+    monkeypatch.chdir(tmp_path)
+    _bare_benchmark(tmp_path)
+    (tmp_path / "agent_eval").mkdir()
+    (tmp_path / "agent_eval/__init__.py").write_text("", encoding="utf-8")
+    skill = tmp_path / ".claude/skills/pipeline"
+    (skill / "scripts").mkdir()
+    (skill / "scripts/agent_eval").symlink_to("../../../../agent_eval")
+    (skill / "gold").symlink_to("../../../eval/dataset")
+    (skill / "outside").symlink_to(tmp_path.parent)
+    (skill / "gone").symlink_to("nowhere")
+    (skill / "loop").symlink_to("loop")
+    (skill / "scripts/repo").symlink_to("../../../..")   # the project root itself
+    from agent_eval.config import EvalConfig
+    config = EvalConfig.from_yaml("eval.yaml")
+    # A candidate of just SKILL.md: the links are the skill directory's, and
+    # the skill still needs them to run, so they are keyed on apply_to.
+    components = [{"dest": "SKILL.md", "source": str(skill / "SKILL.md"), "is_dir": False}]
+
+    links, warnings = intake.plumbing_links(tmp_path, config, components, [".claude/skills/pipeline"])
+
+    assert links == [{"path": ".claude/skills/pipeline/scripts/agent_eval",
+                      "target": str((tmp_path / "agent_eval").resolve())}]
+    dropped = {w.split(" ")[2] for w in warnings}
+    assert dropped == {".claude/skills/pipeline/" + name
+                       for name in ("gold", "outside", "gone", "loop", "scripts/repo")}
+    assert any("pipeline/gold" in w and "measurement material" in w for w in warnings)
+    assert any("scripts/repo" in w and "project root" in w for w in warnings)
+
+
+def test_plumbing_keeps_shared_code_under_the_skill_tree_but_not_a_seed_home(tmp_path, monkeypatch):
+    """The exclusion is by path, not top-level name: `.claude/skills/_shared`
+    is exactly the kind of target a skill links to, and a normal /eval-run
+    resolves it (the workspace's .claude/skills is a link to the project). A
+    target inside a candidate component's own seed home is different: the
+    candidate replaced that directory, so a link back to the project's copy
+    would hand the agent the seed next to the live candidate."""
+    monkeypatch.chdir(tmp_path)
+    _plugin_benchmark(tmp_path)
+    (tmp_path / "skills/_shared").mkdir()
+    (tmp_path / "skills/_shared/lib.py").write_text("X = 1", encoding="utf-8")
+    (tmp_path / "skills/decompose/scripts").mkdir()
+    (tmp_path / "skills/decompose/scripts/shared").symlink_to("../../_shared")
+    (tmp_path / "skills/review/scripts").mkdir()
+    (tmp_path / "skills/review/scripts/peer").symlink_to("../../decompose/scripts")   # into a seed home
+    from agent_eval.config import EvalConfig
+    config = EvalConfig.from_yaml("eval/decompose.yaml")
+    components = [{"dest": "decompose", "source": str(tmp_path / "skills/decompose"), "is_dir": True},
+                  {"dest": "review", "source": str(tmp_path / "skills/review"), "is_dir": True}]
+
+    links, warnings = intake.plumbing_links(tmp_path, config, components, ["skills"])
+
+    assert [l["path"] for l in links] == ["skills/decompose/scripts/shared"]
+    assert links[0]["target"] == str((tmp_path / "skills/_shared").resolve())
+    assert any("skills/review/scripts/peer" in w and "seed skill home" in w for w in warnings)
+    # And the dataset / eval config dir stay out, by path.
+    (tmp_path / "skills/decompose/scripts/cases").symlink_to("../../../eval/cases")
+    (tmp_path / "skills/decompose/scripts/cfg").symlink_to("../../../eval")
+    links, warnings = intake.plumbing_links(tmp_path, config, components, ["skills"])
+    assert [l["path"] for l in links] == ["skills/decompose/scripts/shared"]
+    assert sum("measurement material" in w for w in warnings) >= 2
+
+
+def test_plumbing_protects_judge_material_and_run_records_but_not_the_local_skill_tree(tmp_path, monkeypatch):
+    """Three edges of the by-path rule. The judge material a config names
+    (prompt_file, context) resolves against the project root, as score.py
+    resolves it, and must stay out; so must the default eval/runs even when
+    AGENT_EVAL_RUNS_DIR points elsewhere (earlier ordinary runs keep
+    review.yaml and judge rationale there). `.claude/` itself is NOT
+    measurement material: the project-local skill tree lives in it."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("AGENT_EVAL_RUNS_DIR", str(tmp_path / "elsewhere-runs"))
+    _bare_benchmark(tmp_path)
+    (tmp_path / "eval/prompts").mkdir()
+    (tmp_path / "eval/prompts/quality.md").write_text("Expected answer: 42", encoding="utf-8")
+    (tmp_path / "rubrics").mkdir()
+    (tmp_path / "rubrics/ctx.md").write_text("gold-ish", encoding="utf-8")
+    (tmp_path / "reference").mkdir()
+    (tmp_path / "reference/answers.md").write_text("case-1: 42", encoding="utf-8")
+    (tmp_path / "eval_judges").mkdir()
+    (tmp_path / "eval_judges/__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "eval_judges/quality.py").write_text("EXPECTED = {'case-1': 'gold'}\n"
+                                                      "def score(outputs): return True, 'ok'\n", encoding="utf-8")
+    eval_yaml = tmp_path / "eval.yaml"
+    eval_yaml.write_text(eval_yaml.read_text() + """  - name: rubric
+    prompt_file: eval/prompts/quality.md
+    context: [rubrics/ctx.md]
+    feedback_type: bool
+  - name: grounded
+    prompt: Judge it.
+    feedback_type: bool
+    agent:
+      context: [reference]
+  - name: coded
+    module: eval_judges.quality
+    function: score
+    feedback_type: bool
+""", encoding="utf-8")
+    (tmp_path / "eval/runs/bench/r1").mkdir(parents=True)
+    (tmp_path / "eval/runs/bench/r1/review.yaml").write_text("label: gold", encoding="utf-8")
+    skills = tmp_path / ".claude/skills"
+    (skills / "_shared").mkdir()
+    (skills / "_shared/lib.py").write_text("X = 1", encoding="utf-8")
+    skill = skills / "pipeline"
+    (skill / "scripts").mkdir()
+    (skill / "scripts/shared").symlink_to("../../_shared")
+    (skill / "scripts/prompts").symlink_to("../../../../eval/prompts")
+    (skill / "scripts/ctx").symlink_to("../../../../rubrics")
+    (skill / "scripts/history").symlink_to("../../../../eval/runs")
+    (skill / "scripts/reference").symlink_to("../../../../reference")     # an agent judge's grounding
+    (skill / "scripts/judges").symlink_to("../../../../eval_judges")      # a code judge's source
+    # Intra-skill plumbing of a SKILL.md-only candidate: the rest of the
+    # skill directory is staged from the project as-is, so a link to it
+    # resolves to the same content and must come back.
+    (skill / "templates").mkdir()
+    (skill / "templates/t.md").write_text("tpl", encoding="utf-8")
+    (skill / "scripts/templates").symlink_to("../templates")
+    from agent_eval.config import EvalConfig
+    config = EvalConfig.from_yaml("eval.yaml")
+    components = [{"dest": "SKILL.md", "source": str(skill / "SKILL.md"), "is_dir": False}]
+
+    links, warnings = intake.plumbing_links(tmp_path, config, components, [".claude/skills/pipeline"])
+
+    assert [l["path"] for l in links] == [".claude/skills/pipeline/scripts/shared",
+                                          ".claude/skills/pipeline/scripts/templates"]
+    dropped = {w.split(" ")[2] for w in warnings}
+    assert dropped == {".claude/skills/pipeline/scripts/" + n
+                       for n in ("prompts", "ctx", "history", "reference", "judges")}
+
+
+def test_plumbing_copies_skip_repositories_caches_and_nested_links(tmp_path):
+    """Like every other copy into a rollout (_copy_tree_local, the runner's
+    plugin staging): a vendored checkout linked as plumbing must not drag its
+    .git history, bytecode or nested links into the rollout's tree."""
+    target = tmp_path / "vendor"
+    (target / ".git").mkdir(parents=True)
+    (target / ".git/config").write_text("x", encoding="utf-8")
+    (target / "__pycache__").mkdir()
+    (target / "__pycache__/m.cpython-311.pyc").write_text("x", encoding="utf-8")
+    (target / "m.py").write_text("X = 1", encoding="utf-8")
+    # A link nested under a permitted target is not followed either: intake
+    # validated the target, not what lies beneath it.
+    gold = tmp_path / "gold"
+    gold.mkdir()
+    (gold / "answers.yaml").write_text("secret", encoding="utf-8")
+    (target / "nested").symlink_to(gold, target_is_directory=True)
+    staged = tmp_path / "staged/skills/demo/scripts"
+    staged.mkdir(parents=True)
+    artifact.restore_plumbing(tmp_path / "staged", "", [{"path": "skills/demo/scripts/vendor", "target": str(target)}])
+    copied = staged / "vendor"
+    assert (copied / "m.py").is_file()
+    assert not (copied / ".git").exists() and not (copied / "__pycache__").exists()
+    assert not (copied / "nested").exists()
+
+
+def test_staged_candidate_runs_with_its_plumbing_restored(tmp_path):
+    """Skipping scripts/agent_eval in the snapshot is only half a fix: the
+    staged copy of the skill still has to *run*. Its scripts import from
+    sys.path[0], their own directory, so without the plumbing back in place
+    every rollout measures a skill that cannot import — a broken skill, not
+    the one in the checkout. Restored as a real directory, never a link."""
+    project = tmp_path / "project"
+    (project / "agent_eval").mkdir(parents=True)
+    (project / "agent_eval/__init__.py").write_text("VALUE = 'plumbed'\n", encoding="utf-8")
+    skill = project / "skills/demo"
+    (skill / "scripts").mkdir(parents=True)
+    (skill / "SKILL.md").write_text("seed", encoding="utf-8")
+    (skill / "scripts/run.py").write_text("import agent_eval\nprint(agent_eval.VALUE)\n", encoding="utf-8")
+    (skill / "scripts/agent_eval").symlink_to("../../../agent_eval")
+    components = [{"dest": "demo", "source": str(skill), "is_dir": True}]
+    links = [{"path": "skills/demo/scripts/agent_eval", "target": str(project / "agent_eval")}]
+    seed = tmp_path / "seed"
+    artifact.snapshot_candidate(components, seed)
+    assert not (seed / "demo/scripts/agent_eval").exists()
+
+    def _run_staged(workspace, restore=False):
+        workspace.mkdir()
+        artifact.stage_candidate(workspace, seed, "skills", components)
+        if restore:
+            artifact.restore_plumbing(workspace, "", links)
+        return subprocess.run([sys.executable, str(workspace / "skills/demo/scripts/run.py")],
+                              capture_output=True, text=True, cwd=tmp_path)
+
+    # Without the plumbing: the script cannot run. This is what a rollout measured.
+    assert _run_staged(tmp_path / "ws-bare").returncode != 0
+
+    # A rollout-private COPY — never a link back into the checkout, which
+    # would let this rollout's agent write into code every later rollout
+    # runs. The script runs against it all the same.
+    proc = _run_staged(tmp_path / "ws", restore=True)
+    staged = tmp_path / "ws/skills/demo/scripts/agent_eval"
+    assert staged.is_dir() and not staged.is_symlink()
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == "plumbed"
+    # Writes through the staged path stay in the rollout.
+    (staged / "scratch.txt").write_text("x", encoding="utf-8")
+    assert not (project / "agent_eval/scratch.txt").exists()
+
+    # Only the mirrored prefix is this tree's business.
+    other = tmp_path / "ws-other"
+    other.mkdir()
+    assert artifact.restore_plumbing(other, "elsewhere", links) == []
+
+    # The candidate wins on collision: a proposer that put real content at
+    # the link's path made an edit, and the edit is what gets measured.
+    (seed / "demo/scripts/agent_eval").mkdir()
+    (seed / "demo/scripts/agent_eval/__init__.py").write_text("VALUE = 'mine'\n", encoding="utf-8")
+    proc = _run_staged(tmp_path / "ws-collide", restore=True)
+    assert proc.returncode == 0 and proc.stdout.strip() == "mine"
+
+
+def test_a_skill_md_only_candidate_still_gets_its_plumbing(tmp_path):
+    """The documented shape — `candidate: [{dest: SKILL.md, ...}]` with
+    apply_to the skill directory. The skill directory reaches the workspace
+    through _materialize_runtime_resources, whose copy drops symlinks; the
+    overlay then writes only SKILL.md. The plumbing has to come back all the
+    same, or the rollout measures a skill whose scripts cannot import."""
+    project = tmp_path / "project"
+    (project / "agent_eval").mkdir(parents=True)
+    (project / "agent_eval/__init__.py").write_text("VALUE = 'plumbed'\n", encoding="utf-8")
+    skill = project / ".claude/skills/demo"
+    (skill / "scripts").mkdir(parents=True)
+    (skill / "SKILL.md").write_text("seed", encoding="utf-8")
+    (skill / "scripts/run.py").write_text("import agent_eval\nprint(agent_eval.VALUE)\n", encoding="utf-8")
+    (skill / "scripts/agent_eval").symlink_to("../../../../agent_eval")
+    components = [{"dest": "SKILL.md", "source": str(skill / "SKILL.md"), "is_dir": False}]
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    (candidate / "SKILL.md").write_text("candidate", encoding="utf-8")
+    links = [{"path": ".claude/skills/demo/scripts/agent_eval", "target": str(project / "agent_eval")}]
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    rollout._materialize_runtime_resources({"project_root": str(project), "runtime_resources": []}, workspace)
+    assert not (workspace / ".claude/skills/demo/scripts/agent_eval").exists()   # the copy dropped it
+    artifact.stage_candidate(workspace, candidate, ".claude/skills/demo", components)
+    artifact.restore_plumbing(workspace, "", links)
+
+    assert (workspace / ".claude/skills/demo/SKILL.md").read_text() == "candidate"
+    proc = subprocess.run([sys.executable, str(workspace / ".claude/skills/demo/scripts/run.py")],
+                          capture_output=True, text=True, cwd=tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == "plumbed"
 
 
 def test_candidate_overlay_detaches_project_symlink(tmp_path):
@@ -443,9 +732,21 @@ def test_batch_mode_rollouts_also_scrub_gold_from_the_workspace(tmp_path, monkey
     assert not (state["workspace"] / "annotations.yaml").exists()
 
 
-def test_batch_rollout_returns_the_run_level_transcript(tmp_path, monkeypatch):
-    """Caught by the live GLM smoke rollout: batch mode writes stdout.log once
-    per run, not under cases/<id>/, so the proposer got an empty trace."""
+def test_batch_rollout_finds_the_run_level_transcript_but_withholds_it(tmp_path, monkeypatch):
+    """Two halves of one contract.
+
+    The lookup: batch mode writes stdout.log once per run, not under
+    cases/<id>/, and _execute_local must still find it (caught by the live GLM
+    smoke rollout, which came back with an empty one).
+
+    The withholding: it does not travel onward in the Rollout. A search engine
+    persists output/trace into the run record the proposer reads each
+    iteration, and a target-agent transcript quotes the case input and
+    whatever the agent read — which is the exact content redact.py,
+    feedback_rationale and the out-of-tree manifest all exist to keep away
+    from it. The generated INSTRUCTIONS.md promises transcripts are
+    unavailable; this is the assertion behind that promise.
+    """
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("AGENT_EVAL_RUNS_DIR", str(tmp_path / "runs"))
     _demo_eval_yaml(tmp_path, mode="batch")
@@ -472,8 +773,19 @@ def test_batch_rollout_returns_the_run_level_transcript(tmp_path, monkeypatch):
                 "per_case:\n  case-1:\n    quality:\n      value: true\n", encoding="utf-8")
 
     monkeypatch.setattr(rollout, "_run_script", _fake_run_script)
+    seen = {}
+    real_execute_local = rollout._execute_local
+
+    def _spy(*args, **kwargs):
+        result = real_execute_local(*args, **kwargs)
+        seen["transcript"] = result[1]
+        return result
+
+    monkeypatch.setattr(rollout, "_execute_local", _spy)
     result = rollout.run_case(manifest, "case-1", candidate_dir, seed=0)
-    assert result["rollout"]["output"] == "batch transcript"
+    assert seen["transcript"] == "batch transcript"
+    assert result["rollout"]["output"] is None
+    assert result["rollout"]["trace"] is None
     assert result["rollout"]["error"] is None
 
 
@@ -581,7 +893,11 @@ def test_local_rollout_writes_the_standard_report_and_tolerates_its_failure(tmp_
     result = rollout.run_case(manifest, "case-1", candidate_dir, seed=0)
 
     report_args = dict(calls)["report.py"]
-    assert report_args[report_args.index("--run-id") + 1] == result["rollout"]["metadata"]["harness_run_id"]
+    # The directory itself (--run-dir), not an id to resolve under the
+    # ordinary runs root: a rollout does not live there.
+    assert Path(report_args[report_args.index("--run-dir") + 1]).name == result["rollout"]["metadata"]["harness_run_id"]
+    score_args = dict(calls)["score.py"]
+    assert "--run-id" not in score_args and "--run-dir" in score_args
     assert result["rollout"]["error"] is None
     assert result["rollout"]["metadata"]["reward"] == 1.0
 
@@ -790,6 +1106,13 @@ optimize:
     assert "observers" in spec
     assert "mlflow" in spec
     assert "my-experiment" in spec
+    # The observer backend ships in capevolve-telemetry, a distribution apart
+    # from cap-evolve-core. Writing the observer without it is how a campaign
+    # reaches its end against an empty experiment with nothing said, so the
+    # gap is reported at scaffold time rather than discovered afterwards.
+    expected = importlib.util.find_spec("capevolve_telemetry") is None
+    assert any("capevolve_telemetry is not importable" in w
+               for w in result["warnings"]) is expected
 
 
 def _bare_benchmark(tmp_path, *, mode="batch", entry="pipeline"):
@@ -931,8 +1254,232 @@ def test_plugin_candidate_runs_from_a_private_plugin_copy(tmp_path, monkeypatch)
     assert "candidate" not in (tmp_path / "skills/decompose/SKILL.md").read_text()
     # The private copy REPLACES the real plugin rather than loading next to it.
     assert [Path(d) for d in config.runner.plugin_dirs] == [private / "plugin"]
+    assert manifest["other_plugin_dirs"] == []
     assert config.eval_name() == "decompose"
     assert config.resolve_path(config.dataset.path) == tmp_path / "eval/cases"
+
+
+def test_plumbing_links_travel_from_intake_to_the_private_plugin(tmp_path, monkeypatch):
+    """The whole chain, not just its ends: prepare_project records the links
+    in the harness manifest, _private_plugin hands them to stage_candidate,
+    and the staged skill has its plumbing back — as a link, pointing at the
+    project's real package."""
+    monkeypatch.chdir(tmp_path)
+    _plugin_benchmark(tmp_path)
+    (tmp_path / "agent_eval").mkdir()
+    (tmp_path / "agent_eval/__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "skills/decompose/scripts").mkdir()
+    (tmp_path / "skills/decompose/scripts/agent_eval").symlink_to("../../../agent_eval")
+
+    result = capevolve.prepare_project(max_usd=5, optimizer="mock")
+    manifest = json.loads((Path(result["project_dir"]).parent / "harness/candidate.json").read_text())
+    assert manifest["plumbing_links"] == [
+        {"path": "skills/decompose/scripts/agent_eval", "target": str((tmp_path / "agent_eval").resolve())}]
+    seed = Path(result["project_dir"]) / "seed_capability"
+    assert (seed / "decompose/scripts").is_dir()
+    assert not (seed / "decompose/scripts/agent_eval").exists()
+
+    # A candidate is an edit of the seed snapshot — scripts/ and all, minus
+    # the link the snapshot never carried — not a bare SKILL.md.
+    candidate = tmp_path / "candidate"
+    shutil.copytree(seed, candidate)
+    (candidate / "decompose/SKILL.md").write_text("candidate decompose", encoding="utf-8")
+    private = tmp_path / "elsewhere/run.plugin"
+    private.mkdir(parents=True)
+    rollout._private_plugin(manifest, candidate, private / "plugin")
+
+    # A copy, not a link: the runner re-stages every plugin into the
+    # workspace with symlinks=False (claude_code.stage_plugin_dir), which
+    # would drop a link to the checkout — and materializes an in-plugin one
+    # anyway, so content is what a normal run of this layout gets.
+    restored = private / "plugin/skills/decompose/scripts/agent_eval"
+    assert restored.is_dir() and not restored.is_symlink()
+    assert (restored / "__init__.py").is_file()
+    assert (private / "plugin/skills/decompose/SKILL.md").read_text() == "candidate decompose"
+    # And it survives the runner's own staging step unchanged.
+    from agent_eval.agent.claude_code import stage_plugin_dir
+    ws = tmp_path / "agent-ws"
+    ws.mkdir()
+    staged = stage_plugin_dir(private / "plugin", ws)
+    assert (staged / "skills/decompose/scripts/agent_eval/__init__.py").is_file()
+
+
+def test_sibling_skills_in_the_private_plugin_get_their_plumbing_too(tmp_path, monkeypatch):
+    """apply_to naming ONE skill of a plugin: the private plugin still carries
+    every sibling (the entry skill invokes them), copied without links. Their
+    plumbing has to come back as well, or `/review` dies on its first import
+    inside every rollout while nothing warns."""
+    monkeypatch.chdir(tmp_path)
+    _plugin_benchmark(tmp_path)
+    (tmp_path / "agent_eval").mkdir()
+    (tmp_path / "agent_eval/__init__.py").write_text("", encoding="utf-8")
+    for name in ("decompose", "review"):
+        (tmp_path / "skills" / name / "scripts").mkdir()
+        (tmp_path / "skills" / name / "scripts/agent_eval").symlink_to("../../../agent_eval")
+    config_path = tmp_path / "eval/decompose.yaml"
+    config_path.write_text(config_path.read_text() + """optimize:
+  apply_to: skills/decompose
+  candidate:
+    - {dest: SKILL.md, source: skills/decompose/SKILL.md}
+""", encoding="utf-8")
+
+    result = capevolve.prepare_project(max_usd=5, optimizer="mock")
+    manifest = json.loads((Path(result["project_dir"]).parent / "harness/candidate.json").read_text())
+    assert [link["path"] for link in manifest["plumbing_links"]] == [
+        "skills/decompose/scripts/agent_eval", "skills/review/scripts/agent_eval"]
+
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    (candidate / "SKILL.md").write_text("candidate", encoding="utf-8")
+    private = tmp_path / "elsewhere/run.plugin"
+    private.mkdir(parents=True)
+    rollout._private_plugin(manifest, candidate, private / "plugin")
+    for name in ("decompose", "review"):
+        assert (private / "plugin/skills" / name / "scripts/agent_eval/__init__.py").is_file()
+
+
+def test_sibling_plugins_survive_the_rollout_overlay(tmp_path, monkeypatch):
+    """`!replace` displaces only the plugin that owns the candidate.
+
+    The skill under test can call skills from another configured plugin. If
+    the overlay replaced plugin_dirs with just the private copy, those would
+    vanish for every rollout — so the campaign would be measuring a different
+    skill from the one the baseline measured, and nothing would say so.
+    """
+    monkeypatch.chdir(tmp_path)
+    _plugin_benchmark(tmp_path)
+    sibling = tmp_path / "other-plugin"
+    (sibling / ".claude-plugin").mkdir(parents=True)
+    (sibling / ".claude-plugin/plugin.json").write_text('{"name": "sibling"}', encoding="utf-8")
+    (sibling / "skills/helper").mkdir(parents=True)
+    (sibling / "skills/helper/SKILL.md").write_text("Helper.", encoding="utf-8")
+    # A plugin that exports no skills at all — commands only. Skill discovery
+    # never sees it (resolve_plugin_skill_roots fails fast on a missing
+    # skills/), but the runner loads its commands all the same, so it has to
+    # come back too. The list must come from runner.plugin_dirs, not from
+    # which plugins happen to have skills.
+    commands_only = tmp_path / "cmd-plugin"
+    (commands_only / ".claude-plugin").mkdir(parents=True)
+    (commands_only / ".claude-plugin/plugin.json").write_text('{"name": "cmds"}', encoding="utf-8")
+    (commands_only / "commands").mkdir()
+    (commands_only / "commands/hello.md").write_text("Say hello.", encoding="utf-8")
+    config_path = tmp_path / "eval/decompose.yaml"
+    config_path.write_text(
+        config_path.read_text().replace(
+            '    - "."\n', '    - "."\n    - "other-plugin"\n    - "cmd-plugin"\n'),
+        encoding="utf-8")
+
+    result = capevolve.prepare_project(max_usd=5, optimizer="mock")
+    manifest = json.loads((Path(result["project_dir"]).parent / "harness/candidate.json").read_text())
+    assert manifest["other_plugin_dirs"] == [str(sibling), str(commands_only)]
+
+    private = tmp_path / "elsewhere/run.plugin"
+    private.mkdir(parents=True)
+    from agent_eval.config import EvalConfig
+    config = EvalConfig.from_yaml(rollout._rollout_config(manifest, private, private / "plugin"))
+    assert [Path(d) for d in config.runner.plugin_dirs] == [private / "plugin", sibling, commands_only]
+
+
+def test_a_symlinked_skill_directory_is_blocked_at_intake(tmp_path, monkeypatch):
+    """`.claude/skills/<name> -> ../../skills/<name>` is a common layout, and a
+    rollout cannot stage it: every copy on the way drops links, so the skill
+    arrives empty and the baseline is broken from iteration 0. Say so at
+    intake rather than let the campaign spend its budget measuring nothing."""
+    monkeypatch.chdir(tmp_path)
+    _bare_benchmark(tmp_path)
+    real = tmp_path / "real-skills"
+    real.mkdir()
+    shutil.move(str(tmp_path / ".claude/skills/pipeline"), str(real / "pipeline"))
+    (tmp_path / ".claude/skills/pipeline").symlink_to("../../real-skills/pipeline")
+    # A derived optimize: block never gets this far (intake does not list a
+    # symlinked skill dir at all); an explicit one — the reviewer's
+    # reproduction — does, and must be refused with the reason named.
+    (tmp_path / "eval.yaml").write_text((tmp_path / "eval.yaml").read_text() + """optimize:
+  apply_to: .claude/skills/pipeline
+  candidate:
+    - {dest: SKILL.md, source: real-skills/pipeline/SKILL.md}
+""", encoding="utf-8")
+
+    with pytest.raises(intake.IntakeBlocked) as excinfo:
+        capevolve.prepare_project(max_usd=5, optimizer="mock")
+    assert [b["input"] for b in excinfo.value.blocked] == ["skill directory"], excinfo.value.blocked
+    assert "is a symlink" in excinfo.value.blocked[0]["why"]
+    assert "BLOCKED" in (tmp_path / ".capevolve/project/PROJECT.md").read_text()
+
+    # The helper itself, on the exact shapes it checks.
+    from agent_eval.config import EvalConfig
+    config = EvalConfig.from_yaml("eval.yaml")
+    assert capevolve._symlinked_skill_dirs(
+        tmp_path, config, {"apply_to": ".claude/skills/pipeline"},
+        [{"dest": "SKILL.md", "source": str(real / "pipeline/SKILL.md"), "is_dir": False}],
+    ) == [".claude/skills/pipeline"]
+    assert capevolve._symlinked_skill_dirs(
+        tmp_path, config, {"apply_to": ".claude/skills"},
+        [{"dest": "create", "source": str(tmp_path / ".claude/skills/create"), "is_dir": True}],
+    ) == []
+
+
+def test_a_symlinked_skill_root_is_not_blocked(tmp_path, monkeypatch):
+    """`.claude/skills -> ../skills` (the root itself a link) stages fine: the
+    copies resolve the directory they are handed and drop only the links
+    INSIDE it. Intake derives apply_to: .claude/skills for this layout on its
+    own, so a block here would refuse a working project outright."""
+    monkeypatch.chdir(tmp_path)
+    _bare_benchmark(tmp_path)
+    shutil.move(str(tmp_path / ".claude/skills"), str(tmp_path / "skills"))
+    (tmp_path / ".claude/skills").symlink_to("../skills", target_is_directory=True)
+    (tmp_path / "agent_eval").mkdir()
+    (tmp_path / "agent_eval/__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "skills/pipeline/scripts").mkdir()
+    (tmp_path / "skills/pipeline/scripts/agent_eval").symlink_to("../../../agent_eval")
+
+    result = capevolve.prepare_project(max_usd=5, optimizer="mock")   # not blocked
+    manifest = json.loads((Path(result["project_dir"]).parent / "harness/candidate.json").read_text())
+    assert {link["path"] for link in manifest["plumbing_links"]} >= {".claude/skills/pipeline/scripts/agent_eval"}
+    from agent_eval.config import EvalConfig
+    config = EvalConfig.from_yaml(result["eval_config"])
+    assert capevolve._symlinked_skill_dirs(
+        tmp_path, config, {"apply_to": ".claude/skills"},
+        [{"dest": "pipeline", "source": str(tmp_path / "skills/pipeline"), "is_dir": True}]) == []
+    # An ENTRY of the root that is a link is still refused — that one the
+    # copies do drop — whether the component is that directory or a file
+    # nested beneath it (`extra/SKILL.md`: the path to the file passes
+    # through the link). component["source"] is already resolved and says
+    # nothing; the dest path under apply_to is what has to be walked.
+    (tmp_path / "skills/extra").symlink_to("pipeline", target_is_directory=True)
+    assert capevolve._symlinked_skill_dirs(
+        tmp_path, config, {"apply_to": ".claude/skills"},
+        [{"dest": "extra", "source": str(tmp_path / "skills/pipeline"), "is_dir": True}]) == [".claude/skills/extra"]
+    assert capevolve._symlinked_skill_dirs(
+        tmp_path, config, {"apply_to": ".claude/skills"},
+        [{"dest": "extra/SKILL.md", "source": str(tmp_path / "skills/pipeline/SKILL.md"), "is_dir": False}],
+    ) == [".claude/skills/extra"]
+    assert capevolve._symlinked_skill_dirs(
+        tmp_path, config, {"apply_to": ".claude/skills"},
+        [{"dest": "pipeline/SKILL.md", "source": str(tmp_path / "skills/pipeline/SKILL.md"), "is_dir": False}],
+    ) == []
+
+
+def test_a_failed_scaffold_does_not_wedge_the_project_dir(tmp_path, monkeypatch):
+    """The marker is the project dir's "we own this" claim, and it used to be
+    written only at the very end. Anything that raised in between — an
+    unreadable case, Ctrl-C — left the directory created and unmarked, after
+    which every later attempt hit "refusing to overwrite an existing
+    cap-evolve project without the marker". The only way out was deleting a
+    directory the error never named.
+    """
+    monkeypatch.chdir(tmp_path)
+    _bare_benchmark(tmp_path)
+    boom = RuntimeError("scaffold exploded")
+    real_snapshot = artifact.snapshot_candidate
+    monkeypatch.setattr(artifact, "snapshot_candidate",
+                        lambda *a, **k: (_ for _ in ()).throw(boom))
+    with pytest.raises(RuntimeError, match="scaffold exploded"):
+        capevolve.prepare_project(max_usd=5, optimizer="mock")
+
+    monkeypatch.setattr(artifact, "snapshot_candidate", real_snapshot)
+    result = capevolve.prepare_project(max_usd=5, optimizer="mock")
+    assert Path(result["spec_path"]).is_file()
 
 
 def test_overlay_is_re_pointed_when_the_eval_config_changes(tmp_path, monkeypatch):
@@ -1224,12 +1771,23 @@ def test_cost_hint_is_per_case_runner_cost(tmp_path, monkeypatch):
     (runs / "full").mkdir(parents=True)
     (runs / "full/run_result.json").write_text(json.dumps(
         {"cost_usd": 40.0, "per_case": {f"case-{i}": {} for i in range(4)}}), encoding="utf-8")
-    (runs / "opt-1").mkdir()
-    (runs / "opt-1/run_result.json").write_text(json.dumps({"cost_usd": 12.0}), encoding="utf-8")
-    (runs / "opt-1/condition.json").write_text("{}", encoding="utf-8")
+    # A past campaign's rollouts live in the parallel runs root. They are the
+    # most representative sample there is (one case, one candidate), so the
+    # walk has to reach them — not just the ordinary root.
+    rollouts = tmp_path / "eval/runs/.optimize" / config.eval_name()
+    (rollouts / "opt-1").mkdir(parents=True)
+    (rollouts / "opt-1/run_result.json").write_text(json.dumps({"cost_usd": 12.0}), encoding="utf-8")
+    (rollouts / "opt-1/condition.json").write_text(json.dumps(
+        {"engine": "cap-evolve", "candidate_id": "cand_1", "harness_run_id": "opt-1"}), encoding="utf-8")
     (runs / "batch-unknown").mkdir()
     (runs / "batch-unknown/run_result.json").write_text(json.dumps({"cost_usd": 99.0}), encoding="utf-8")
-    assert capevolve._calibrate_cost_from_past_runs(config, tmp_path) == 11.0  # (10 + 12) / 2
+    # An /eval-anova cell also carries a condition.json — factor levels, and
+    # a whole per_case behind its cost. It must not be read as one rollout.
+    (runs / "cell-a").mkdir()
+    (runs / "cell-a/condition.json").write_text(json.dumps({"levels": {"model": "sonnet"}}), encoding="utf-8")
+    (runs / "cell-a/run_result.json").write_text(json.dumps(
+        {"cost_usd": 8.0, "per_case": {f"case-{i}": {} for i in range(4)}}), encoding="utf-8")
+    assert capevolve._calibrate_cost_from_past_runs(config, tmp_path) == 8.0  # (10 + 12 + 2) / 3
 
 
 @pytest.mark.skipif(importlib.util.find_spec("cap_evolve") is None,
@@ -2317,11 +2875,59 @@ def test_read_status_running_with_iteration_breakdown(tmp_path):
     status = capevolve.read_status(tmp_path)
     assert status["status"] == "running"
     assert status["alive"] is True
+    assert status["rollouts_dir"] is None   # no harness manifest in this fixture
     assert status["best_id"] == "seed"
     assert status["spent"] == {"iterations": 3, "usd": 0.4}
     assert status["latest_event"]["candidate"] == "cand_2"
     assert status["iterations"] == {"accepted": 1, "rejected": 1, "indecisive": 1}
     assert status["final"] is None
+
+
+def test_rollouts_dir_is_fixed_at_scaffold_time(tmp_path, monkeypatch):
+    """The rollouts are written under the AGENT_EVAL_RUNS_DIR of the shell
+    that launched the campaign. A later --status from a plain shell must
+    name that place, not recompute one from its own environment."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("AGENT_EVAL_RUNS_DIR", str(tmp_path / "data-runs"))
+    _bare_benchmark(tmp_path)
+    result = capevolve.prepare_project(max_usd=5, optimizer="mock")
+    manifest = json.loads((Path(result["project_dir"]).parent / "harness/candidate.json").read_text())
+    recorded = (tmp_path / "data-runs/.optimize" / manifest["eval_name"]).resolve()
+    assert Path(manifest["rollouts_dir"]) == recorded
+
+    monkeypatch.delenv("AGENT_EVAL_RUNS_DIR")
+    assert export.runs_dir_for(manifest) == recorded          # the rollouts themselves
+    run_dir = tmp_path / ".capevolve/run_x"
+    run_dir.mkdir(parents=True)
+    capevolve._write_campaign_manifest(Path(result["project_dir"]), {
+        "pid": os.getpid(), "create_time": capevolve._process_create_time(os.getpid()),
+        "run_dir": str(run_dir), "log_file": str(tmp_path / "campaign.log"),
+    })
+    assert capevolve.read_status(Path(result["project_dir"]))["rollouts_dir"] == str(recorded)
+
+
+def test_status_names_the_rollout_directory(tmp_path, monkeypatch):
+    """The rollouts sit in a hidden sibling of the ordinary runs, not under
+    <runs>/<eval-name>/ where every other page sends people. --status and the
+    n_scored: 0 warning name the place."""
+    monkeypatch.chdir(tmp_path)
+    _bare_benchmark(tmp_path)
+    result = capevolve.prepare_project(max_usd=5, optimizer="mock")
+    project_dir = Path(result["project_dir"])
+    run_dir = tmp_path / ".capevolve/run_x"
+    run_dir.mkdir(parents=True)
+    (run_dir / "final.json").write_text(json.dumps(
+        {"best_id": "seed", "measurements": {"n_scored": 0, "n_tasks": 3}}), encoding="utf-8")
+    capevolve._write_campaign_manifest(project_dir, {
+        "pid": os.getpid(), "create_time": capevolve._process_create_time(os.getpid()),
+        "run_dir": str(run_dir), "log_file": str(tmp_path / "campaign.log"),
+    })
+
+    status = capevolve.read_status(project_dir)
+    from agent_eval.config import EvalConfig
+    expected = str((tmp_path / "eval/runs/.optimize" / EvalConfig.from_yaml("eval.yaml").eval_name()).resolve())
+    assert status["rollouts_dir"] == expected
+    assert capevolve._coverage_warnings({"n_scored": 0, "n_tasks": 3}, "x.log", expected)[0].endswith(expected)
 
 
 def test_read_status_finished(tmp_path):
@@ -2595,6 +3201,158 @@ def test_apply_winner_keeps_ignored_files_and_drops_only_tracked_ones(tmp_path):
     assert (skill_dir / "notes.local").read_text(encoding="utf-8") == "ignored local data"
 
 
+def test_apply_winner_keeps_the_tracked_plumbing_symlink(tmp_path):
+    """The other half of "the snapshot skips symlinks".
+
+    No candidate ever contains one, so a winner missing ``scripts/agent_eval``
+    is not the optimizer having decided to drop it — it is the snapshot never
+    having carried it. Deleting tracked files absent from the winner is right
+    for ordinary files and wrong for these: it would land on the branch as a
+    removal of the import plumbing CLAUDE.md requires of every skill.
+    """
+    project_root, harness_manifest, campaign_manifest, skill_path, run_dir = _apply_fixture_in_checkout(tmp_path)
+    skill_dir = skill_path.parent
+    (project_root / "agent_eval").mkdir(exist_ok=True)
+    (project_root / "agent_eval" / "__init__.py").write_text("", encoding="utf-8")
+    (skill_dir / "scripts").mkdir()
+    (skill_dir / "scripts" / "run.py").write_text("print(1)", encoding="utf-8")
+    (skill_dir / "scripts" / "agent_eval").symlink_to("../../../agent_eval")
+    (skill_dir / "stale.md").write_text("tracked, genuinely dropped", encoding="utf-8")
+    _git_commit_all(project_root, "add the plumbing symlink")
+
+    winner = run_dir / "candidates/cand_1/demo"
+    (winner / "scripts").mkdir(parents=True)
+    (winner / "SKILL.md").write_text("winner skill", encoding="utf-8")
+    (winner / "scripts" / "run.py").write_text("print(2)", encoding="utf-8")
+    harness_manifest["candidate"] = [{"dest": "demo", "source": str(skill_dir), "is_dir": True}]
+
+    result = capevolve.apply_winner(project_root=project_root, harness_manifest=harness_manifest,
+                                    campaign_manifest=campaign_manifest)
+
+    files = subprocess.run(["git", "ls-tree", "-r", "--name-only", result["branch"], "--", "skills/demo"],
+                           cwd=project_root, capture_output=True, text=True, check=True).stdout.split()
+    assert "skills/demo/scripts/agent_eval" in files   # the symlink survives
+    assert "skills/demo/stale.md" not in files         # an ordinary dropped file still goes
+    assert (skill_dir / "scripts" / "agent_eval").is_symlink()
+
+
+@pytest.mark.parametrize("winner_file, link", [
+    ("scripts/agent_eval/__init__.py", "scripts/agent_eval"),   # through a directory link
+    ("scripts/helper_link.py", "scripts/helper_link.py"),       # onto a file link
+])
+def test_apply_winner_refuses_to_write_through_a_tracked_symlink(tmp_path, winner_file, link):
+    """The other edge of keeping tracked symlinks (previous test).
+
+    copytree(dirs_exist_ok=True) and copy2 both follow a destination link, so
+    a winner with ordinary content where the checkout has a link would write
+    wherever the link points — into this repository's real agent_eval/ for
+    the plumbing link — outside the candidate, outside the skill-scoped
+    `git add`, beyond the rollback. The snapshot carries no symlinks, so a
+    proposer that creates scripts/agent_eval/ as a directory produces exactly
+    this shape. Refuse before the worktree is touched (both reviewers of
+    #299 flagged this independently).
+    """
+    project_root, harness_manifest, campaign_manifest, skill_path, run_dir = _apply_fixture_in_checkout(tmp_path)
+    skill_dir = skill_path.parent
+    (project_root / "agent_eval").mkdir(exist_ok=True)
+    (project_root / "agent_eval" / "__init__.py").write_text("REAL = 1\n", encoding="utf-8")
+    (skill_dir / "scripts").mkdir()
+    (skill_dir / "scripts" / "helper.py").write_text("x = 1\n", encoding="utf-8")
+    (skill_dir / "scripts" / "helper_link.py").symlink_to("helper.py")
+    (skill_dir / "scripts" / "agent_eval").symlink_to("../../../agent_eval")
+    _git_commit_all(project_root, "add the links")
+    original_branch = _current_branch(project_root)
+
+    winner = run_dir / "candidates/cand_1/demo"
+    (winner / Path(winner_file).parent).mkdir(parents=True)
+    (winner / "SKILL.md").write_text("winner skill", encoding="utf-8")
+    (winner / winner_file).write_text("REAL = 'overwritten'\n", encoding="utf-8")
+    harness_manifest["candidate"] = [{"dest": "demo", "source": str(skill_dir), "is_dir": True}]
+
+    with pytest.raises(RuntimeError, match=f"content at or beneath {link}"):
+        capevolve.apply_winner(project_root=project_root, harness_manifest=harness_manifest,
+                               campaign_manifest=campaign_manifest)
+
+    # Nothing was written anywhere: not through the link, not on a branch.
+    assert (project_root / "agent_eval" / "__init__.py").read_text() == "REAL = 1\n"
+    assert (skill_dir / "scripts" / "helper.py").read_text() == "x = 1\n"
+    assert _current_branch(project_root) == original_branch
+    branches = subprocess.run(["git", "branch", "--list", "capevolve/*"], cwd=project_root,
+                              capture_output=True, text=True, check=True).stdout.strip()
+    assert branches == ""
+
+
+def test_apply_winner_refuses_an_empty_winner_dir_at_a_tracked_link(tmp_path):
+    """Files are not the only thing copytree writes through a link: with a
+    winner directory (even empty) where the checkout has a directory link,
+    dirs_exist_ok=True makedirs and copystats THROUGH the link, touching the
+    real target. Any winner entry at or beneath a link is a collision."""
+    project_root, harness_manifest, campaign_manifest, skill_path, run_dir = _apply_fixture_in_checkout(tmp_path)
+    skill_dir = skill_path.parent
+    (project_root / "agent_eval").mkdir(exist_ok=True)
+    (project_root / "agent_eval" / "__init__.py").write_text("REAL = 1\n", encoding="utf-8")
+    (skill_dir / "scripts").mkdir()
+    (skill_dir / "scripts" / "agent_eval").symlink_to("../../../agent_eval")
+    _git_commit_all(project_root, "add the link")
+    winner = run_dir / "candidates/cand_1/demo"
+    (winner / "scripts/agent_eval").mkdir(parents=True)   # empty
+    (winner / "SKILL.md").write_text("winner skill", encoding="utf-8")
+    harness_manifest["candidate"] = [{"dest": "demo", "source": str(skill_dir), "is_dir": True}]
+
+    with pytest.raises(RuntimeError, match="content at or beneath scripts/agent_eval"):
+        capevolve.apply_winner(project_root=project_root, harness_manifest=harness_manifest,
+                               campaign_manifest=campaign_manifest)
+
+
+def test_apply_winner_refuses_a_symlink_at_an_intermediate_segment(tmp_path):
+    """A nested dest (`nested/demo`) whose intermediate segment in the
+    snapshot is a link: everything beneath would be read from wherever it
+    points and committed onto the branch. Rollouts refuse the shape
+    (stage_candidate's intermediate-link check); so does --apply."""
+    project_root, harness_manifest, campaign_manifest, skill_path, run_dir = _apply_fixture_in_checkout(tmp_path)
+    nested = project_root / "skills/nested/demo"
+    nested.mkdir(parents=True)
+    (nested / "SKILL.md").write_text("original", encoding="utf-8")
+    _git_commit_all(project_root, "nested skill")
+    elsewhere = tmp_path / "elsewhere/demo"
+    elsewhere.mkdir(parents=True)
+    (elsewhere / "id_rsa").write_text("PRIVATE", encoding="utf-8")
+    (elsewhere / "SKILL.md").write_text("planted", encoding="utf-8")
+    (run_dir / "candidates/cand_1/nested").symlink_to(tmp_path / "elsewhere", target_is_directory=True)
+    harness_manifest["candidate"] = [{"dest": "nested/demo", "source": str(nested), "is_dir": True}]
+
+    with pytest.raises(RuntimeError, match="nested is a symlink inside the candidate snapshot"):
+        capevolve.apply_winner(project_root=project_root, harness_manifest=harness_manifest,
+                               campaign_manifest=campaign_manifest)
+    assert not (nested / "id_rsa").exists()
+    branches = subprocess.run(["git", "branch", "--list", "capevolve/*"], cwd=project_root,
+                              capture_output=True, text=True, check=True).stdout.strip()
+    assert branches == ""
+
+
+def test_apply_winner_refuses_a_winner_that_contains_symlinks(tmp_path):
+    """Every rollout refuses a candidate with a symlink, so a winner carrying
+    one was altered after measurement or never ran. copytree(symlinks=False)
+    and copy2 would dereference it — a directory link through the checkout's
+    plumbing link, a file link to a credential — onto the branch."""
+    project_root, harness_manifest, campaign_manifest, skill_path, run_dir = _apply_fixture_in_checkout(tmp_path)
+    skill_dir = skill_path.parent
+    original_branch = _current_branch(project_root)
+    winner = run_dir / "candidates/cand_1/demo"
+    (winner / "scripts").mkdir(parents=True)
+    (winner / "SKILL.md").write_text("winner skill", encoding="utf-8")
+    secret = tmp_path / "secret.txt"
+    secret.write_text("hunter2", encoding="utf-8")
+    (winner / "scripts" / "notes.md").symlink_to(secret)
+    harness_manifest["candidate"] = [{"dest": "demo", "source": str(skill_dir), "is_dir": True}]
+
+    with pytest.raises(RuntimeError, match="contains symlink.*scripts/notes.md"):
+        capevolve.apply_winner(project_root=project_root, harness_manifest=harness_manifest,
+                               campaign_manifest=campaign_manifest)
+    assert not (skill_dir / "scripts").exists()
+    assert _current_branch(project_root) == original_branch
+
+
 def test_apply_winner_returns_to_a_detached_head(tmp_path):
     """Qodo #15: from a detached HEAD, --apply returns to the same commit."""
     project_root, harness_manifest, campaign_manifest, skill_path, run_dir = _apply_fixture_in_checkout(tmp_path)
@@ -2673,6 +3431,185 @@ def test_apply_winner_tolerates_an_absolute_runs_dir_outside_the_repo(tmp_path, 
     assert result["best_id"] == "cand_1"
 
 
+def test_rollouts_land_in_a_parallel_runs_root(tmp_path, monkeypatch):
+    """<base>/.optimize/<eval>/<run-id>: out of the ordinary runs dir, so a
+    campaign's hundreds of rollouts never crowd it."""
+    monkeypatch.setenv("AGENT_EVAL_RUNS_DIR", str(tmp_path / "runs"))
+    manifest = {"project_root": str(tmp_path), "eval_name": "demo-eval"}
+    root = (tmp_path / "runs/.optimize").resolve()
+    assert export.rollout_runs_root(manifest) == root
+    assert export.runs_dir_for(manifest) == root / "demo-eval"
+    # The children's environment is NOT re-pointed at the rollout root: that
+    # variable reaches the agent under test (a plugin shipping this repo's
+    # Stop guard would then block its own agent) and score.py's few-shot
+    # harvest. The rollout's directory travels as --run-dir instead.
+    assert rollout._child_env()["AGENT_EVAL_RUNS_DIR"] == str(tmp_path / "runs")
+    # Relative (the default) resolves against the project, like everything else.
+    monkeypatch.delenv("AGENT_EVAL_RUNS_DIR")
+    assert export.rollout_runs_root(manifest) == (tmp_path / "eval/runs/.optimize").resolve()
+
+
+def test_rollout_runs_are_hidden_from_a_sweep_but_not_from_a_direct_ask(tmp_path):
+    """A campaign is |val| x num_trials x (iterations + 1) run dirs, every one
+    of them a real summary.yaml. /eval-compare and /eval-anova rglob for those,
+    so without a filter one campaign buries the two or three runs a person
+    meant to compare. Asking for the rollouts directly still works: that is
+    how you look at the search curve. Releases up to 1.62.x wrote rollouts
+    flat into <runs>/<eval>/, so those are recognised by their condition.json."""
+    runs = tmp_path / "runs"
+    new = runs / ".optimize/demo-eval/opt-1"
+    assert export.is_rollout_run(new, runs)
+    assert export.is_rollout_run(new, runs / ".." / runs.name)  # unnormalised input
+    assert not export.is_rollout_run(runs / "demo-eval/2026-01-01-baseline", runs)
+    # Pointed at the rollouts, at any depth: never filtered.
+    assert not export.is_rollout_run(new, runs / ".optimize")
+    assert not export.is_rollout_run(new, runs / ".optimize/demo-eval")
+    assert not export.is_rollout_run(new, new)
+    # A legacy flat rollout: provenance keys, no factor levels.
+    legacy = runs / "demo-eval/opt-legacy"
+    legacy.mkdir(parents=True)
+    (legacy / "condition.json").write_text(json.dumps(
+        {"engine": "cap-evolve", "candidate_id": "cand_1", "harness_run_id": "opt-legacy"}), encoding="utf-8")
+    assert export.is_rollout_run(legacy, runs)
+    assert export.is_rollout_run(legacy, runs / "demo-eval")
+    assert not export.is_rollout_run(legacy, legacy)
+    # An /eval-anova cell's condition.json is factor levels, not a rollout.
+    cell = runs / "demo-eval/cell-1"
+    cell.mkdir()
+    (cell / "condition.json").write_text(json.dumps({"levels": {"model": "sonnet"}}), encoding="utf-8")
+    assert not export.is_rollout_run(cell, runs)
+    # Unrelated trees are never "rollouts" just because they can't be related.
+    assert not export.is_rollout_run(Path("/elsewhere/run"), runs)
+
+
+def test_eval_compare_and_anova_skip_rollout_run_dirs(tmp_path, capsys):
+    def _write_run(path, condition=None):
+        path.mkdir(parents=True)
+        (path / "summary.yaml").write_text("per_case: {}\n", encoding="utf-8")
+        (path / "run_result.json").write_text(json.dumps({"model": "sonnet"}), encoding="utf-8")
+        if condition is not None:
+            (path / "condition.json").write_text(json.dumps(condition), encoding="utf-8")
+
+    base = tmp_path / "runs"
+    runs = base / "demo-eval"
+    _write_run(runs / "2026-01-01-baseline", {"levels": {"model": "sonnet"}})
+    for i in range(3):
+        _write_run(base / ".optimize/demo-eval" / f"opt-case-{i}",
+                   {"engine": "cap-evolve", "candidate_id": "cand_1", "task_id": f"case-{i}",
+                    "seed": 0, "harness_run_id": f"opt-case-{i}"})
+    # Left behind by a release up to 1.62.x, which wrote rollouts flat.
+    _write_run(runs / "opt-legacy",
+               {"engine": "cap-evolve", "candidate_id": "cand_0", "task_id": "case-9",
+                "seed": 0, "harness_run_id": "opt-legacy"})
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "skills/eval-compare/scripts"))
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "skills/eval-anova/scripts"))
+    try:
+        import compare
+        analyze = pytest.importorskip("analyze", reason="eval-anova needs the anova extra")
+        for root in (base, runs):
+            assert [r["name"] for r in compare.discover_runs(root)] == ["2026-01-01-baseline"]
+            assert "skipped" in capsys.readouterr().err
+            assert [p.name for p in analyze._discover_run_dirs(root)] == ["2026-01-01-baseline"]
+            # On stderr too — not through a logger nothing configures.
+            assert "skipped" in capsys.readouterr().err
+        # And the search curve is still reachable by asking for it.
+        assert len(compare.discover_runs(base / ".optimize")) == 3
+        assert len(compare.discover_runs(base / ".optimize/demo-eval")) == 3
+    finally:
+        sys.path[:2] = []
+
+
+def test_a_rollout_condition_is_never_read_as_a_factorial_cell(tmp_path):
+    """condition.json on a rollout records candidate/seed/substrate — not
+    factor levels. _condition_levels_for_run's `data.get("levels", data)`
+    would otherwise make every rollout its own one-off condition."""
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "skills/eval-anova/scripts"))
+    try:
+        analyze = pytest.importorskip("analyze", reason="eval-anova needs the anova extra")
+        run = tmp_path / "opt-case-1"
+        run.mkdir()
+        (run / "condition.json").write_text(json.dumps(
+            {"engine": "cap-evolve", "candidate_id": "cand_1", "harness_run_id": "opt-case-1"}),
+            encoding="utf-8")
+        (run / "run_result.json").write_text(json.dumps({"model": "sonnet"}), encoding="utf-8")
+        assert analyze._condition_levels_for_run(run) == {"model": "sonnet"}
+    finally:
+        sys.path[:1] = []
+
+
+def test_local_rollout_scores_through_the_real_harness_scripts(tmp_path, monkeypatch):
+    """The regression every other run_case test is blind to.
+
+    They all mock _run_script, so nothing checks that the directory run_case
+    writes is the directory score.py and report.py *read*. Those two get only
+    --run-id and resolve it as $AGENT_EVAL_RUNS_DIR/<eval>/<run-id>; when the
+    rollouts moved out of the ordinary runs dir, score.py looked beside them,
+    found no cases, and every local rollout quietly scored as "no judge
+    results" (caught by two independent reviewers on #299).
+
+    Only execute.py is faked (it would invoke a real agent). workspace.py,
+    collect.py, score.py and report.py run for real, as subprocesses, with
+    the env run_case gives them.
+    """
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("AGENT_EVAL_RUNS_DIR", str(tmp_path / "runs"))
+    _demo_eval_yaml(tmp_path)
+    # The judge reads execution metadata, which score.py takes from the
+    # run-level run_result.json at runs_dir / run_id — the second place a
+    # mis-resolved run dir shows (the first is the cases dir). A judge that
+    # just returned True would pass with cost=None exit=None.
+    eval_yaml = tmp_path / "eval.yaml"
+    eval_yaml.write_text(eval_yaml.read_text().replace(
+        "    check: |\n      return True, 'ok'\n",
+        "    check: |\n"
+        "      ok = outputs.get('cost_usd') == 0.01 and outputs.get('exit_code') == 0\n"
+        "      return ok, f\"cost={outputs.get('cost_usd')} exit={outputs.get('exit_code')}\"\n"),
+        encoding="utf-8")
+    from agent_eval.config import EvalConfig
+    # As prepare_project does — the same eval_name() score.py will derive
+    # from the config it is handed, which is the whole point of this test.
+    eval_name = EvalConfig.from_yaml("eval.yaml").eval_name()
+    manifest = {
+        "harness_root": str(Path(__file__).resolve().parents[1]),
+        "project_root": str(tmp_path),
+        "eval_config": str(tmp_path / "eval.yaml"), "eval_name": eval_name,
+        "execution_mode": "case", "apply_to": ".claude/skills/demo",
+        "candidate": [{"dest": "SKILL.md", "source": str(tmp_path / "skills/demo/SKILL.md"), "is_dir": False}],
+        "task_ids": ["case-1"], "runner_budget_usd": None, "runtime_resources": [],
+    }
+    candidate_dir = tmp_path / "candidate"
+    candidate_dir.mkdir()
+    (candidate_dir / "SKILL.md").write_text("candidate", encoding="utf-8")
+
+    real_run_script = rollout._run_script
+
+    def _fake_execute_only(manifest_, name, *args, allow_nonzero=False):
+        if name != "execute.py":
+            return real_run_script(manifest_, name, *args, allow_nonzero=allow_nonzero)
+        run_dir = Path(args[args.index("--output") + 1])
+        (run_dir / "cases" / "case-1").mkdir(parents=True, exist_ok=True)
+        (run_dir / "cases/case-1/stdout.log").write_text("transcript", encoding="utf-8")
+        (run_dir / "run_result.json").write_text(json.dumps({
+            "run_id": args[args.index("--run-id") + 1], "model": "sonnet", "cost_usd": 0.01,
+            "execution_mode": "case",
+            "per_case": {"case-1": {"exit_code": 0, "cost_usd": 0.01, "num_turns": 3}},
+        }), encoding="utf-8")
+        return subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(rollout, "_run_script", _fake_execute_only)
+    result = rollout.run_case(manifest, "case-1", candidate_dir, seed=0)["rollout"]
+
+    run_dir = tmp_path / "runs/.optimize" / eval_name / result["metadata"]["harness_run_id"]
+    assert (run_dir / "summary.yaml").is_file(), sorted(p.name for p in run_dir.iterdir())
+    assert result["error"] is None, result["error"]
+    assert result["metadata"]["reward"] == 1.0, result["metadata"]["feedback"]
+    assert "quality=pass" in result["metadata"]["feedback"]
+    # report.py is handed the same --run-dir; its failure is tolerated by
+    # design, so the only proof it found the run is the report itself.
+    assert (run_dir / "report.html").is_file()
+
+
 def _nested_apply_fixture(tmp_path):
     """Like _apply_fixture, but the benchmark sits nested inside a larger
     repository (project_root != repo_root) — the shape astefanutti's #2/#4
@@ -2723,6 +3660,28 @@ def test_apply_winner_gate_covers_uncommitted_work_outside_a_nested_benchmark(tm
         )
     assert outside.read_text(encoding="utf-8") == "precious uncommitted work"
     assert _current_branch(project_root) in ("main", "master")
+
+
+def test_apply_winner_excludes_the_recorded_rollouts_dir_without_the_launch_env(tmp_path, monkeypatch):
+    """Rollouts land where the scaffold-time AGENT_EVAL_RUNS_DIR put them,
+    recorded as rollouts_dir. A plain shell running --apply has a different
+    (default) root, so the env-derived exclude misses them and the dirty gate
+    would refuse a finished campaign over its own byproduct."""
+    project_root, harness_manifest, campaign_manifest, skill_path = _apply_fixture(
+        tmp_path, winning_skill_content="improved skill"
+    )
+    monkeypatch.delenv("AGENT_EVAL_RUNS_DIR", raising=False)
+    rollouts = project_root / "data-runs" / ".optimize" / "demo"
+    (rollouts / "opt-1").mkdir(parents=True)
+    (rollouts / "opt-1/summary.yaml").write_text("per_case: {}\n", encoding="utf-8")
+    harness_manifest["rollouts_dir"] = str(rollouts)
+
+    result = capevolve.apply_winner(project_root=project_root, harness_manifest=harness_manifest,
+                                    campaign_manifest=campaign_manifest)
+    assert result["best_id"] == "cand_1"
+    tracked = subprocess.run(["git", "ls-files", "--", "data-runs"], cwd=project_root,
+                             capture_output=True, text=True, check=True).stdout.strip()
+    assert tracked == ""
 
 
 def test_apply_winner_tolerates_a_runs_dir_inside_the_repo_but_outside_the_benchmark(tmp_path, monkeypatch):

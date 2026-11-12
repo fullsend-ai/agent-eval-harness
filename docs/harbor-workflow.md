@@ -232,4 +232,8 @@ Agent logs stream to pod stdout (visible via `oc logs -f <pod>`).
 
 Harbor also captures transcripts in the job directory:
 `agent/claude-code.txt` (stream-json), `agent/trajectory.json` (ATIF),
-`verifier/reward.json`, `verifier/judges.json`.
+`agent/sessions/projects/**/*.jsonl` (Claude Code's persisted session
+transcripts), `verifier/reward.json`, `verifier/judges.json`. OpenRouter
+generation IDs are collected from both the stream-json and the session
+transcripts, because some Claude Code versions omit `requestId` from
+stream-json.

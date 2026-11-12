@@ -1,3 +1,18 @@
+## [1.63.2](https://github.com/fullsend-ai/agent-eval-harness/compare/v1.63.1...v1.63.2) (2026-11-12)
+
+
+### Bug Fixes
+
+* **harbor:** harden session transcript parsing on PR [#308](https://github.com/fullsend-ai/agent-eval-harness/issues/308) ([04f79ed](https://github.com/fullsend-ai/agent-eval-harness/commit/04f79ed51b7f0ec70b06b2f326367f2dc04976e4))
+* **harbor:** read generation ids from session transcripts ([24931a7](https://github.com/fullsend-ai/agent-eval-harness/commit/24931a7eee49ecbd0f64c6081ddc21a54a36e90a)), closes [#298](https://github.com/fullsend-ai/agent-eval-harness/issues/298)
+
+## [1.63.1](https://github.com/fullsend-ai/agent-eval-harness/compare/v1.63.0...v1.63.1) (2026-11-10)
+
+
+### Bug Fixes
+
+* **eval-run:** correct internal file filtering ([d00a2d6](https://github.com/fullsend-ai/agent-eval-harness/commit/d00a2d6db02bbdc84af972959173ccac876c9900))
+
 # [1.63.0](https://github.com/fullsend-ai/agent-eval-harness/compare/v1.62.3...v1.63.0) (2026-11-09)
 
 

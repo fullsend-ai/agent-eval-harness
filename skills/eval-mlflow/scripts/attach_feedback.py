@@ -49,7 +49,11 @@ from agent_eval.mlflow.traces import find_run_traces
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--run-id", required=True)
+    where = parser.add_mutually_exclusive_group(required=True)
+    where.add_argument("--run-id", help="Run under $AGENT_EVAL_RUNS_DIR/<eval-name>/")
+    where.add_argument("--run-dir", help="The run directory itself, wherever it is — e.g. an "
+                                          "optimization rollout under <runs>/.optimize/<eval-name>/ "
+                                          "(its basename is the run id)")
     parser.add_argument("--config", required=True)
     parser.add_argument("--action", choices=["push", "pull"], default="push")
     parser.add_argument("--source", choices=["judge", "human", "all"], default="judge",
@@ -58,14 +62,16 @@ def main():
                         help="Direct trace ID (skip search)")
     args = parser.parse_args()
 
-    # Validate run_id to prevent path traversal (CWE-22)
-    args.run_id = _validate_path_segment(args.run_id, "--run-id")
-
     config = EvalConfig.from_yaml(args.config)
     mlflow.set_tracking_uri(resolve_tracking_uri(config))
-    runs_base = Path(os.environ.get("AGENT_EVAL_RUNS_DIR", "eval/runs"))
-    runs_dir = runs_base / config.eval_name()
-    run_dir = runs_dir / args.run_id
+    if args.run_dir:
+        run_dir = Path(args.run_dir).resolve()
+        args.run_id = run_dir.name
+    else:
+        # Validate run_id to prevent path traversal (CWE-22)
+        args.run_id = _validate_path_segment(args.run_id, "--run-id")
+        runs_base = Path(os.environ.get("AGENT_EVAL_RUNS_DIR", "eval/runs"))
+        run_dir = runs_base / config.eval_name() / args.run_id
 
     experiment_name = config.mlflow.experiment or config.name
 

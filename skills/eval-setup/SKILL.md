@@ -110,6 +110,11 @@ the install above failed — show its `reason`. A user who keeps their own
 cap-evolve checkout can set `CAPEVOLVE_SKILLS_DIR`; it is used only when it is
 at the pinned commit.
 
+The `[optimize]` extra also installs `capevolve-telemetry`, the MLflow/OTel
+observer backends cap-evolve loads when the generated `capevolve.yaml` carries
+an `observers:` block (it does whenever the eval config names an experiment).
+MLflow itself comes from this project's `[mlflow]` extra, not from that one.
+
 The `[optimize]` extra above also installs `capevolve-dashboard` — the live
 dashboard `/eval-optimize --engine cap-evolve` launches by default (`--dashboard
 auto`) when a campaign starts. That gives a working REST API and the

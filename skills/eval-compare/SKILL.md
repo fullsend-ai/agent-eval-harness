@@ -13,7 +13,7 @@ You are an eval comparison report generator. You take a directory of eval run re
 
 | Argument | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `<input-dir>` | yes | — | Directory to scan recursively for eval runs (any subdirectory containing `summary.yaml`) |
+| `<input-dir>` | yes | — | Directory to scan recursively for eval runs (any subdirectory containing `summary.yaml`; cap-evolve rollouts are skipped unless this is their `.optimize` root) |
 | `--output <path>` | no | `<input-dir>/comparison-report` | Output directory for the HTML report |
 | `--title <text>` | no | `Model Comparison` | Report title |
 | `--overview <text>` | no | none (section omitted) | Context paragraph shown at the top of the report |

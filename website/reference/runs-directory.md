@@ -20,6 +20,16 @@ export AGENT_EVAL_RUNS_DIR=eval/runs   # default
     under the base. Either way, `report.html`, `run_result.json`, and `cases/` are
     siblings inside the run directory.
 
+!!! note "Optimization rollouts live in a parallel root"
+    A [cap-evolve campaign](../guides/optimize-capevolve.md) writes one ordinary run
+    directory per rollout — hundreds per campaign — under
+    `$AGENT_EVAL_RUNS_DIR/.optimize/<eval-name>/<run-id>/`, so they never crowd the
+    runs above and `/eval-compare` / `/eval-anova` skip them when sweeping (they
+    say so on stderr). To run `score.py`, `report.py`, `log_results.py` or
+    `attach_feedback.py` on one rollout, pass its directory as `--run-dir` rather
+    than re-pointing `AGENT_EVAL_RUNS_DIR`, which is also what the agent under
+    test and the few-shot `examples:` harvest read.
+
 !!! warning "Run artifacts are sensitive"
     `stdout.log` / `events.json` hold the verbatim session transcript, and
     `permission_denials` entries preserve each denied call's full `tool_input`
@@ -322,9 +332,10 @@ A case produces outputs in two distinct ways, and the harness collects both:
     ```
 
 !!! warning "`_modified/` excludes harness scaffolding"
-    Paths under `.work`, `.staged-plugins/`, `subagents/`, and `hooks/` are
-    skipped when building `_modified/`, so a skill's own transcripts, hook
-    files, and the harness's staged plugin copies don't leak in as "edits".
+    Known harness and runner scaffolding is skipped when building `_modified/`,
+    so a skill's own transcripts, hook files, and the harness's staged plugin
+    copies don't leak in as "edits". Declared `outputs[].path` artifacts are
+    collected separately.
 
 ```mermaid
 flowchart LR
@@ -395,6 +406,18 @@ under its real condition:
 ```json
 {"condition_id": "a59751750104", "levels": {"context": "none", "model": "claude-sonnet-4-6"}}
 ```
+
+An optimization rollout (`<runs>/.optimize/<eval-name>/<run-id>/`) carries a
+`condition.json` of a different shape — provenance, not a design cell:
+
+```json
+{"engine": "cap-evolve", "substrate": "local", "candidate_id": "cand_2", "task_id": "case-3",
+ "seed": 0, "harness_run_id": "opt-case-3-cand_2-0-1a2b3c4d", "duration_s": 184.2}
+```
+
+The presence of `harness_run_id` + `candidate_id` with no `levels` is how the
+discoverers recognise a rollout wherever it sits (including the flat `opt-*` dirs
+releases up to 1.62.x wrote), and `/eval-anova` never reads it as factor levels.
 
 `levels` is the condition's factor → level map; `condition_id` is the first 12 hex
 digits of a SHA-256 over the sorted levels. The analysis **re-derives the id from

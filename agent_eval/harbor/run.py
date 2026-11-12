@@ -881,7 +881,8 @@ def _run_eval_on_harbor(
         return 1
     parsed = results_mod.parse_job(job_dirs[-1])
     if session is not None:
-        # Gen ids come from the trials' captured stream-json (per trial, exact);
+        # Gen ids come from the trials' captured stream-json and persisted
+        # Claude session transcripts (per trial, exact);
         # the /generation lag has long passed, so the backfill takes seconds.
         for trial in parsed.get("trials", []):
             session.sight_trial(trial.get("generation_ids") or [], case_id=trial.get("case_id"))
