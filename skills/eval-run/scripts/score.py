@@ -365,17 +365,22 @@ def load_case_record(case_dir, config, run_id=None, runs_dir=None,
             # took every judge of the case down before any ran.
             try:
                 with open(annotations_path, encoding="utf-8") as f:
-                    record["annotations"] = yaml.safe_load(f) or {}
+                    loaded_annotations = yaml.safe_load(f)
             except (yaml.YAMLError, OSError, ValueError) as e:
-                record["annotations"] = {}
+                loaded_annotations = {}
                 record["annotations_error"] = (
                     f"annotations.yaml unreadable: {type(e).__name__}")
-            if not isinstance(record["annotations"], dict):
+            # Only an empty document (None) defaults to {}; check the raw
+            # value so falsy non-mappings ([], false, 0, "") are flagged.
+            if loaded_annotations is None:
+                loaded_annotations = {}
+            if not isinstance(loaded_annotations, dict):
                 # A scalar or list document is not an annotations mapping;
                 # `.items()` below would raise on it.
-                record["annotations"] = {}
+                loaded_annotations = {}
                 record["annotations_error"] = (
                     "annotations.yaml is not a mapping")
+            record["annotations"] = loaded_annotations
             # Load annotation-referenced files into the record.
             # Only treat values as file paths if they look like filenames:
             # - Short enough to be a valid filename (< 256 chars)

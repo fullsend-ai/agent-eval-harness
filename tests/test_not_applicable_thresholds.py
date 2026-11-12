@@ -128,6 +128,10 @@ def test_a_summary_without_a_selected_total_is_not_not_applicable():
 @pytest.mark.parametrize("content", [
     "triage: [unclosed\n",          # YAML parse error
     "- just\n- a list\n",            # not a mapping
+    "[]\n",                          # falsy non-mapping documents
+    "false\n",
+    "0\n",
+    '""\n',
     "\xff\xfe invalid utf-8",        # undecodable (written as bytes below)
 ])
 def test_unreadable_annotations_are_condition_errors_not_skips(tmp_path, content):
