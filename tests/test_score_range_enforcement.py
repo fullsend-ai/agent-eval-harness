@@ -171,7 +171,7 @@ def test_a_legacy_summary_without_a_skip_count_still_says_skipped(tmp_path):
 def test_a_judge_skipped_for_every_case_is_not_applicable(tmp_path):
     current = {"q": {"mean": None, "pass_rate": None, "scored_cases": 0,
                      "errored_cases": 0, "incomplete_cases": 0,
-                     "skipped_cases": 3}}
+                     "skipped_cases": 3, "selected_cases": 3}}
     assert sc.detect_regressions(current, {"q": {"min_mean": 1.0}}) == []
 
 

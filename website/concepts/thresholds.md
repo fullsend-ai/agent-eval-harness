@@ -71,17 +71,19 @@ This is the most common misconfiguration. A `min_pass_rate` on a numeric judge h
     selected case — running a subset with no triage cases against a triage-only judge,
     say — its `min_pass_rate` and `min_mean` are **not applicable**: neither a pass nor a
     regression. The scoring command prints
-    `NOT APPLICABLE: [triage] `if:` false for all 3 cases; score thresholds not evaluated`,
+    ``NOT APPLICABLE: [triage] `if:` false for all 3 cases; score thresholds not evaluated``,
     and the report shows `N/A`.
 
     This holds only when every selected case was explicitly skipped by its condition.
-    A condition that raised, a judge error, incomplete evidence or a result without a
-    value keeps the judge applicable, so those still regress, as does a wrong-type key
+    A condition that raised (including an unreadable or non-mapping `annotations.yaml`),
+    a judge error, incomplete evidence or a result without a value keeps the judge
+    applicable, so those still regress, as does a wrong-type key
     (`min_win_rate` on a non-pairwise judge). When at least one case is scored, the
     thresholds apply to the scored cases as usual.
 
-    The distinction comes from `skipped_cases` in `summary.yaml`. A summary written
-    before that field existed (or a Harbor/EvalHub summary, which does not record it)
+    The distinction comes from `skipped_cases` and `selected_cases` in `summary.yaml`;
+    the judge is not applicable only when the two are equal. A summary written
+    before those fields existed (or a Harbor/EvalHub summary, which does not record them)
     keeps the old behavior: the threshold regresses with *"…judge skipped for all cases
     or not a boolean judge"*. If a suite must have at least one applicable case, enforce
     that separately: a not-applicable judge does not prove coverage.

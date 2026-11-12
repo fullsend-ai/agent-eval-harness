@@ -366,12 +366,16 @@ def load_case_record(case_dir, config, run_id=None, runs_dir=None,
             try:
                 with open(annotations_path, encoding="utf-8") as f:
                     record["annotations"] = yaml.safe_load(f) or {}
-            except (yaml.YAMLError, OSError, ValueError):
-                pass
+            except (yaml.YAMLError, OSError, ValueError) as e:
+                record["annotations"] = {}
+                record["annotations_error"] = (
+                    f"annotations.yaml unreadable: {type(e).__name__}")
             if not isinstance(record["annotations"], dict):
                 # A scalar or list document is not an annotations mapping;
                 # `.items()` below would raise on it.
                 record["annotations"] = {}
+                record["annotations_error"] = (
+                    "annotations.yaml is not a mapping")
             # Load annotation-referenced files into the record.
             # Only treat values as file paths if they look like filenames:
             # - Short enough to be a valid filename (< 256 chars)
@@ -3651,7 +3655,8 @@ def score_cases(judges, case_dirs, config, run_id=None, samples_override=None, r
         return {"per_case": {}, "aggregated": {n: {"values": [], "mean": None, "pass_rate": None} for n, *_ in judges}}
     per_case = {}
     aggregated = {name: {"values": [], "errored_cases": 0,
-                         "incomplete_cases": 0, "skipped_cases": 0}
+                         "incomplete_cases": 0, "skipped_cases": 0,
+                         "selected_cases": 0}
                   for name, *_ in judges}
     _reset_tool_choice_fallbacks()
     _reset_verdict_state()
@@ -3700,6 +3705,11 @@ def score_cases(judges, case_dirs, config, run_id=None, samples_override=None, r
             # Check condition — skip if it evaluates to False
             if condition:
                 try:
+                    if rec.get("annotations_error"):
+                        # Unreadable annotations are not annotations that
+                        # make the judge inapplicable: raising here records
+                        # a condition error, not a deliberate skip.
+                        raise ValueError(rec["annotations_error"])
                     annotations = rec.get("annotations", {})
                     if not eval(condition, {"__builtins__": {}},
                                 {"annotations": annotations, "outputs": rec}):
@@ -3855,6 +3865,7 @@ def score_cases(judges, case_dirs, config, run_id=None, samples_override=None, r
                 for name, result in case_results.items():
                     if name not in aggregated:
                         continue
+                    aggregated[name]["selected_cases"] += 1
                     if _evidence_was_omitted(result.get("staging_skips")):
                         # Counted as well as, not instead of, the error below:
                         # the sample already failed, and this records WHY so a
@@ -5649,11 +5660,17 @@ def judge_not_applicable(current):
     (`min_pass_rate`, `min_mean`) are neither a pass nor a regression. Read
     only from the explicit `skipped_cases` count that `score_cases` records
     for a condition that evaluated false — never inferred from a missing
-    mean — so any error, incomplete evidence or result without a value keeps
-    the judge applicable. Summaries written before `skipped_cases` existed
+    mean, and required to equal `selected_cases` — so any error, incomplete
+    evidence or result without a value keeps the judge applicable. Summaries written before `skipped_cases` existed
     have no count and are never treated as not applicable.
     """
     if not isinstance(current, dict) or not current.get("skipped_cases"):
+        return False
+    # Every selected case must be an explicit skip. A condition-true case
+    # whose judge returned no value and no error moves none of the other
+    # counters, so only the selected-case total can tell it from a skip. A
+    # summary that does not record the total cannot prove it.
+    if current.get("selected_cases") != current["skipped_cases"]:
         return False
     return not (current.get("scored_cases") or current.get("values")
                 or current.get("errored_cases")

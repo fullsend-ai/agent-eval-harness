@@ -49,7 +49,7 @@ $AGENT_EVAL_RUNS_DIR/<run-id>/
 ├── events.json         # parsed event stream (batch mode; if traces.events)
 ├── report.html         # scored HTML report
 ├── summary.yaml        # judge results: judges (mean, pass_rate, scored_cases,
-│                       #   errored_cases, incomplete_cases, skipped_cases,
+│                       #   errored_cases, incomplete_cases, skipped_cases, selected_cases,
 │                       #   stability)
 │                       #   + per_case + run_metrics
 │                       #   + judge_usage / total_cost_usd (judge spend, see below)

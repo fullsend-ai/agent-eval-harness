@@ -1550,7 +1550,7 @@ def _render_scoring_summary(summary, config, baseline_summary=None):
             metric_val = f"{mean:.2f}"
         elif not_applicable:
             metric_name = "—"
-            metric_val = f"skipped ({agg['skipped_cases']} cases)"
+            metric_val = f"skipped ({_esc(str(agg['skipped_cases']))} cases)"
         else:
             metric_name = "—"
             metric_val = "—"

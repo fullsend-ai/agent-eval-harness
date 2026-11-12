@@ -79,8 +79,8 @@ data:
 
 The one exception is a judge whose `if:` condition was false for **every** selected
 case: its `min_pass_rate` and `min_mean` are **not applicable** — neither a pass nor a
-regression. It is read from `skipped_cases` in `summary.yaml`; a summary without that
-field keeps failing as before. See
+regression. It is read from `skipped_cases` and `selected_cases` in `summary.yaml` (equal
+counts); a summary without those fields keeps failing as before. See
 [not applicable judges](../../concepts/thresholds.md#match-the-key-to-the-judges-value-type).
 
 ```mermaid
