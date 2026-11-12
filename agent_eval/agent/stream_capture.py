@@ -371,7 +371,7 @@ def extract_generation_ids(stdout_lines):
     for line in stdout_lines:
         try:
             obj = json.loads(line)
-        except (json.JSONDecodeError, ValueError, TypeError):
+        except (json.JSONDecodeError, ValueError, TypeError, RecursionError):
             continue
         generation_id = _event_generation_id(obj)
         if generation_id is not None:
