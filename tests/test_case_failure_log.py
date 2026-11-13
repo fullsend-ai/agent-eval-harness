@@ -59,7 +59,8 @@ def test_failing_case_is_logged_beside_passing_and_skipped(tmp_path, capsys):
     assert "CASE FAILURES: 2 failed, 1 errored, 1 skipped" in out
     assert "FAIL  case-a / protocol = False" in out
     assert "FAIL  case-a / quality = 1 (scale 1-5)" in out
-    assert "ERROR case-b / broken: boom" in out
+    assert "ERROR case-b / broken\n" in out
+    assert "boom" not in out
     # Passing case-b results and skipped case-c are not listed as failures.
     listed = [line for line in out.splitlines()
               if line.lstrip().startswith(("FAIL", "ERROR"))]
@@ -83,8 +84,9 @@ def test_untrusted_names_cannot_start_a_workflow_command(tmp_path, capsys):
     out = capsys.readouterr().out
 
     assert "\\:\\:error::case-a / protocol = False" in out
-    # The judge error's embedded newline is escaped, not emitted.
-    assert "boom\\n::error::forged" in out
+    # The judge's exception message is never logged.
+    assert "boom" not in out
+    assert "forged" not in out
     assert not any(line.lstrip().startswith("::") for line in out.splitlines())
 
 
@@ -124,4 +126,4 @@ def test_messageless_judge_exception_is_logged_as_error(tmp_path, capsys):
     out = capsys.readouterr().out
 
     assert "CASE FAILURES: 0 failed, 1 errored, 0 skipped" in out
-    assert "ERROR case-a / silent: <no message>" in out
+    assert "ERROR case-a / silent\n" in out

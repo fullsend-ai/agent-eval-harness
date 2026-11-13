@@ -5945,9 +5945,6 @@ def _run_location(args, config):
     return _get_runs_dir(config.eval_name()), args.run_id
 
 
-_CASE_ERROR_LOG_CHARS = 200
-
-
 def format_case_failures(per_case, score_ranges):
     """Log lines summarising per-case judge failures, errors and skips.
 
@@ -5955,8 +5952,9 @@ def format_case_failures(per_case, score_ranges):
     case was visible only in the HTML report. The verdict comes from
     `classify_judge_result`, the same one the report colours its cells with.
     Failures and errors are listed per case; skips (an ``if:`` that was false)
-    are counted only. Case ids, judge names and error text are untrusted, so
-    each goes through `escape_log_text` — no line can start a ``::`` workflow
+    are counted only. Errors name only the case and judge, never the exception
+    message. Case ids, judge names and values are untrusted, so each goes
+    through `escape_log_text` — no line can start a ``::`` workflow
     command. Purely informational: nothing here affects the exit code.
     """
     failures, errors, skipped = [], [], 0
@@ -5975,10 +5973,9 @@ def format_case_failures(per_case, score_ranges):
                 continue
             where = f"{escape_log_text(case_id)} / {escape_log_text(jname)}"
             if verdict == ERROR:
-                err = str(r.get("error")) or "<no message>"
-                if len(err) > _CASE_ERROR_LOG_CHARS:
-                    err = err[:_CASE_ERROR_LOG_CHARS] + "..."
-                errors.append(f"    ERROR {where}: {escape_log_text(err)}")
+                # Exception text is deliberately not logged: it can carry
+                # secrets or paths. Case and judge name only.
+                errors.append(f"    ERROR {where}")
             else:
                 val = r.get("value")
                 scale = (f" (scale {_fmt_bound(rng[0])}-{_fmt_bound(rng[1])})"
