@@ -1,3 +1,17 @@
+# [1.64.0](https://github.com/fullsend-ai/agent-eval-harness/compare/v1.63.3...v1.64.0) (2026-11-13)
+
+
+### Bug Fixes
+
+* address review feedback on PR [#318](https://github.com/fullsend-ai/agent-eval-harness/issues/318) ([1b4abcf](https://github.com/fullsend-ai/agent-eval-harness/commit/1b4abcf9a519069504fa1553c1465ebb01683484))
+* omit exception messages from per-case failure log (PR [#318](https://github.com/fullsend-ai/agent-eval-harness/issues/318)) ([f81e4a3](https://github.com/fullsend-ai/agent-eval-harness/commit/f81e4a3bd05cbfc530d852f7d31a664cbc2b554e))
+* point to report.html/summary.yaml in case failure log (PR [#318](https://github.com/fullsend-ai/agent-eval-harness/issues/318)) ([a50327d](https://github.com/fullsend-ai/agent-eval-harness/commit/a50327db666c2a36c24bc101a669d1030a082fda))
+
+
+### Features
+
+* **#317:** log per-case judge failures after scoring ([a39336f](https://github.com/fullsend-ai/agent-eval-harness/commit/a39336fce6305281855c6221e4bd39bcd362200a)), closes [#317](https://github.com/fullsend-ai/agent-eval-harness/issues/317) [#317](https://github.com/fullsend-ai/agent-eval-harness/issues/317)
+
 ## [1.63.3](https://github.com/fullsend-ai/agent-eval-harness/compare/v1.63.2...v1.63.3) (2026-11-12)
 
 
