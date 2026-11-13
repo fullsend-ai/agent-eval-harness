@@ -96,7 +96,32 @@ def test_untrusted_names_cannot_start_a_workflow_command(tmp_path, capsys):
     ({"value": 1}, None, PASS),         # unknown scale is neutral
     ({"value": None, "rationale": "Skipped: condition"}, None, SKIP),
     ({"value": None, "error": "boom"}, None, ERROR),
+    ({"value": None, "error": ""}, None, ERROR),  # message-less exception
     ("not-a-dict", None, None),
 ])
 def test_classification_matches_report_criteria(result, rng, expected):
     assert classify_judge_result(result, rng) == expected
+
+
+def test_messageless_judge_exception_is_logged_as_error(tmp_path, capsys):
+    # `raise RuntimeError()` stores error == "": it must be an ERROR naming the
+    # case and judge, not silently counted as a skip.
+    config = tmp_path / "eval.yaml"
+    config.write_text(
+        "name: t\n"
+        "execution: {mode: case}\n"
+        "judges:\n"
+        "  - name: silent\n"
+        "    check: |\n"
+        "      raise RuntimeError()\n"
+    )
+    run_dir = tmp_path / "runs" / "r1"
+    (run_dir / "cases" / "case-a").mkdir(parents=True)
+    args = argparse.Namespace(config=str(config), run_dir=str(run_dir),
+                              run_id=None, samples=None, no_llm_judges=False,
+                              workspace=None, model=None)
+    sc.cmd_judges(args)
+    out = capsys.readouterr().out
+
+    assert "CASE FAILURES: 0 failed, 1 errored, 0 skipped" in out
+    assert "ERROR case-a / silent: <no message>" in out

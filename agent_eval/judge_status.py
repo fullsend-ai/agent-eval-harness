@@ -57,7 +57,8 @@ def judge_score_ranges(pairs):
 def classify_judge_result(result, score_range=None):
     """Verdict of one judge on one case: PASS, FAIL, SKIP, ERROR or None.
 
-    - ``value`` None: ERROR when the result carries an ``error``, else SKIP
+    - ``value`` None: ERROR when the result carries an ``error`` (even an
+      empty message), else SKIP
       (an ``if:`` condition was false).
     - bool: True passes, False fails.
     - numeric: fails only on a bottom-band score on the judge's declared
@@ -69,7 +70,9 @@ def classify_judge_result(result, score_range=None):
         return None
     val = result.get("value")
     if val is None:
-        return ERROR if result.get("error") else SKIP
+        # Presence of the key, not truthiness: a message-less exception
+        # (``raise RuntimeError()``) stores ``error == ""`` and is still an error.
+        return ERROR if result.get("error") is not None else SKIP
     if val is True:
         return PASS
     if val is False:

@@ -5975,7 +5975,7 @@ def format_case_failures(per_case, score_ranges):
                 continue
             where = f"{escape_log_text(case_id)} / {escape_log_text(jname)}"
             if verdict == ERROR:
-                err = str(r.get("error"))
+                err = str(r.get("error")) or "<no message>"
                 if len(err) > _CASE_ERROR_LOG_CHARS:
                     err = err[:_CASE_ERROR_LOG_CHARS] + "..."
                 errors.append(f"    ERROR {where}: {escape_log_text(err)}")
