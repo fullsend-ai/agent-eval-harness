@@ -1124,6 +1124,36 @@ def _aggregate_step_metrics(step_metrics):
     }
 
 
+def _unrunnable_case_result(output_dir, case_id, reason, total_cases, index):
+    """Record a selected case that could not run as a failed case result.
+
+    Returning no result would drop the case from ``case_results``, so the run
+    exit code would aggregate only the cases that ran and pass on the reduced
+    set (#313). Instead the case gets a non-zero ``exit_code`` and an
+    ``error`` naming the reason, and its ``run_result.json`` is written so
+    the case stays visible to collection, scoring and reports.
+    """
+    print(f"  [{index}/{total_cases}] {case_id}: FAIL ({reason})",
+          file=sys.stderr)
+    case_output = output_dir / "cases" / case_id
+    case_output.mkdir(parents=True, exist_ok=True)
+    failed_result = {
+        "exit_code": 1,
+        "duration_s": 0,
+        "token_usage": None,
+        "cost_usd": None,
+        "permission_denials": [],  # case never ran
+        "num_turns": None,
+        "per_model_usage": None,
+        "per_model_turns": None,
+        "error": reason,
+        "message_ids": [],
+        "generation_ids": [],
+    }
+    # run_result write-site 11: case mode, selected case could not run
+    return write_run_result(case_output / "run_result.json", failed_result)
+
+
 def _run_single_case_in_repo(runner, skill_name, case_ws, output_dir,
                               skill_args_template, model, mlflow_experiment,
                               mlflow_tracking_uri, system_prompt, max_budget,
@@ -1131,22 +1161,23 @@ def _run_single_case_in_repo(runner, skill_name, case_ws, output_dir,
     """Execute in-repo mode: agent runs in repo root, I/O in case_ws.
 
     Thread-safe: case_ws is case-specific.
-    Returns (case_id, result_dict) or (case_id, None) if workspace missing.
+    Returns (case_id, result_dict). A missing workspace or metadata file is
+    recorded as a failed case result, never dropped.
     """
     import yaml as _yaml
     import subprocess
 
     if not case_ws.exists():
-        print(f"  [{index}/{total_cases}] {case_ws.name}: SKIP (workspace missing)",
-              file=sys.stderr)
-        return case_ws.name, None
+        return case_ws.name, _unrunnable_case_result(
+            output_dir, case_ws.name, f"workspace missing: {case_ws}",
+            total_cases, index)
 
     # Read metadata
     meta_file = case_ws / "_metadata.yaml"
     if not meta_file.exists():
-        print(f"  [{index}/{total_cases}] {case_ws.name}: SKIP (metadata missing)",
-              file=sys.stderr)
-        return case_ws.name, None
+        return case_ws.name, _unrunnable_case_result(
+            output_dir, case_ws.name, f"metadata missing: {meta_file}",
+            total_cases, index)
 
     meta = _yaml.safe_load(meta_file.read_text())
     case_id = meta["case_id"]
@@ -1331,14 +1362,15 @@ def _run_single_case(runner, skill_name, case_id, case_ws, output_dir,
     """Execute and collect results for a single test case.
 
     Thread-safe: all I/O is to case-specific directories.
-    Returns (case_id, result_dict) or (case_id, None) if workspace missing.
+    Returns (case_id, result_dict). A missing workspace is recorded as a
+    failed case result, never dropped.
     """
     import yaml as _yaml
 
     if not case_ws.exists():
-        print(f"  [{index}/{total_cases}] {case_id}: SKIP (workspace missing)",
-              file=sys.stderr)
-        return case_id, None
+        return case_id, _unrunnable_case_result(
+            output_dir, case_id, f"workspace missing: {case_ws}",
+            total_cases, index)
 
     # Multi-step pipeline: delegate to the step loop. The single-step path
     # below is unchanged.
