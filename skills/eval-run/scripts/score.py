@@ -365,13 +365,22 @@ def load_case_record(case_dir, config, run_id=None, runs_dir=None,
             # took every judge of the case down before any ran.
             try:
                 with open(annotations_path, encoding="utf-8") as f:
-                    record["annotations"] = yaml.safe_load(f) or {}
-            except (yaml.YAMLError, OSError, ValueError):
-                pass
-            if not isinstance(record["annotations"], dict):
+                    loaded_annotations = yaml.safe_load(f)
+            except (yaml.YAMLError, OSError, ValueError) as e:
+                loaded_annotations = {}
+                record["annotations_error"] = (
+                    f"annotations.yaml unreadable: {type(e).__name__}")
+            # Only an empty document (None) defaults to {}; check the raw
+            # value so falsy non-mappings ([], false, 0, "") are flagged.
+            if loaded_annotations is None:
+                loaded_annotations = {}
+            if not isinstance(loaded_annotations, dict):
                 # A scalar or list document is not an annotations mapping;
                 # `.items()` below would raise on it.
-                record["annotations"] = {}
+                loaded_annotations = {}
+                record["annotations_error"] = (
+                    "annotations.yaml is not a mapping")
+            record["annotations"] = loaded_annotations
             # Load annotation-referenced files into the record.
             # Only treat values as file paths if they look like filenames:
             # - Short enough to be a valid filename (< 256 chars)
@@ -1348,6 +1357,26 @@ def _numeric_bounds(jc):
         # 0-2.5" with an unreachable maximum helps nobody.
         is_int = float(lo).is_integer() and float(hi).is_integer()
     return (lo, hi, is_int)
+
+
+def _declared_value_kind(jc):
+    """The value type a judge produces: ``"bool"``, ``"numeric"`` or None when
+    the config does not settle it.
+
+    Declared by `feedback_type` or `score_range`. A non-builtin LLM/agent judge
+    that declares neither is numeric too — `_numeric_bounds` scores it on the
+    default scale — so a boolean-only threshold on it is a wrong-type one. An
+    undeclared check/module judge may return either type: None.
+    """
+    ft = getattr(jc, "feedback_type", "")
+    if ft == "bool":
+        return "bool"
+    if ft in ("int", "float") or getattr(jc, "score_range", None):
+        return "numeric"
+    if (not jc.builtin and jc.name != "pairwise"
+            and (jc.agent or jc.prompt or jc.prompt_file or jc.llm_rubric)):
+        return "numeric"
+    return None
 
 
 def _coerce_number(value, is_int):
@@ -3651,7 +3680,8 @@ def score_cases(judges, case_dirs, config, run_id=None, samples_override=None, r
         return {"per_case": {}, "aggregated": {n: {"values": [], "mean": None, "pass_rate": None} for n, *_ in judges}}
     per_case = {}
     aggregated = {name: {"values": [], "errored_cases": 0,
-                         "incomplete_cases": 0}
+                         "incomplete_cases": 0, "skipped_cases": 0,
+                         "selected_cases": 0}
                   for name, *_ in judges}
     _reset_tool_choice_fallbacks()
     _reset_verdict_state()
@@ -3667,6 +3697,12 @@ def score_cases(judges, case_dirs, config, run_id=None, samples_override=None, r
     judge_bounds = {jc.name: _numeric_bounds(jc)
                     for jc in config.judges if jc.score_range}
     load_files = _judges_read_files(judges)
+    # Recorded so an all-skipped judge cannot hide a wrong-type threshold: with
+    # no values there is nothing else to tell a numeric judge from a boolean.
+    for jc in config.judges:
+        kind = _declared_value_kind(jc)
+        if kind and jc.name in aggregated:
+            aggregated[jc.name]["value_kind"] = kind
 
     def _score_case(case_dir):
         case_id = case_dir.name
@@ -3700,13 +3736,23 @@ def score_cases(judges, case_dirs, config, run_id=None, samples_override=None, r
             # Check condition — skip if it evaluates to False
             if condition:
                 try:
+                    if rec.get("annotations_error"):
+                        # Unreadable annotations are not annotations that
+                        # make the judge inapplicable: raising here records
+                        # a condition error, not a deliberate skip.
+                        raise ValueError(rec["annotations_error"])
                     annotations = rec.get("annotations", {})
                     if not eval(condition, {"__builtins__": {}},
                                 {"annotations": annotations, "outputs": rec}):
+                        # `skipped` marks a deliberate skip explicitly, so
+                        # the aggregate can count it without inferring it
+                        # from a missing value (which an invalid result
+                        # also produces).
                         case_results[name] = {
                             "value": None,
                             "rationale": f"Skipped: condition '{condition}' is false",
                             "judge_type": judge_type,
+                            "skipped": True,
                         }
                         continue
                 except Exception as e:
@@ -3850,6 +3896,7 @@ def score_cases(judges, case_dirs, config, run_id=None, samples_override=None, r
                 for name, result in case_results.items():
                     if name not in aggregated:
                         continue
+                    aggregated[name]["selected_cases"] += 1
                     if _evidence_was_omitted(result.get("staging_skips")):
                         # Counted as well as, not instead of, the error below:
                         # the sample already failed, and this records WHY so a
@@ -3863,6 +3910,11 @@ def score_cases(judges, case_dirs, config, run_id=None, samples_override=None, r
                         # threshold diagnostics conflated into "skipped".
                         aggregated[name]["errored_cases"] = (
                             aggregated[name].get("errored_cases", 0) + 1)
+                    elif result.get("skipped"):
+                        # Only an `if:` that evaluated false. A condition that
+                        # raised carries an `error` and is counted above.
+                        aggregated[name]["skipped_cases"] = (
+                            aggregated[name].get("skipped_cases", 0) + 1)
                 print(f"  [{completed}/{len(case_dirs)}] {case_id}", flush=True)
 
     # Compute aggregates
@@ -5619,8 +5671,74 @@ def _unavailable_reason(current, metric, kind):
     if errored:
         return (f"{metric} unavailable — judge errored on {errored} case"
                 f"{'s' if errored != 1 else ''}; see the per-case rationales")
+    if "skipped_cases" in current:
+        # A summary that counts skips can tell the causes apart: an all-skipped
+        # judge is not applicable and never reaches here (see
+        # `judge_not_applicable`, except a wrong-type `min_pass_rate` on a
+        # numeric judge), so values without a metric are a wrong-type
+        # threshold, and no values at all are results that carried none.
+        if current.get("scored_cases") or _all_cases_skipped(current):
+            return f"{metric} unavailable — not {kind}"
+        return f"{metric} unavailable — no case produced a value"
+    # Older summaries do not record skips, so the two causes stay merged.
     return (f"{metric} unavailable — judge skipped for all cases "
             f"or not {kind}")
+
+
+def _all_cases_skipped(current):
+    """Whether every selected case was an explicit `if:`-false skip.
+
+    Read only from the explicit `skipped_cases` count that `score_cases` records
+    for a condition that evaluated false — never inferred from a missing
+    mean, and required to equal `selected_cases` — so any error, incomplete
+    evidence or result without a value is not a skip. Summaries written before
+    `skipped_cases` existed have no count and never qualify.
+    """
+    if not isinstance(current, dict) or not current.get("skipped_cases"):
+        return False
+    # Every selected case must be an explicit skip. A condition-true case
+    # whose judge returned no value and no error moves none of the other
+    # counters, so only the selected-case total can tell it from a skip. A
+    # summary that does not record the total cannot prove it.
+    if current.get("selected_cases") != current["skipped_cases"]:
+        return False
+    return not (current.get("scored_cases") or current.get("values")
+                or current.get("errored_cases")
+                or current.get("incomplete_cases")
+                or current.get("mean") is not None
+                or current.get("pass_rate") is not None)
+
+
+def judge_not_applicable(current, metric=None):
+    """Whether a judge's `if:` condition was false for every selected case.
+
+    Such a judge was deliberately inapplicable, so its score thresholds
+    (`min_pass_rate`, `min_mean`) are neither a pass nor a regression. Any
+    error, incomplete evidence or result without a value keeps the judge
+    applicable (see `_all_cases_skipped`).
+
+    With `metric` (a threshold key), the exemption is withheld from a
+    threshold that can never measure the judge's declared value type:
+    `min_pass_rate` on a numeric judge stays a wrong-type failure.
+    """
+    if not _all_cases_skipped(current):
+        return False
+    return not (metric == "min_pass_rate"
+                and current.get("value_kind") == "numeric")
+
+
+def waived_thresholds(current, threshold):
+    """The score thresholds (`min_pass_rate`, `min_mean`) in one judge's
+    `threshold` mapping that its aggregate makes not applicable.
+
+    The one predicate the detector, the CLI and the report share, so none of
+    them can call a judge N/A on a threshold the detector still evaluates
+    (`max_error_rate`, `min_win_rate`, a wrong-type `min_pass_rate`).
+    """
+    if not isinstance(threshold, dict):
+        return ()
+    return tuple(k for k in ("min_pass_rate", "min_mean")
+                 if k in threshold and judge_not_applicable(current, k))
 
 
 # Default for `detect_regressions(pairwise=...)`: the caller has no pairwise
@@ -5735,12 +5853,15 @@ def detect_regressions(current_results, thresholds, baseline_results=None,
         if current is None:
             continue
         incomplete = current.get("incomplete_cases") or 0
+        # A judge whose `if:` was false for every selected case has nothing to
+        # gate: its score thresholds are not applicable rather than breached.
+        waived = waived_thresholds(current, threshold)
         # When a threshold is configured but its metric is unavailable (None),
         # surface it as a regression instead of silently skipping — a missing
-        # metric usually means the judge was skipped for all cases or the
-        # threshold targets the wrong judge type (e.g. min_pass_rate on a
-        # numeric judge, whose pass_rate is always None).
-        if "min_pass_rate" in threshold:
+        # metric means the judge errored, produced no value, or the threshold
+        # targets the wrong judge type (e.g. min_pass_rate on a numeric judge,
+        # whose pass_rate is always None).
+        if "min_pass_rate" in threshold and "min_pass_rate" not in waived:
             rate = current.get("pass_rate")
             if rate is None:
                 regressions.append(Regression(
@@ -5799,7 +5920,7 @@ def detect_regressions(current_results, thresholds, baseline_results=None,
                 "omitted evidence from the judge's workspace (see "
                 "`staging_skips`); a score over the remaining cases is not a "
                 "measurement of the agent"))
-        if "min_mean" in threshold:
+        if "min_mean" in threshold and "min_mean" not in waived:
             mean = current.get("mean")
             if mean is None:
                 regressions.append(Regression(
@@ -5827,6 +5948,18 @@ def detect_regressions(current_results, thresholds, baseline_results=None,
                                 judge_name, f"{key}_vs_baseline",
                                 str(base_val), str(curr_val), "Degraded vs baseline"))
     return regressions
+
+
+def _print_not_applicable(current_results, thresholds, indent=""):
+    """Name each thresholded judge whose score thresholds were not evaluated
+    because its `if:` was false for every case — so a waived gate is visible
+    in the CLI output, not mistaken for a pass."""
+    for judge_name, threshold in thresholds.items():
+        current = current_results.get(judge_name)
+        if waived_thresholds(current, threshold):
+            print(f"{indent}NOT APPLICABLE: [{judge_name}] `if:` false for "
+                  f"all {current['skipped_cases']} cases; score thresholds "
+                  "not evaluated")
 
 
 # ---------------------------------------------------------------------------
@@ -5999,6 +6132,9 @@ def cmd_judges(args):
             print(f"  {name}: pass_rate={rate:.1%}{st_note}")
         elif mean is not None:
             print(f"  {name}: mean={mean:.2f}{st_note}")
+        elif judge_not_applicable(agg):
+            print(f"  {name}: not applicable (`if:` false for all "
+                  f"{agg['skipped_cases']} cases)")
 
     _merge_summary(args.run_id, "judges", {
         name: {k: v for k, v in agg.items() if k != "values"}
@@ -6055,6 +6191,7 @@ def cmd_judges(args):
                       f"{r.baseline_value} -> {r.current_value}")
         else:
             print("\n  REGRESSIONS: 0")
+        _print_not_applicable(current_agg, config.thresholds, indent="  ")
         # The comparison `min_win_rate` gates runs after this step.
         if any(isinstance(t, dict) and "min_win_rate" in t
                for t in config.thresholds.values()):
@@ -6169,9 +6306,11 @@ def cmd_regression(args):
         for r in regressions:
             print(f"  [{r.judge_name}] {r.metric}: "
                   f"{r.baseline_value} -> {r.current_value}")
+        _print_not_applicable(current_agg, config.thresholds)
         sys.exit(1)
     else:
         print("REGRESSIONS: 0")
+        _print_not_applicable(current_agg, config.thresholds)
 
 
 def main():

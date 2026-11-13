@@ -573,8 +573,12 @@ passed as `**kwargs`.
 ## Conditional judges (`if`)
 
 An `if` expression skips the judge for cases where it evaluates false — the case is
-**not** counted in that judge's pass rate or mean. The expression sees `annotations`
-and `outputs` directly (no `.get()` needed for `annotations` here).
+**not** counted in that judge's pass rate or mean, and is counted in its
+`skipped_cases` instead. The expression sees `annotations`
+and `outputs` directly (no `.get()` needed for `annotations` here). When every
+selected case is skipped, the judge's `min_pass_rate`/`min_mean` thresholds are
+[not applicable](../../concepts/thresholds.md#match-the-key-to-the-judges-value-type)
+rather than a regression.
 
 ```yaml
 - name: navigation_quality
