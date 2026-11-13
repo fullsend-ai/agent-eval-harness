@@ -43,6 +43,8 @@ from agent_eval.config import (
     COLLECTION_LOSS_KEY, EvalConfig, RunnerConfig, _is_valid_eval_name,
     _validate_path_segment,
 )
+from agent_eval.judge_status import (ERROR, FAIL, SKIP, classify_judge_result,
+                                     judge_score_ranges)
 from agent_eval.prompt_backends import (
     extract_runner_text,
     require_sdk_judge_for_runner,
@@ -5943,6 +5945,51 @@ def _run_location(args, config):
     return _get_runs_dir(config.eval_name()), args.run_id
 
 
+_CASE_ERROR_LOG_CHARS = 200
+
+
+def format_case_failures(per_case, score_ranges):
+    """Log lines summarising per-case judge failures, errors and skips.
+
+    An aggregate threshold can pass while one case fails a judge, and that
+    case was visible only in the HTML report. The verdict comes from
+    `classify_judge_result`, the same one the report colours its cells with.
+    Failures and errors are listed per case; skips (an ``if:`` that was false)
+    are counted only. Case ids, judge names and error text are untrusted, so
+    each goes through `escape_log_text` — no line can start a ``::`` workflow
+    command. Purely informational: nothing here affects the exit code.
+    """
+    failures, errors, skipped = [], [], 0
+    for case_id in sorted(per_case, key=str):
+        results = per_case[case_id]
+        if not isinstance(results, dict):
+            continue
+        for jname in sorted(results, key=str):
+            r = results[jname]
+            rng = score_ranges.get(jname)
+            verdict = classify_judge_result(r, rng)
+            if verdict == SKIP:
+                skipped += 1
+                continue
+            if verdict not in (FAIL, ERROR):
+                continue
+            where = f"{escape_log_text(case_id)} / {escape_log_text(jname)}"
+            if verdict == ERROR:
+                err = str(r.get("error"))
+                if len(err) > _CASE_ERROR_LOG_CHARS:
+                    err = err[:_CASE_ERROR_LOG_CHARS] + "..."
+                errors.append(f"    ERROR {where}: {escape_log_text(err)}")
+            else:
+                val = r.get("value")
+                scale = (f" (scale {_fmt_bound(rng[0])}-{_fmt_bound(rng[1])})"
+                         if rng is not None and not isinstance(val, bool) else "")
+                failures.append(
+                    f"    FAIL  {where} = {escape_log_text(val)}{scale}")
+    header = (f"  CASE FAILURES: {len(failures)} failed, {len(errors)} errored, "
+              f"{skipped} skipped")
+    return [header] + failures + errors
+
+
 def cmd_judges(args):
     config = EvalConfig.from_yaml(args.config)
     runs_dir, args.run_id = _run_location(args, config)
@@ -6041,6 +6088,15 @@ def cmd_judges(args):
                     print(f"  {k}: ${v:.4f}")
                 else:
                     print(f"  {k}: {v:,.1f}")
+
+    # Per-case failures — an aggregate can pass over a failing case. Log only.
+    per_case = judge_results.get("per_case", {})
+    if per_case:
+        score_ranges = judge_score_ranges(
+            (jc.name, jc.score_range) for jc in config.judges)
+        print()
+        for line in format_case_failures(per_case, score_ranges):
+            print(line)
 
     # Regression detection
     has_regressions = False

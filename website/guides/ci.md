@@ -89,6 +89,11 @@ fails the step automatically.
     of scoring — so a normal `/eval-run` already gates. It prints `REGRESSIONS: 0` or
     `REGRESSIONS: N detected` (one line per breach) before exiting.
 
+    Before that it prints a `CASE FAILURES:` block naming each case/judge that failed
+    or errored (same criteria as the HTML report's red cells; skips are counted only),
+    so a failing case is visible even when the aggregate threshold passes. It is
+    informational and never changes the exit code.
+
     ```bash
     python3 skills/eval-run/scripts/score.py judges \
       --run-id "$RUN_ID" --config eval.yaml
