@@ -78,17 +78,24 @@ This is the most common misconfiguration. A `min_pass_rate` on a numeric judge h
     A condition that raised (including an unreadable or non-mapping `annotations.yaml`),
     a judge error, incomplete evidence or a result without a value keeps the judge
     applicable, so those still regress, as does a wrong-type key
-    (`min_win_rate` on a non-pairwise judge, or `min_pass_rate` on a judge that
-    declares `feedback_type: int`/`float` or a `score_range`). A judge that declares
-    neither is not assumed to be numeric, so its `min_pass_rate` is waived. When at least one case is scored, the
-    thresholds apply to the scored cases as usual.
+    (`min_win_rate` on a non-pairwise judge, or `min_pass_rate` on a numeric judge: one
+    that declares `feedback_type: int`/`float` or a `score_range`, or an LLM/agent judge
+    that declares no `feedback_type: bool`, which is scored numerically by default). A
+    `check`/`module` judge that declares no type may return either, so its
+    `min_pass_rate` is waived. A judge's `max_error_rate` is unaffected: it is still
+    checked. When at least one case is scored, the thresholds apply to the scored cases
+    as usual.
 
     The distinction comes from `skipped_cases` and `selected_cases` in `summary.yaml`;
-    the judge is not applicable only when the two are equal. A summary written
-    before those fields existed (or a Harbor/EvalHub summary, which does not record them)
-    keeps the old behavior: the threshold regresses with *"…judge skipped for all cases
-    or not a boolean judge"*. If a suite must have at least one applicable case, enforce
-    that separately: a not-applicable judge does not prove coverage.
+    the judge is not applicable only when the two are equal. A local summary written
+    before those fields existed keeps the old behavior: the threshold regresses with
+    *"…judge skipped for all cases or not a boolean judge"*. Harbor and EvalHub
+    summaries never record them, and omit a judge that produced no values at all, so
+    its thresholds are not evaluated there — no regression and no `N/A`. The same
+    `eval.yaml` can therefore pass on Harbor/EvalHub where a local run reports
+    `N/A`, and a judge that produced no value for a reason other than its `if:` goes
+    unflagged there. If a suite must have at least one applicable case, enforce that
+    separately: a not-applicable judge does not prove coverage.
 
 !!! warning "Partial errors shrink the sample — gate them with `max_error_rate`"
     A judge that errors on *some* cases still produces a `mean` — over the survivors only.

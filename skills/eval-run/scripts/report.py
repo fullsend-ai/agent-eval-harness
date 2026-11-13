@@ -1537,10 +1537,12 @@ def _render_scoring_summary(summary, config, baseline_summary=None):
         pass_rate = agg.get("pass_rate")
         mean = agg.get("mean")
 
+        # Display only: an all-skipped judge shows how many cases it skipped.
+        # The N/A status comes from the thresholds the detector waived.
         try:
-            not_applicable = _judge_not_applicable(agg)
+            all_skipped = _judge_not_applicable(agg)
         except Exception:
-            not_applicable = False
+            all_skipped = False
 
         if pass_rate is not None:
             metric_name = "pass_rate"
@@ -1548,7 +1550,7 @@ def _render_scoring_summary(summary, config, baseline_summary=None):
         elif mean is not None:
             metric_name = "mean"
             metric_val = f"{mean:.2f}"
-        elif not_applicable:
+        elif all_skipped:
             metric_name = "—"
             metric_val = f"skipped ({_esc(str(agg['skipped_cases']))} cases)"
         else:
@@ -1577,6 +1579,10 @@ def _render_scoring_summary(summary, config, baseline_summary=None):
 
         # Threshold and status
         thresh = thresholds.get(judge_name, {})
+        try:
+            waived = _waived_thresholds(agg, thresh)
+        except Exception:
+            waived = ()
         thresh_str = "—"
         status_cls = "skip"
         status_label = "—"
@@ -1584,9 +1590,10 @@ def _render_scoring_summary(summary, config, baseline_summary=None):
         # The column shows one representative bound; which one is cosmetic.
         if isinstance(thresh, dict):
             if "min_pass_rate" in thresh and (pass_rate is not None
-                                              or not_applicable):
+                                              or "min_pass_rate" in waived):
                 thresh_str = f"&ge; {_esc(_pct(thresh['min_pass_rate']))}"
-            elif "min_mean" in thresh and (mean is not None or not_applicable):
+            elif "min_mean" in thresh and (mean is not None
+                                           or "min_mean" in waived):
                 thresh_str = f"&ge; {_esc(str(thresh['min_mean']))}"
             elif "min_win_rate" in thresh:
                 thresh_str = f"&ge; {_esc(_pct(thresh['min_win_rate']))}"
@@ -1602,9 +1609,11 @@ def _render_scoring_summary(summary, config, baseline_summary=None):
         if judge_name in _breached:
             status_cls = "fail"
             status_label = "FAIL"
-        elif not_applicable:
-            # `if:` false for every case: its score thresholds were waived by
-            # the detector, which is neither a pass nor a regression.
+        elif waived:
+            # `if:` false for every case: the detector waived its score
+            # thresholds — neither a pass nor a regression. A judge gated only
+            # by thresholds the detector still checks (`max_error_rate`) has
+            # none waived and takes the PASS/FAIL branches.
             status_cls = "skip"
             status_label = "N/A"
         elif thresh_str != "—" and _breach_known:
@@ -1713,11 +1722,16 @@ def _detect_regressions(judges, thresholds, pairwise=None):
 
 
 def _judge_not_applicable(agg):
-    """score.py's test for a judge whose `if:` was false for every case — the
-    same one `detect_regressions` waives score thresholds on, so the report's
-    N/A agrees with the scoring command."""
+    """score.py's test for a judge whose `if:` was false for every case."""
     from score import judge_not_applicable
     return judge_not_applicable(agg)
+
+
+def _waived_thresholds(agg, threshold):
+    """The score thresholds `detect_regressions` waives for this judge — the
+    same predicate, so the report's N/A agrees with the scoring command."""
+    from score import waived_thresholds
+    return waived_thresholds(agg, threshold)
 
 
 def _render_regressions(summary, config):

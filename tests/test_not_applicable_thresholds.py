@@ -4,14 +4,18 @@ Its `min_pass_rate`/`min_mean` thresholds are neither a pass nor a regression
 (issue #311). Only an explicit skip counts: errors, condition errors,
 incomplete evidence, results without a value and wrong-type thresholds still
 fail, and a summary written before `skipped_cases` existed keeps the old
-behaviour. The scoring command and the report have to agree.
+behaviour. The scoring command, the standalone regression gate and the report
+have to agree, so most cases here run the real chain: `score.py judges` writes
+summary.yaml, `score.py regression` reads it back, and the report renders it.
 """
 
 import re
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+import yaml
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
@@ -19,110 +23,118 @@ sys.path.insert(0, str(REPO_ROOT / "skills" / "eval-run" / "scripts"))
 
 import report  # noqa: E402
 import score as sc  # noqa: E402
-from agent_eval.config import EvalConfig  # noqa: E402
 
 GATES = {"min_pass_rate": 0.9, "min_mean": 0.9}
-
-
-def _config(tmp_path, judges_yaml):
-    p = tmp_path / "eval.yaml"
-    p.write_text(
-        f"name: t\nexecution: {{mode: case}}\n"
-        f"dataset: {{path: {tmp_path}/cases}}\njudges:\n{judges_yaml}")
-    return EvalConfig.from_yaml(p)
-
-
-def _cases(tmp_path, triage_flags):
-    dirs = []
-    for i, flag in enumerate(triage_flags):
-        cd = tmp_path / "cases" / f"case-{i}"
-        cd.mkdir(parents=True)
-        (cd / "annotations.yaml").write_text(f"triage: {str(flag).lower()}\n")
-        dirs.append(cd)
-    return dirs
-
-
-def _score(tmp_path, judge_yaml, triage_flags):
-    config = _config(tmp_path, judge_yaml)
-    result = sc.score_cases(sc.load_judges(config), _cases(tmp_path, triage_flags),
-                            config)
-    return result["aggregated"]["triage"]
-
-
-def _persisted(agg):
-    """What `cmd_judges` writes to summary.yaml."""
-    return {k: v for k, v in agg.items() if k != "values"}
-
 
 BOOL_JUDGE = ("  - name: triage\n"
               "    if: \"annotations.get('triage')\"\n"
               "    check: \"return (True, 'ok')\"\n")
 
 
-def test_all_skipped_judge_records_its_skips_and_passes_no_gate(tmp_path):
-    agg = _score(tmp_path, BOOL_JUDGE, [False, False, False])
-    assert agg["skipped_cases"] == 3
-    assert agg["scored_cases"] == 0 and agg["errored_cases"] == 0
-    assert sc.judge_not_applicable(agg)
-    # Live aggregate (score.py judges) and persisted summary (score.py
-    # regression) give the same answer.
-    assert sc.detect_regressions({"triage": agg}, {"triage": GATES}) == []
-    assert sc.detect_regressions({"triage": _persisted(agg)},
-                                 {"triage": GATES}) == []
+def _judge(check, if_=True, extra=""):
+    cond = "    if: \"annotations.get('triage')\"\n" if if_ else ""
+    return (f"  - name: triage\n{extra}{cond}"
+            f"    check: \"{check}\"\n")
 
 
-def test_mixed_skipped_and_scored_cases_still_enforce_thresholds(tmp_path):
-    judge = ("  - name: triage\n"
-             "    if: \"annotations.get('triage')\"\n"
-             "    check: \"return (False, 'bad')\"\n")
-    agg = _score(tmp_path, judge, [True, False])
-    assert agg["skipped_cases"] == 1 and agg["scored_cases"] == 1
-    assert not sc.judge_not_applicable(agg)
-    metrics = sorted(r.metric for r in sc.detect_regressions(
-        {"triage": agg}, {"triage": GATES}))
-    assert metrics == ["mean", "pass_rate"]
+class Chain:
+    """One run through judges -> summary.yaml -> regression -> report."""
 
 
-def test_a_condition_error_is_not_a_skip(tmp_path):
-    judge = ("  - name: triage\n"
-             "    if: \"annotations['missing']\"\n"
-             "    check: \"return (True, 'ok')\"\n")
-    agg = _score(tmp_path, judge, [False, False])
-    assert agg["skipped_cases"] == 0 and agg["errored_cases"] == 2
-    regs = sc.detect_regressions({"triage": agg}, {"triage": GATES})
-    assert len(regs) == 2
-    assert all("errored on 2 cases" in r.detail for r in regs)
+def _run_chain(tmp_path, monkeypatch, capsys, judges_yaml, annotations,
+               thresholds=None):
+    """`annotations` holds one raw annotations.yaml text per case. Returns the
+    exit codes and output of both gates, the persisted aggregate, the report's
+    status labels and whether it rendered a Regressions table."""
+    thresholds = {"triage": GATES} if thresholds is None else thresholds
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    runs_root = tmp_path / "runs"
+    monkeypatch.setenv("AGENT_EVAL_RUNS_DIR", str(runs_root))
+    config_path = tmp_path / "eval.yaml"
+    config_path.write_text(
+        f"name: t\nexecution: {{mode: case}}\n"
+        f"dataset: {{path: {tmp_path}/cases}}\njudges:\n{judges_yaml}"
+        + yaml.safe_dump({"thresholds": thresholds}))
+    for i, text in enumerate(annotations):
+        case = f"case-{i}"
+        (tmp_path / "cases" / case).mkdir(parents=True)
+        (tmp_path / "cases" / case / "annotations.yaml").write_bytes(
+            text if isinstance(text, bytes) else text.encode())
+        (runs_root / "t" / "run-a" / "cases" / case).mkdir(parents=True)
+
+    def invoke(fn, **kw):
+        try:
+            fn(SimpleNamespace(config=str(config_path), run_id="run-a",
+                               baseline=None, run_dir=None, workspace="",
+                               model=None, samples=None, no_llm_judges=False,
+                               **kw))
+            code = 0
+        except SystemExit as e:
+            code = e.code or 0
+        return code, capsys.readouterr().out
+
+    chain = Chain()
+    chain.judges_code, chain.judges_out = invoke(sc.cmd_judges)
+    chain.regression_code, chain.regression_out = invoke(sc.cmd_regression)
+    summary = yaml.safe_load((runs_root / "t" / "run-a" / "summary.yaml")
+                             .read_text())
+    chain.agg = summary["judges"]["triage"]
+    # The CLI prints the metric; the cause is in the regression detail.
+    chain.details = " | ".join(r.detail for r in sc.detect_regressions(
+        summary["judges"], thresholds))
+    chain.html_statuses, chain.html_regressions = _render(summary, thresholds)
+    return chain
 
 
-def test_a_result_without_a_value_is_not_a_skip(tmp_path):
-    judge = "  - name: triage\n    check: \"return None\"\n"
-    agg = _score(tmp_path, judge, [True])
-    assert agg["skipped_cases"] == 0
-    regs = sc.detect_regressions({"triage": agg}, {"triage": {"min_mean": 1.0}})
-    assert regs[0].current_value == "n/a"
-    assert "no case produced a value" in regs[0].detail
+def _render(summary, thresholds):
+    cfg = {"thresholds": thresholds, "judges": []}
+    html = report._render_scoring_summary(summary, cfg)
+    statuses = re.findall(r">(PASS|FAIL|SKIP|ERROR|N/A)<", html)
+    return statuses, report._render_regressions(summary, cfg) != ""
 
 
-def test_a_skip_beside_a_valueless_case_is_not_not_applicable(tmp_path):
-    """A condition-true case whose judge returns no value and no error moves
-    none of the scored/errored/incomplete counters, so only the selected-case
-    total tells it from a skip."""
-    judge = ("  - name: triage\n"
-             "    if: \"annotations.get('triage')\"\n"
-             "    check: \"return None\"\n")
-    agg = _score(tmp_path, judge, [True, False])
-    assert agg["skipped_cases"] == 1 and agg["selected_cases"] == 2
-    assert not sc.judge_not_applicable(agg)
-    for current in (agg, _persisted(agg)):
-        metrics = sorted(r.metric for r in sc.detect_regressions(
-            {"triage": current}, {"triage": GATES}))
-        assert metrics == ["mean", "pass_rate"]
+def _flags(*values):
+    return [f"triage: {str(v).lower()}\n" for v in values]
 
 
-def test_a_summary_without_a_selected_total_is_not_not_applicable():
-    agg = {"mean": None, "pass_rate": None, "scored_cases": 0,
-           "errored_cases": 0, "skipped_cases": 3}
-    assert not sc.judge_not_applicable(agg)
+def test_all_skipped_judge_is_not_applicable_in_every_consumer(
+        tmp_path, monkeypatch, capsys):
+    c = _run_chain(tmp_path, monkeypatch, capsys, BOOL_JUDGE,
+                   _flags(False, False, False))
+    assert c.agg["skipped_cases"] == 3 and c.agg["selected_cases"] == 3
+    assert c.agg["scored_cases"] == 0 and c.agg["errored_cases"] == 0
+    assert (c.judges_code, c.regression_code) == (0, 0)
+    for out in (c.judges_out, c.regression_out):
+        assert "NOT APPLICABLE: [triage]" in out and "all 3 cases" in out
+    assert c.html_statuses == ["N/A"] and not c.html_regressions
+
+
+def test_mixed_skipped_and_scored_cases_still_enforce_thresholds(
+        tmp_path, monkeypatch, capsys):
+    c = _run_chain(tmp_path, monkeypatch, capsys,
+                   _judge("return (False, 'bad')"), _flags(True, False))
+    assert c.agg["skipped_cases"] == 1 and c.agg["scored_cases"] == 1
+    assert (c.judges_code, c.regression_code) == (1, 1)
+    assert "NOT APPLICABLE" not in c.judges_out + c.regression_out
+    assert c.html_statuses == ["FAIL"] and c.html_regressions
+
+
+@pytest.mark.parametrize("label,judge,flags,needle", [
+    ("a condition error", _judge("return (True, 'ok')").replace(
+        "annotations.get('triage')", "annotations['missing']"),
+     _flags(False, False), "errored on 2 cases"),
+    ("a result without a value", _judge("return None", if_=False),
+     _flags(True), "no case produced a value"),
+    ("a skip beside a valueless case", _judge("return None"),
+     _flags(True, False), "no case produced a value"),
+])
+def test_only_an_explicit_skip_is_not_applicable(
+        tmp_path, monkeypatch, capsys, label, judge, flags, needle):
+    c = _run_chain(tmp_path, monkeypatch, capsys, judge, flags)
+    assert (c.judges_code, c.regression_code) == (1, 1), label
+    assert needle in c.details, label
+    assert "NOT APPLICABLE" not in c.regression_out, label
+    assert "N/A" not in c.html_statuses and c.html_regressions, label
 
 
 @pytest.mark.parametrize("content", [
@@ -132,59 +144,101 @@ def test_a_summary_without_a_selected_total_is_not_not_applicable():
     "false\n",
     "0\n",
     '""\n',
-    "\xff\xfe invalid utf-8",        # undecodable (written as bytes below)
+    b"\xff\xfe\x00 bad",            # undecodable
 ])
-def test_unreadable_annotations_are_condition_errors_not_skips(tmp_path, content):
-    config = _config(tmp_path, BOOL_JUDGE)
-    cd = tmp_path / "cases" / "case-0"
-    cd.mkdir(parents=True)
-    (cd / "annotations.yaml").write_bytes(
-        b"\xff\xfe\x00 bad" if content.startswith("\xff") else content.encode())
-    agg = sc.score_cases(sc.load_judges(config), [cd], config)[
-        "aggregated"]["triage"]
-    assert agg["skipped_cases"] == 0 and agg["errored_cases"] == 1
-    assert not sc.judge_not_applicable(agg)
-    assert sc.detect_regressions({"triage": agg}, {"triage": GATES})
+def test_unreadable_annotations_are_condition_errors_not_skips(
+        tmp_path, monkeypatch, capsys, content):
+    c = _run_chain(tmp_path, monkeypatch, capsys, BOOL_JUDGE, [content])
+    assert c.agg["skipped_cases"] == 0 and c.agg["errored_cases"] == 1
+    assert (c.judges_code, c.regression_code) == (1, 1)
+    assert "N/A" not in c.html_statuses
 
 
-def test_a_wrong_type_threshold_still_fails(tmp_path):
-    judge = ("  - name: triage\n"
-             "    if: \"annotations.get('triage')\"\n"
-             "    check: \"return (3, 'numeric')\"\n")
-    agg = _score(tmp_path, judge, [True, False])
-    regs = sc.detect_regressions({"triage": agg},
-                                 {"triage": {"min_pass_rate": 0.5}})
-    assert regs[0].detail == "pass_rate unavailable — not a boolean judge"
+def test_a_wrong_type_threshold_still_fails(tmp_path, monkeypatch, capsys):
+    c = _run_chain(tmp_path, monkeypatch, capsys,
+                   _judge("return (3, 'numeric')"), _flags(True, False),
+                   {"triage": {"min_pass_rate": 0.5}})
+    assert c.regression_code == 1
+    assert "pass_rate: >= 0.5 -> n/a" in c.regression_out
     # min_win_rate on a non-pairwise judge is wrong-type even when skipped.
-    na = {"skipped_cases": 2, "selected_cases": 2, "scored_cases": 0,
-          "errored_cases": 0}
-    assert [r.metric for r in sc.detect_regressions(
-        {"triage": na}, {"triage": {"min_win_rate": 0.5}})] == ["win_rate"]
+    c = _run_chain(tmp_path / "w", monkeypatch, capsys, BOOL_JUDGE,
+                   _flags(False, False), {"triage": {"min_win_rate": 0.5}})
+    assert "win_rate" in c.regression_out and c.regression_code == 1
 
 
-def test_a_wrong_type_threshold_fails_on_an_all_skipped_numeric_judge(tmp_path):
-    judge = ("  - name: triage\n"
-             "    feedback_type: float\n"
-             "    score_range: [0, 1]\n"
-             "    if: \"annotations.get('triage')\"\n"
-             "    check: \"return (0.5, 'numeric')\"\n")
-    agg = _score(tmp_path, judge, [False, False])
-    assert agg["skipped_cases"] == 2 and agg["value_kind"] == "numeric"
-    for live in (agg, _persisted(agg)):
-        regs = sc.detect_regressions({"triage": live},
-                                     {"triage": {"min_pass_rate": 0.5}})
-        assert [r.metric for r in regs] == ["pass_rate"]
-        assert regs[0].detail == "pass_rate unavailable — not a boolean judge"
-        # `min_mean` fits a numeric judge, so it is still waived.
-        assert sc.detect_regressions({"triage": live},
-                                     {"triage": {"min_mean": 0.5}}) == []
+NUMERIC_CHECK = ("    feedback_type: float\n    score_range: [0, 1]\n")
+UNDECLARED_LLM = ("  - name: triage\n"
+                  "    prompt: \"grade {{ conversation }}\"\n"
+                  "    model: claude-opus-5-5\n"
+                  "    if: \"annotations.get('triage')\"\n")
 
 
-def test_an_undeclared_judge_type_keeps_the_exemption(tmp_path):
-    agg = _score(tmp_path, BOOL_JUDGE, [False, False])
-    assert "value_kind" not in agg
-    assert sc.detect_regressions({"triage": agg},
-                                 {"triage": {"min_pass_rate": 0.5}}) == []
+@pytest.mark.parametrize("label,judge", [
+    ("a declared numeric check", _judge("return (0.5, 'n')",
+                                        extra=NUMERIC_CHECK)),
+    ("an LLM judge declaring neither field", UNDECLARED_LLM),
+])
+def test_min_pass_rate_on_an_all_skipped_numeric_judge_fails(
+        tmp_path, monkeypatch, capsys, label, judge):
+    c = _run_chain(tmp_path, monkeypatch, capsys, judge, _flags(False, False),
+                   {"triage": {"min_pass_rate": 0.5}})
+    assert c.agg["skipped_cases"] == 2 and c.agg["value_kind"] == "numeric"
+    assert c.regression_code == 1, label
+    assert "not a boolean judge" in c.details, label
+    assert "NOT APPLICABLE" not in c.regression_out
+    assert c.html_statuses == ["FAIL"], label
+    # `min_mean` fits a numeric judge, so it is still waived.
+    c = _run_chain(tmp_path / "m", monkeypatch, capsys, judge,
+                   _flags(False, False), {"triage": {"min_mean": 0.5}})
+    assert (c.regression_code, c.html_statuses) == (0, ["N/A"]), label
+
+
+def test_a_check_judge_declaring_no_type_keeps_the_exemption(
+        tmp_path, monkeypatch, capsys):
+    c = _run_chain(tmp_path, monkeypatch, capsys, BOOL_JUDGE,
+                   _flags(False, False), {"triage": {"min_pass_rate": 0.5}})
+    assert "value_kind" not in c.agg
+    assert c.regression_code == 0 and c.html_statuses == ["N/A"]
+
+
+@pytest.mark.parametrize("thresholds,status", [
+    # Nothing was waived: `max_error_rate` is evaluated (0 of 2 errored), so
+    # the row is a PASS, like any other satisfied threshold.
+    ({"max_error_rate": 0.5}, "PASS"),
+    ({"min_mean": 0.9, "max_error_rate": 0.5}, "N/A"),
+])
+def test_the_report_marks_only_waived_thresholds_not_applicable(
+        tmp_path, monkeypatch, capsys, thresholds, status):
+    c = _run_chain(tmp_path, monkeypatch, capsys, BOOL_JUDGE,
+                   _flags(False, False), {"triage": thresholds})
+    assert c.regression_code == 0
+    assert c.html_statuses == [status]
+    assert ("NOT APPLICABLE" in c.regression_out) is (status == "N/A")
+
+
+def test_a_legacy_summary_keeps_failing(tmp_path, monkeypatch, capsys):
+    """A summary written before `skipped_cases` existed cannot tell an
+    all-skipped judge from a wrong-type threshold."""
+    runs = tmp_path / "runs"
+    monkeypatch.setenv("AGENT_EVAL_RUNS_DIR", str(runs))
+    (runs / "t" / "run-a").mkdir(parents=True)
+    legacy = {"mean": None, "pass_rate": None, "scored_cases": 0,
+              "errored_cases": 0}
+    summary = {"run_id": "run-a", "judges": {"triage": legacy}}
+    (runs / "t" / "run-a" / "summary.yaml").write_text(yaml.safe_dump(summary))
+    config = tmp_path / "eval.yaml"
+    config.write_text("name: t\nexecution: {mode: case}\njudges:\n"
+                      + BOOL_JUDGE + yaml.safe_dump({"thresholds":
+                                                     {"triage": GATES}}))
+    with pytest.raises(SystemExit) as e:
+        sc.cmd_regression(SimpleNamespace(config=str(config), run_id="run-a",
+                                          baseline=None))
+    assert e.value.code == 1
+    assert "NOT APPLICABLE" not in capsys.readouterr().out
+    regs = sc.detect_regressions({"triage": legacy}, {"triage": GATES})
+    assert len(regs) == 2
+    assert all("skipped for all cases" in r.detail for r in regs)
+    assert "N/A" not in _render(summary, {"triage": GATES})[0]
 
 
 @pytest.mark.parametrize("label,agg", [
@@ -193,40 +247,15 @@ def test_an_undeclared_judge_type_keeps_the_exemption(tmp_path):
     ("incomplete evidence", {"mean": None, "pass_rate": None,
                              "scored_cases": 0, "errored_cases": 0,
                              "incomplete_cases": 1, "skipped_cases": 1}),
+    ("no selected-case total", {"mean": None, "pass_rate": None,
+                                "scored_cases": 0, "errored_cases": 0,
+                                "skipped_cases": 3}),
+    ("no selected case", {"mean": None, "pass_rate": None, "scored_cases": 0,
+                          "errored_cases": 0, "skipped_cases": 0}),
 ])
 def test_failures_alongside_skips_still_regress(label, agg):
     assert not sc.judge_not_applicable(agg), label
     assert sc.detect_regressions({"triage": agg}, {"triage": GATES}), label
-
-
-def test_a_legacy_summary_keeps_failing():
-    legacy = {"mean": None, "pass_rate": None, "scored_cases": 0,
-              "errored_cases": 0}
-    assert not sc.judge_not_applicable(legacy)
-    regs = sc.detect_regressions({"triage": legacy}, {"triage": GATES})
-    assert len(regs) == 2
-    assert all("skipped for all cases" in r.detail for r in regs)
-
-
-def test_no_selected_case_is_not_not_applicable():
-    """Zero cases is not "every case skipped": nothing was evaluated at all."""
-    empty = {"mean": None, "pass_rate": None, "scored_cases": 0,
-             "errored_cases": 0, "skipped_cases": 0}
-    assert sc.detect_regressions({"triage": empty}, {"triage": GATES})
-
-
-def test_the_report_shows_not_applicable_rather_than_pass_or_fail():
-    agg = {"mean": None, "pass_rate": None, "scored_cases": 0,
-           "errored_cases": 0, "incomplete_cases": 0, "skipped_cases": 3,
-           "selected_cases": 3}
-    html = report._render_scoring_summary(
-        {"judges": {"triage": agg}, "per_case": {}},
-        {"thresholds": {"triage": GATES}, "judges": []})
-    assert re.findall(r">(PASS|FAIL|SKIP|ERROR|N/A)<", html) == ["N/A"]
-    assert "skipped (3 cases)" in html
-    assert report._render_regressions(
-        {"judges": {"triage": agg}},
-        {"thresholds": {"triage": GATES}}) == ""
 
 
 def test_the_report_escapes_a_hand_edited_skip_count():
@@ -238,13 +267,3 @@ def test_the_report_escapes_a_hand_edited_skip_count():
         {"judges": {"triage": agg}, "per_case": {}},
         {"thresholds": {"triage": GATES}, "judges": []})
     assert evil not in html
-
-
-def test_the_cli_names_the_waived_gate(capsys):
-    agg = {"skipped_cases": 3, "selected_cases": 3, "scored_cases": 0,
-           "errored_cases": 0}
-    sc._print_not_applicable({"triage": agg, "other": {"mean": 4.0}},
-                             {"triage": GATES, "other": {"min_mean": 1.0}})
-    out = capsys.readouterr().out
-    assert "NOT APPLICABLE: [triage]" in out and "all 3 cases" in out
-    assert "other" not in out

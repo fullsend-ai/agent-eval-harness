@@ -1360,13 +1360,21 @@ def _numeric_bounds(jc):
 
 
 def _declared_value_kind(jc):
-    """The value type a judge's config declares: ``"bool"``, ``"numeric"`` or
-    None when it declares neither (`feedback_type` is optional and never
-    inferred, so an undeclared judge is not assumed to be either)."""
+    """The value type a judge produces: ``"bool"``, ``"numeric"`` or None when
+    the config does not settle it.
+
+    Declared by `feedback_type` or `score_range`. A non-builtin LLM/agent judge
+    that declares neither is numeric too — `_numeric_bounds` scores it on the
+    default scale — so a boolean-only threshold on it is a wrong-type one. An
+    undeclared check/module judge may return either type: None.
+    """
     ft = getattr(jc, "feedback_type", "")
     if ft == "bool":
         return "bool"
     if ft in ("int", "float") or getattr(jc, "score_range", None):
+        return "numeric"
+    if (not jc.builtin and jc.name != "pairwise"
+            and (jc.agent or jc.prompt or jc.prompt_file or jc.llm_rubric)):
         return "numeric"
     return None
 
@@ -5719,6 +5727,20 @@ def judge_not_applicable(current, metric=None):
                 and current.get("value_kind") == "numeric")
 
 
+def waived_thresholds(current, threshold):
+    """The score thresholds (`min_pass_rate`, `min_mean`) in one judge's
+    `threshold` mapping that its aggregate makes not applicable.
+
+    The one predicate the detector, the CLI and the report share, so none of
+    them can call a judge N/A on a threshold the detector still evaluates
+    (`max_error_rate`, `min_win_rate`, a wrong-type `min_pass_rate`).
+    """
+    if not isinstance(threshold, dict):
+        return ()
+    return tuple(k for k in ("min_pass_rate", "min_mean")
+                 if k in threshold and judge_not_applicable(current, k))
+
+
 # Default for `detect_regressions(pairwise=...)`: the caller has no pairwise
 # comparison to offer — `score.py judges` runs before `score.py pairwise`, and
 # Harbor/EvalHub never run one — so `min_win_rate` is left to `score.py
@@ -5833,14 +5855,13 @@ def detect_regressions(current_results, thresholds, baseline_results=None,
         incomplete = current.get("incomplete_cases") or 0
         # A judge whose `if:` was false for every selected case has nothing to
         # gate: its score thresholds are not applicable rather than breached.
-        pass_rate_na = judge_not_applicable(current, "min_pass_rate")
-        mean_na = judge_not_applicable(current, "min_mean")
+        waived = waived_thresholds(current, threshold)
         # When a threshold is configured but its metric is unavailable (None),
         # surface it as a regression instead of silently skipping — a missing
         # metric means the judge errored, produced no value, or the threshold
         # targets the wrong judge type (e.g. min_pass_rate on a numeric judge,
         # whose pass_rate is always None).
-        if "min_pass_rate" in threshold and not pass_rate_na:
+        if "min_pass_rate" in threshold and "min_pass_rate" not in waived:
             rate = current.get("pass_rate")
             if rate is None:
                 regressions.append(Regression(
@@ -5899,7 +5920,7 @@ def detect_regressions(current_results, thresholds, baseline_results=None,
                 "omitted evidence from the judge's workspace (see "
                 "`staging_skips`); a score over the remaining cases is not a "
                 "measurement of the agent"))
-        if "min_mean" in threshold and not mean_na:
+        if "min_mean" in threshold and "min_mean" not in waived:
             mean = current.get("mean")
             if mean is None:
                 regressions.append(Regression(
@@ -5935,9 +5956,7 @@ def _print_not_applicable(current_results, thresholds, indent=""):
     in the CLI output, not mistaken for a pass."""
     for judge_name, threshold in thresholds.items():
         current = current_results.get(judge_name)
-        if (isinstance(threshold, dict)
-                and any(k in threshold and judge_not_applicable(current, k)
-                        for k in ("min_pass_rate", "min_mean"))):
+        if waived_thresholds(current, threshold):
             print(f"{indent}NOT APPLICABLE: [{judge_name}] `if:` false for "
                   f"all {current['skipped_cases']} cases; score thresholds "
                   "not evaluated")
