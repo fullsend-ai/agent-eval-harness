@@ -61,6 +61,7 @@ def test_failing_case_is_logged_beside_passing_and_skipped(tmp_path, capsys):
     assert "FAIL  case-a / quality = 1 (scale 1-5)" in out
     assert "ERROR case-b / broken\n" in out
     assert "boom" not in out
+    assert "See report.html or summary.yaml" in out
     # Passing case-b results and skipped case-c are not listed as failures.
     listed = [line for line in out.splitlines()
               if line.lstrip().startswith(("FAIL", "ERROR"))]

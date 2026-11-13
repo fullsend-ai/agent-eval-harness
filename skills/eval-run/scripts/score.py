@@ -5984,7 +5984,11 @@ def format_case_failures(per_case, score_ranges):
                     f"    FAIL  {where} = {escape_log_text(val)}{scale}")
     header = (f"  CASE FAILURES: {len(failures)} failed, {len(errors)} errored, "
               f"{skipped} skipped")
-    return [header] + failures + errors
+    lines = [header] + failures + errors
+    if failures or errors:
+        lines.append("  See report.html or summary.yaml in the run directory "
+                     "for details.")
+    return lines
 
 
 def cmd_judges(args):
