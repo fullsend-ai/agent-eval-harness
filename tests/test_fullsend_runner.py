@@ -3685,6 +3685,52 @@ class TestFullsendConsoleStreaming:
                      "Error: *** rejected for ***"):
             assert streamed.count(line) == 1, line
 
+    def test_actions_mask_values_redacted_from_capture_and_live_stream(
+            self, tmp_path, fake_fullsend, monkeypatch, capsys):
+        out = ("::add-mask::synthetic-secret\n"
+               "  ✓ Sandbox created synthetic-secret\n")
+        err = "Error: synthetic-secret\n"
+        self._console_files(tmp_path, monkeypatch, out=out, err=err)
+        ws = _workspace(tmp_path)
+        result = _runner(tmp_path, log_prefix="eval").execute(
+            target="s", args="", workspace=ws, model="m", timeout_s=60)
+        printed = capsys.readouterr().out
+
+        assert result.exit_code == 0
+        assert "synthetic-secret" not in result.stderr
+        assert "::add-mask::***" in result.stderr
+        assert "synthetic-secret" not in printed
+        assert "  eval |   ✓ Sandbox created ***" in printed
+
+    def test_actions_mask_values_redacted_across_both_pipes(
+            self, tmp_path, fake_fullsend, monkeypatch):
+        out = "::add-mask::cross-stream-secret\n"
+        err = "Error: cross-stream-secret\n"
+        self._console_files(tmp_path, monkeypatch, out=out, err=err)
+        ws = _workspace(tmp_path)
+        result = _runner(tmp_path).execute(
+            target="s", args="", workspace=ws, model="m", timeout_s=60)
+
+        assert result.exit_code == 0
+        assert "cross-stream-secret" not in result.stderr
+        assert "::add-mask::***" in result.stderr
+
+    def test_actions_mask_escaped_values_redacted(
+            self, tmp_path, fake_fullsend, monkeypatch, capsys):
+        out = ("::add-mask::abc%25def\n"
+               "  ✓ Sandbox created abc%def\n")
+        self._console_files(tmp_path, monkeypatch, out=out, err="")
+        ws = _workspace(tmp_path)
+        result = _runner(tmp_path, log_prefix="eval").execute(
+            target="s", args="", workspace=ws, model="m", timeout_s=60)
+        printed = capsys.readouterr().out
+
+        assert result.exit_code == 0
+        assert "abc%25def%0A" not in result.stderr
+        assert "abc%def" not in result.stderr
+        assert "::add-mask::***" in result.stderr
+        assert "abc%def" not in printed
+
     def test_line_longer_than_one_read_kept_whole_and_forwarded_once(
             self, tmp_path, capsys):
         # A line with no newline, far past one pipe read (_MAX_PIPE_READ_CHARS),

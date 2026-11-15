@@ -490,8 +490,9 @@ userinfo, whole (`https://***@host`: a username is a token as often as not, as i
 `https://<token>:x-oauth-basic@github.com`). The key rule errs on the safe side: `--sort-key x` and
 `signature: f(a, b)` are redacted too, and a prose `authorization:` loses the rest of its
 clause — false positives that hide a progress detail where a miss would show a credential. The full console (stdout,
-then stderr) is still the case's `stderr.log`, unfiltered, unredacted and with its
-control sequences, and the sandbox image is still read from it.
+then stderr) is still the case's `stderr.log`, unfiltered and with its control
+sequences, except that GitHub Actions `::add-mask::` declarations and their
+values are scrubbed before persistence; the sandbox image is still read from it.
 
 fullsend writes some `💬` lines without a trailing newline, so they reach the log only
 when its next write ends the line — usually the `⏳` heartbeat, up to 30 seconds later,

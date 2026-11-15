@@ -157,6 +157,28 @@ def _single(tmp_path, before_each=None, after_each=None, runner=None):
     return result, on_disk, case_output
 
 
+def test_runner_actions_masks_are_scrubbed_before_persistence(tmp_path):
+    runner = _runner()
+    runner.execute.return_value = RunResult(
+        exit_code=0,
+        stdout="before case-secret\n::add-mask::case-secret\n",
+        stderr="Error: case-secret\n",
+        duration_s=1.0,
+    )
+    _, _, case_output = _single(tmp_path, runner=runner)
+    case_ws = tmp_path / "workspace" / "cases" / "case-001"
+
+    for path in (
+        case_ws / "output" / "stdout.log",
+        case_output / "stdout.log",
+        case_ws / "output" / "stderr.log",
+        case_output / "stderr.log",
+    ):
+        text = path.read_text()
+        assert "case-secret" not in text, path
+        assert "::add-mask::***" in text or "Error: ***" in text, path
+
+
 def test_after_each_failure_continue_is_recorded(tmp_path):
     result, on_disk, _ = _single(tmp_path, after_each=[
         HookEntry(command="exit 1", on_failure="continue",

@@ -42,7 +42,8 @@ of an ``Authorization`` header and URL userinfo, shown as ``***`` — and a
 bounded by the cut and nothing of a credential gets through it. The
 per-finding ``! Sanitized […]`` lines, the assistant's thinking (``🧠``) and
 multi-line text and the pre/post-script output are not forwarded; the
-captured console keeps all of it, unstripped and unredacted.
+captured console keeps all of it, unstripped, with GitHub Actions
+``::add-mask::`` declarations and their values scrubbed before persistence.
 Forwarding ends with the case: a
 pipe a descendant outside fullsend's process group still holds after the
 bounded drain that follows a timeout or an interrupt is emptied on, but
@@ -69,6 +70,7 @@ from typing import Optional
 
 import yaml
 
+from agent_eval.actions_mask import ActionsMaskScrubber
 from agent_eval.config import resolve_env_value, workspace_source_roots
 from .base import EvalRunner, RunResult, terminate_process_group
 from .stream_capture import (
@@ -815,6 +817,7 @@ class _ConsoleCapture:
                  secrets=()):
         self._lines: dict = {"stdout": [], "stderr": []}
         self._threads: list = []
+        self._mask_scrubber = ActionsMaskScrubber()
         # Written under _print_lock by detach(), read under it before a print.
         self._detached = False
         if log_prefix:  # printed on every forwarded line: no workflow command
@@ -839,9 +842,10 @@ class _ConsoleCapture:
                 if self._detached:
                     continue  # the run has returned: drain, keep nothing
                 lines.append(line)
+                self._mask_scrubber.observe(line)
                 if select is None or continued:
                     continue  # the rest of a line already filtered by its head
-                shown = select.select(line)
+                shown = select.select(line, mask_values=self._mask_scrubber.values())
                 if shown is None:
                     continue
                 try:
@@ -890,11 +894,11 @@ class _ConsoleCapture:
 
     @property
     def stdout(self) -> str:
-        return "".join(self._lines["stdout"])
+        return self._mask_scrubber.redact("".join(self._lines["stdout"]))
 
     @property
     def stderr(self) -> str:
-        return "".join(self._lines["stderr"])
+        return self._mask_scrubber.redact("".join(self._lines["stderr"]))
 
 
 class _ConsoleFilter:
@@ -919,12 +923,13 @@ class _ConsoleFilter:
         self._in_block = False
         self._secrets = tuple(secrets)
 
-    def select(self, line: str) -> Optional[str]:
+    def select(self, line: str, mask_values=()) -> Optional[str]:
         text = _CONTROL_RE.sub("", line).rstrip()
         if not text.strip():
             self._in_block = False
             return None
-        return _present(text, self._secrets) if self._picks(text) else None
+        secrets = self._secrets + tuple(mask_values)
+        return _present(text, secrets) if self._picks(text) else None
 
     def _picks(self, text: str) -> bool:
         if _SECTION_LINE_RE.match(text) or (

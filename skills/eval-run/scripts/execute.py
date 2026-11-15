@@ -198,6 +198,10 @@ def _warn_if_unscannable(output_dir):
 if __name__ == "__main__":
     _early_pidfile(sys.argv[1:])
 
+from agent_eval.actions_mask import (  # noqa: E402
+    actions_mask_values,
+    redact_actions_masks,
+)
 from agent_eval.agent import RUNNERS  # noqa: E402 — after the early pidfile write
 from agent_eval.providers.reconcile import (  # noqa: E402
     aggregate_case_costs,
@@ -211,6 +215,17 @@ from agent_eval.hooks import (  # noqa: E402 — after the early pidfile write
 )
 
 GIT_BIN = shutil.which("git")
+
+
+def _sanitize_run_result(result):
+    """Scrub Actions mask values before runner output is persisted."""
+    if result is None:
+        return result
+    values = actions_mask_values(
+        (result.stdout or "") + (result.stderr or ""))
+    result.stdout = redact_actions_masks(result.stdout or "", values)
+    result.stderr = redact_actions_masks(result.stderr or "", values)
+    return result
 
 _HARNESS_SYSTEM_PROMPT = (
     "You are running inside an evaluation harness. Tool interception hooks "
@@ -601,7 +616,7 @@ def main():
             settings_path = workspace_settings if workspace_settings.exists() else None
 
             _bind_provider(runner)
-            result = runner.execute(
+            result = _sanitize_run_result(runner.execute(
                 target=target,
                 args=skill_args,
                 workspace=Path(args.workspace),
@@ -611,7 +626,7 @@ def main():
                 max_budget_usd=max_budget,
                 timeout_s=timeout_s,
                 extra_env=global_hook_outputs.get("env") or None,
-            )
+            ))
 
             exit_code = _save_result(result, args, output_dir, runner, model, eval_params=eval_params)
 
@@ -1187,7 +1202,7 @@ def _run_single_case_in_repo(runner, skill_name, case_ws, output_dir,
 
     # Execute in repo with case_ws-based settings
     _bind_provider(runner, case_id)
-    result = runner.execute(
+    result = _sanitize_run_result(runner.execute(
         target=skill_name,
         args=case_args,
         workspace=repo_cwd,  # Agent runs in REPO
@@ -1196,7 +1211,7 @@ def _run_single_case_in_repo(runner, skill_name, case_ws, output_dir,
         system_prompt=system_prompt,
         max_budget_usd=max_budget,
         timeout_s=timeout_s,
-    )
+    ))
 
     # Verify repo wasn't modified
     repo_after = subprocess.run(
@@ -1413,7 +1428,7 @@ def _run_single_case(runner, skill_name, case_id, case_ws, output_dir,
             merged_hook_data = {**global_data, **case_data_out}
 
         _bind_provider(runner, case_id)
-        result = runner.execute(
+        result = _sanitize_run_result(runner.execute(
             target=skill_name,
             args=case_args,
             workspace=case_ws,
@@ -1423,7 +1438,7 @@ def _run_single_case(runner, skill_name, case_id, case_ws, output_dir,
             max_budget_usd=max_budget,
             timeout_s=timeout_s,
             extra_env=merged_env or None,
-        )
+        ))
     except Exception as exc:
         print(f"    → {case_id}: ERROR ({exc})", file=sys.stderr)
         result = None
@@ -1686,7 +1701,7 @@ def _run_multi_step_case(runner, case_id, case_ws, output_dir, model,
                     # per-step runner override wins over the eval default.
                     step_system_prompt = step.runner.system_prompt
                 _bind_provider(step_runner, case_id, step_id)
-                step_result = step_runner.execute(
+                step_result = _sanitize_run_result(step_runner.execute(
                     target=step_target,
                     args=resolved,
                     workspace=case_ws,
@@ -1696,7 +1711,7 @@ def _run_multi_step_case(runner, case_id, case_ws, output_dir, model,
                     max_budget_usd=step_budget,
                     timeout_s=step_timeout,
                     extra_env=step_env or None,
-                )
+                ))
             finally:
                 if step_hook_env is not None and config.hooks.after_step:
                     ec = (str(step_result.exit_code)
