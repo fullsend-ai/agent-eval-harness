@@ -1,3 +1,10 @@
+# [1.65.0](https://github.com/fullsend-ai/agent-eval-harness/compare/v1.64.0...v1.65.0) (2026-11-16)
+
+
+### Features
+
+* **eval-run:** treat all-skipped conditional judges as N/A ([#312](https://github.com/fullsend-ai/agent-eval-harness/issues/312)) ([b2a86d3](https://github.com/fullsend-ai/agent-eval-harness/commit/b2a86d3e3fb5cde4367c4bf4b0c2a96dcede6522)), closes [#311](https://github.com/fullsend-ai/agent-eval-harness/issues/311)
+
 # [1.64.0](https://github.com/fullsend-ai/agent-eval-harness/compare/v1.63.3...v1.64.0) (2026-11-13)
 
 
