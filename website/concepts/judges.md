@@ -364,8 +364,10 @@ judges:
 
 `if:` skips a judge for cases where its Python expression is false. The expression is
 evaluated with `annotations` and `outputs` in scope (no builtins). Skipped cases are
-recorded as skipped and **excluded from `pass_rate`/`mean`** — they don't count as
-failures.
+recorded as skipped (counted in `skipped_cases` in `summary.yaml`) and **excluded from
+`pass_rate`/`mean`** — they don't count as failures. If the condition is false for
+*every* selected case, the judge's `min_pass_rate`/`min_mean` thresholds are not
+applicable; see [thresholds](thresholds.md).
 
 ```yaml
 judges:

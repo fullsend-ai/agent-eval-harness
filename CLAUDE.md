@@ -226,7 +226,7 @@ changing a key's behavior, and update it when you do:
 - `outputs` — artifact dirs (`path`) and/or tool calls (`tool`); `batch_pattern` maps batch outputs to cases
 - `traces` — execution data to capture: stdout/stderr, events, metrics
 - `judges` — `builtin`, inline `check`, LLM `prompt`/`prompt_file`/`llm_rubric`, external `module`/`function`; optional `arguments`, `if`, `verdict`, `examples`. A declared `score_range` is enforced on every judge type (off-scale → error sample, never clamped).
-- `thresholds` — per-judge `min_mean`/`min_pass_rate`/`min_win_rate`/`max_error_rate`
+- `thresholds` — per-judge `min_mean`/`min_pass_rate`/`min_win_rate`/`max_error_rate`. A judge whose `if:` is false for every selected case (`skipped_cases` equals `selected_cases` in `summary.yaml`) is not applicable: `min_pass_rate`/`min_mean` are waived rather than regressed.
 - `reward` — optional scalar in `[0, 1]` for RL (GRPO): a single `judge`, or a `formula` (`weighted` or an AST-validated expression). `gate: true` zeros the reward on *any* false boolean judge.
 
 Runs are stored in `$AGENT_EVAL_RUNS_DIR` (default `eval/runs`), configured during `/eval-setup`.

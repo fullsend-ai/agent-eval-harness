@@ -73,10 +73,13 @@ thresholds:
 
 !!! warning "An unavailable metric counts as a regression"
     If a threshold is set but its aggregate is `None`, that is reported as a regression,
-    not silently skipped. This is almost always a config mistake — the judge was skipped
-    for every case (its `if:` condition, or it errored), or the key targets the wrong
-    judge type (e.g. `min_pass_rate` on a numeric judge, whose `pass_rate` is always
-    `None`). Match the key to the judge's value type.
+    not silently skipped. This is almost always a config mistake — the judge errored on
+    every case, or the key targets the wrong judge type (e.g. `min_pass_rate` on a
+    numeric judge, whose `pass_rate` is always `None`). Match the key to the judge's
+    value type. A judge whose `if:` condition was false for every selected case is the
+    exception: its `min_pass_rate`/`min_mean` are reported as not applicable, not as a
+    regression — so a suite that needs at least one applicable case has to check that
+    separately.
 
 ## Exit-code behavior
 
