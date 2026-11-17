@@ -1020,18 +1020,24 @@ def build_trace(stdout_path, run_result, run_id, experiment_id,
     # individual LLM spans grouped by mlflow.llm.model.  Distribute
     # each model's total cost evenly across its LLM spans so the
     # chart totals match run_result.per_model_usage.
+    #
+    # Fallback: when per_model_usage is absent (older Claude Code versions
+    # don't include modelUsage in the result event), distribute the total
+    # cost_usd evenly across all LLM spans so the Cost Over Time chart
+    # shows a non-zero value instead of $0.00.
+    llm_spans = [s for s in spans
+                 if s["attributes"].get("mlflow.spanType") == json.dumps("LLM")]
     if per_model_usage:
         # Count LLM spans per model
         model_span_counts = {}
-        for span in spans:
-            if span["attributes"].get("mlflow.spanType") == json.dumps("LLM"):
-                m = span["attributes"].get("mlflow.llm.model")
-                if m:
-                    try:
-                        m = json.loads(m)
-                    except (json.JSONDecodeError, TypeError):
-                        pass
-                    model_span_counts[m] = model_span_counts.get(m, 0) + 1
+        for span in llm_spans:
+            m = span["attributes"].get("mlflow.llm.model")
+            if m:
+                try:
+                    m = json.loads(m)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+                model_span_counts[m] = model_span_counts.get(m, 0) + 1
 
         # Build per-model cost-per-span
         # Normalize model names: per_model_usage keys may use "@"
@@ -1048,19 +1054,49 @@ def build_trace(stdout_path, run_result, run_id, experiment_id,
                 model_cost_per_span[normalized] = m_cost / m_count
 
         # Set mlflow.llm.cost on each LLM span
-        for span in spans:
-            if span["attributes"].get("mlflow.spanType") == json.dumps("LLM"):
-                m = span["attributes"].get("mlflow.llm.model")
-                if m:
-                    try:
-                        m = json.loads(m)
-                    except (json.JSONDecodeError, TypeError):
-                        pass
-                    per_span_cost = model_cost_per_span.get(m)
-                    if per_span_cost:
-                        span["attributes"]["mlflow.llm.cost"] = json.dumps({
-                            "total_cost": per_span_cost,
-                        })
+        spans_with_cost = 0
+        for span in llm_spans:
+            m = span["attributes"].get("mlflow.llm.model")
+            if m:
+                try:
+                    m = json.loads(m)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+                per_span_cost = model_cost_per_span.get(m)
+                if per_span_cost:
+                    span["attributes"]["mlflow.llm.cost"] = json.dumps({
+                        "total_cost": per_span_cost,
+                    })
+                    spans_with_cost += 1
+
+        # If per_model_usage was present but no spans matched (e.g. model name
+        # not captured in stream events), fall back to even distribution.
+        # Also inject mlflow.llm.model so the store populates dimension_attributes,
+        # which the Cost Breakdown chart groups by.
+        if spans_with_cost == 0 and cost_usd and llm_spans:
+            cost_per_span = cost_usd / len(llm_spans)
+            # Use first model from per_model_usage if there's exactly one
+            fallback_model = (
+                next(iter(per_model_usage)) if len(per_model_usage) == 1 else None
+            )
+            for span in llm_spans:
+                span["attributes"]["mlflow.llm.cost"] = json.dumps({
+                    "total_cost": cost_per_span,
+                })
+                if fallback_model and not span["attributes"].get("mlflow.llm.model"):
+                    span["attributes"]["mlflow.llm.model"] = json.dumps(fallback_model)
+
+    elif cost_usd and llm_spans:
+        # Fallback: no per-model breakdown — distribute total cost evenly
+        # across all LLM spans so Cost Over Time / Cost Breakdown populate.
+        cost_per_span = cost_usd / len(llm_spans)
+        fallback_model = model  # from run_result
+        for span in llm_spans:
+            span["attributes"]["mlflow.llm.cost"] = json.dumps({
+                "total_cost": cost_per_span,
+            })
+            if fallback_model and not span["attributes"].get("mlflow.llm.model"):
+                span["attributes"]["mlflow.llm.model"] = json.dumps(fallback_model)
 
     # ── Trace metadata ──────────────────────────────────────────
     trace_metadata = {}
@@ -1094,6 +1130,12 @@ def build_trace(stdout_path, run_result, run_id, experiment_id,
         trace_metadata["mlflow.trace.tokenUsage"] = json.dumps(usage)
     if session_id:
         trace_metadata["mlflow.trace.session"] = session_id
+    # Inject a synthetic gateway endpoint ID so that MLflow's "Cost Over Time"
+    # and "Cost Breakdown" charts (which join on mlflow.gateway.endpointId) can
+    # aggregate cost from our eval traces.  The value is namespaced to avoid
+    # collision with real AI Gateway endpoints.
+    if cost_usd:
+        trace_metadata["mlflow.gateway.endpointId"] = f"eval-harness/{run_id}"
 
     return {
         "info": {
