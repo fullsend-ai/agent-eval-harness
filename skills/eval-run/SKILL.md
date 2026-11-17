@@ -195,8 +195,11 @@ python3 ${CLAUDE_SKILL_DIR}/scripts/score.py judges \
   --config <config> \
   --workspace <workspace_path> \
   --model <model> \
+  [--parallelism <n>] \
   [--no-llm-judges]   # add when the run requested skipping model-calling judges
 ```
+
+Pass the `--parallelism` given in Step 4, if any.
 
 If `hooks.before_scoring` is configured in eval.yaml, score.py runs those hooks before judge execution. Pass `--workspace` and `--model` so hook environment variables are populated.
 

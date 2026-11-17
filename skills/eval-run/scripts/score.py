@@ -3671,12 +3671,28 @@ def _judges_read_files(judges):
     return False
 
 
-def score_cases(judges, case_dirs, config, run_id=None, samples_override=None, runs_dir=None):
+def _judge_parallelism(parallelism, config, n_cases):
+    """How many cases to judge concurrently.
+
+    The run's case parallelism limit: `parallelism` (CLI `--parallelism`) wins,
+    then `execution.parallelism`, then the CPU count. Always capped at the
+    number of cases and at least 1. Judges within one case stay sequential.
+    """
+    if parallelism is None:
+        parallelism = getattr(getattr(config, "execution", None), "parallelism", None)
+    if parallelism is None:
+        parallelism = os.cpu_count() or 4
+    return max(1, min(n_cases, int(parallelism)))
+
+
+def score_cases(judges, case_dirs, config, run_id=None, samples_override=None, runs_dir=None,
+                parallelism=None):
     """Score all cases with all judges in parallel.
 
     Each judge's sample count comes from its config (`JudgeConfig.samples`);
     `samples_override` (from CLI `--samples`) wins when set. Only stochastic
     (LLM) judges are sampled; deterministic judges always run once.
+    Cases are judged concurrently up to `_judge_parallelism` workers.
     """
     if not case_dirs:
         return {"per_case": {}, "unmeasured": {},
@@ -3689,7 +3705,7 @@ def score_cases(judges, case_dirs, config, run_id=None, samples_override=None, r
                   for name, *_ in judges}
     _reset_tool_choice_fallbacks()
     _reset_verdict_state()
-    parallelism = min(len(case_dirs), os.cpu_count() or 4)
+    parallelism = _judge_parallelism(parallelism, config, len(case_dirs))
     lock = threading.Lock()
     completed = 0
 
@@ -6295,7 +6311,8 @@ def cmd_judges(args):
     # $AGENT_EVAL_RUNS_DIR/<eval>/, and load_case_record reads the run-level
     # run_result.json (exit_code, cost, hooks, ...) from runs_dir / run_id.
     judge_results = score_cases(judges, case_dirs, config, run_id=args.run_id,
-                                samples_override=samples_override, runs_dir=runs_dir)
+                                samples_override=samples_override, runs_dir=runs_dir,
+                                parallelism=getattr(args, "parallelism", None))
 
     for name, agg in judge_results.get("aggregated", {}).items():
         mean = agg.get("mean")
@@ -6535,6 +6552,10 @@ def main():
                             "judge N times per case; median (score) / majority "
                             "(bool) becomes the value, spread recorded for "
                             "stability reporting")
+    jdg_p.add_argument("--parallelism", type=int, default=None,
+                       help="Max cases judged concurrently (default: eval.yaml "
+                            "execution.parallelism, else CPU count; capped at "
+                            "the number of cases)")
     jdg_p.add_argument("--workspace", default=None,
                        help="Workspace path (for before_scoring hook env vars)")
     jdg_p.add_argument("--model", default=None,
