@@ -92,10 +92,19 @@ def test_non_positive_parallelism_still_judges(tmp_path, value):
 def test_results_do_not_depend_on_worker_count(tmp_path):
     config = _config()
     config.judges = [JudgeConfig(
-        name="even", check="return (int(outputs['case_id'][-1]) % 2 == 0, 'parity')")]
+        name="even",
+        check=("from pathlib import Path\n"
+               "n = int(Path(outputs['case_dir']).name[-1])\n"
+               "return (n % 2 == 0, 'parity')"))]
     case_dirs = _cases(tmp_path, 6)
     _, serial = _workers(config, case_dirs, parallelism=1)
     _, parallel = _workers(config, case_dirs, parallelism=6)
+    # Guard against comparing identical error results: every case must judge
+    # successfully, with three true and three false verdicts.
+    for result in (serial, parallel):
+        assert sorted(result["aggregated"]["even"]["values"]) == [False] * 3 + [True] * 3
+        for case in result["per_case"].values():
+            assert not case["even"].get("error"), case
     assert serial["per_case"] == parallel["per_case"]
     # `values` are appended in completion order, so compare them as a multiset.
     for name, agg in serial["aggregated"].items():

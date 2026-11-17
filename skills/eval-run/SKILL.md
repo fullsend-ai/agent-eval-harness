@@ -23,6 +23,7 @@ Parse `$ARGUMENTS`:
 | `--cases <id> [<id> ...]` | no | all cases | Exact case IDs to run |
 | `--baseline <run-id>` | no | — | Previous run to compare against |
 | `--no-llm-judges` | no | false | Skip LLM judges (prompt, prompt_file, LLM builtins, agent). Run deterministic judges (check, Python builtins, external code). |
+| `--parallelism <n>` | no | `execution.parallelism` | Concurrent cases for execution and judging |
 | `--gold` | no | false | Save outputs as gold references after run |
 | `--effort <level>` | no | `runner.effort` from config | Agent reasoning effort; accepted values are runner-specific |
 | `--runner <type>` | no | local | `local` (default Steps 1–8) or `harbor` (containerized — skips to Harbor runner section) |

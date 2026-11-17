@@ -336,8 +336,8 @@ These errors are raised at **config load time** (`EvalConfig.from_yaml`), not mi
 
 ## Gotchas
 
-- **`parallelism` is case-mode only.** Batch mode is a single invocation, so there is
-  nothing to parallelize. With [`runner.workspace_mode: repo`](runner.md) parallelism is
+- **Case *execution* parallelism is case-mode only.** Batch mode is a single invocation, so there is
+  nothing to parallelize there. With [`runner.workspace_mode: repo`](runner.md) parallelism is
   forced to `1` (all cases share the repo checkout).
 - **`parallelism` also applies to judging.** `score.py judges --parallelism` (else
   `execution.parallelism`, else the CPU count) sets how many cases are judged at once,
