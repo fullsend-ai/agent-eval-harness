@@ -1,3 +1,10 @@
+## [1.65.1](https://github.com/fullsend-ai/agent-eval-harness/compare/v1.65.0...v1.65.1) (2026-11-17)
+
+
+### Bug Fixes
+
+* **collect:** one collection routine, read through no-follow descriptors ([#294](https://github.com/fullsend-ai/agent-eval-harness/issues/294)) ([d4fbfa0](https://github.com/fullsend-ai/agent-eval-harness/commit/d4fbfa0eeba16c2f07ecf5534516e29f81954311)), closes [#291](https://github.com/fullsend-ai/agent-eval-harness/issues/291) [#292](https://github.com/fullsend-ai/agent-eval-harness/issues/292)
+
 # [1.65.0](https://github.com/fullsend-ai/agent-eval-harness/compare/v1.64.0...v1.65.0) (2026-11-16)
 
 
