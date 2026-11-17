@@ -1,3 +1,10 @@
+# [1.66.0](https://github.com/fullsend-ai/agent-eval-harness/compare/v1.65.2...v1.66.0) (2026-11-17)
+
+
+### Features
+
+* **score:** the unmeasured field, with incomplete_cases derived from it ([#293](https://github.com/fullsend-ai/agent-eval-harness/issues/293)) ([ad30f32](https://github.com/fullsend-ai/agent-eval-harness/commit/ad30f32b262d7dbbf57deb556e8fb8a3673d918c)), closes [#277](https://github.com/fullsend-ai/agent-eval-harness/issues/277) [#280](https://github.com/fullsend-ai/agent-eval-harness/issues/280) [#260](https://github.com/fullsend-ai/agent-eval-harness/issues/260) [#276](https://github.com/fullsend-ai/agent-eval-harness/issues/276) [#282](https://github.com/fullsend-ai/agent-eval-harness/issues/282) [#291](https://github.com/fullsend-ai/agent-eval-harness/issues/291) [#260](https://github.com/fullsend-ai/agent-eval-harness/issues/260) [#276](https://github.com/fullsend-ai/agent-eval-harness/issues/276)
+
 ## [1.65.2](https://github.com/fullsend-ai/agent-eval-harness/compare/v1.65.1...v1.65.2) (2026-11-17)
 
 
