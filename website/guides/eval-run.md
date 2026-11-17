@@ -108,6 +108,7 @@ Parsed from `$ARGUMENTS` at Step 0. CLI flags override the corresponding `eval.y
 | `--skill <name>` | from config | Override the skill being tested |
 | `--run-id <id>` | `YYYY-MM-DD-<model>` | Identifier for this run (names the output directory) |
 | `--cases <id> [<id> …]` | all cases | Run only the listed case IDs |
+| `--parallelism <n>` | `execution.parallelism` | Concurrent cases, for both execution (case mode) and judging |
 | `--baseline <run-id>` | — | Add a pairwise A/B comparison against a prior run under the same eval-name |
 | `--no-llm-judges` | false | Skip every judge that calls a model — `llm` (`prompt`, `prompt_file`, `llm_rubric`), `agent`, and LLM builtins; run only deterministic judges |
 | `--strict-cost` / `--strict-routing` / `--allow-estimate` | false | `execute.py` flags for provider-routed runs (an `openrouter:/` skill model; no-ops otherwise): fail the run (exit 2) when the cost could not be reconciled or the run budget was exceeded, or when the routing audit found violations; `--allow-estimate` lets an offline replay record the runner estimate as `runner:estimate` instead of `unavailable`. Under a plan the run ends with a short settle (about 20 s, up to 60 s) while the backfill drains and the key usage is read. See [runs directory → cost provenance](../reference/runs-directory.md#cost-provenance). |

@@ -97,7 +97,12 @@ def test_results_do_not_depend_on_worker_count(tmp_path):
     _, serial = _workers(config, case_dirs, parallelism=1)
     _, parallel = _workers(config, case_dirs, parallelism=6)
     assert serial["per_case"] == parallel["per_case"]
-    assert serial["aggregated"] == parallel["aggregated"]
+    # `values` are appended in completion order, so compare them as a multiset.
+    for name, agg in serial["aggregated"].items():
+        other = parallel["aggregated"][name]
+        assert sorted(agg["values"]) == sorted(other["values"])
+        assert ({k: v for k, v in agg.items() if k != "values"}
+                == {k: v for k, v in other.items() if k != "values"})
 
 
 def test_cli_flag_reaches_case_judging(tmp_path, monkeypatch):
