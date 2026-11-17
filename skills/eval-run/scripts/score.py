@@ -6318,9 +6318,8 @@ def cmd_judges(args):
         for name, agg in judge_results.get("aggregated", {}).items()
     }, runs_dir)
     _merge_summary(args.run_id, "per_case", judge_results.get("per_case", {}), runs_dir)
-    # spec 016. A top-level sibling keyed by case id, written only when
-    # something was lost so an untouched run's summary.yaml is unchanged.
-    # Written unconditionally. `_merge_summary` replaces only the key it is
+    # spec 016. A top-level sibling keyed by case id. Written unconditionally:
+    # `_merge_summary` replaces only the key it is
     # given, so skipping the write when nothing was lost would leave a
     # previous run's section standing next to this run's clean `per_case` and
     # `incomplete_cases` — a field contradicting the rest of the file.

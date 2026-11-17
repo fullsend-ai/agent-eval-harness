@@ -3304,15 +3304,27 @@ class TestUnmeasuredField:
         kinds = [e["kind"] for e in score._unmeasured_from_case(mixed)]
         assert kinds == ["hardlinked_file"]
 
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file modes")
     def test_the_scope_flag_does_not_reach_the_published_record(self,
                                                                 tmp_path):
         """`unmeasured_scope` routes the scope decision; `per_case` is a
-        published schema and it is not part of it."""
+        published schema and it is not part of it. The config needs a second,
+        non-agent judge: only then do the judges read files, the unreadable
+        file fail the record build, and an entry get built at all."""
         bad = self._case(tmp_path, "c0")
         (bad / "out" / "bad.txt").write_text("FAILING EVIDENCE")
+        config = _config(_agent_judge(feedback_type="bool", inputs=["out"]),
+                         outputs=["out"])
+        config.judges = [config.judges[0],
+                         JudgeConfig(name="shape", check="return True, 'ok'")]
         with self._unreadable(bad / "out" / "bad.txt"):
-            res = self._run(tmp_path, [bad] + [self._case(tmp_path, f"c{i}")
-                                               for i in range(1, 3)])
+            res = self._run(tmp_path,
+                            [bad] + [self._case(tmp_path, f"c{i}")
+                                     for i in range(1, 3)],
+                            config=config)
+        # the path ran: an unscoped entry was built
+        entries = res["unmeasured"]["c0"]
+        assert entries and all("judge" not in e for e in entries), entries
         for judge_record in res["per_case"]["c0"].values():
             assert "unmeasured_scope" not in judge_record
 
@@ -3321,18 +3333,24 @@ class TestUnmeasuredField:
         """`_merge_summary` replaces only the key it is handed. Writing
         `unmeasured` only when something was lost would leave a previous
         run's section standing beside this run's clean `per_case` and
-        `incomplete_cases` — a field contradicting the rest of the file."""
+        `incomplete_cases` — a field contradicting the rest of the file.
+        Driven through `cmd_judges`, the writer under test."""
+        import argparse
         import score
-        runs_dir = tmp_path / "runs"
-        run_dir = runs_dir / "r1"
-        run_dir.mkdir(parents=True)
+        config = tmp_path / "eval.yaml"
+        config.write_text(
+            "name: t\nexecution: {mode: case}\n"
+            "judges:\n  - name: ok\n    check: \"return True\"\n")
+        run_dir = tmp_path / "runs" / "r1"
+        (run_dir / "cases" / "c0").mkdir(parents=True)
         (run_dir / "summary.yaml").write_text(yaml.dump({
             "run_id": "r1",
             "unmeasured": {"c0": [{"phase": "score", "kind": "hardlinked_file",
                                    "attribution": "agent", "detail": "stale"}]},
         }))
-        # what cmd_judges now does on a clean pass
-        score._merge_summary("r1", "unmeasured", {}, runs_dir)
+        score.cmd_judges(argparse.Namespace(
+            config=str(config), run_dir=str(run_dir), run_id=None,
+            samples=None, no_llm_judges=False, workspace=None, model=None))
         after = yaml.safe_load((run_dir / "summary.yaml").read_text())
         assert after["unmeasured"] == {}, after
 

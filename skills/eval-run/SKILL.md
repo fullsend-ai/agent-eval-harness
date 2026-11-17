@@ -219,7 +219,7 @@ Read the full results:
 python3 ${CLAUDE_SKILL_DIR}/scripts/agent_eval/state.py read $AGENT_EVAL_RUNS_DIR/<eval-name>/<id>/summary.yaml
 ```
 
-`summary.yaml` carries `judges`, `per_case`, `judge_usage`, `total_cost_usd`, plus `pairwise` when --baseline was used (keys: [`data-pipeline.md`](references/data-pipeline.md)).
+`summary.yaml` carries `judges`, `per_case`, `unmeasured`, `judge_usage`, `total_cost_usd`, plus `pairwise` when --baseline was used (keys: [`data-pipeline.md`](references/data-pipeline.md)).
 
 ## Step 7: Interpret and Report
 
