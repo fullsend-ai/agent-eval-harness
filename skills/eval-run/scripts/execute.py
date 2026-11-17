@@ -2059,8 +2059,7 @@ def _execute_per_case(args, config, runner, runner_cls,
 
                 for fut in as_completed(futures):
                     case_id, result = fut.result()
-                    if result is not None:
-                        case_results[case_id] = result
+                    case_results[case_id] = result
         else:
             for i, entry in enumerate(case_order, 1):
                 case_id = entry if isinstance(entry, str) else entry["case_id"]
@@ -2107,8 +2106,7 @@ def _execute_per_case(args, config, runner, runner_cls,
                         config=config, hook_env=hook_env,
                         global_hook_outputs=global_hook_outputs,
                         subagent_model=subagent_model)
-                if result is not None:
-                    case_results[case_id] = result
+                case_results[case_id] = result
     finally:
         if config.hooks.after_all:
             print("Running after_all hooks...", file=sys.stderr)
