@@ -232,7 +232,9 @@ runner:
 
 - **Provider** — Cursor's own account. The only provider variables on its
   exact-name allowlist are `CURSOR_API_KEY`, `CURSOR_API_ENDPOINT` and
-  `CURSOR_AGENT_BIN`; the model id is whatever `cursor-agent --model` accepts
+  `CURSOR_AGENT_BIN` (plus the OS baseline, the MLflow variables,
+  `AGENT_EVAL_RUNS_DIR` and `AGENT_EVAL_HARNESS_ROOT`, the last defaulted to
+  the harness checkout when absent); the model id is whatever `cursor-agent --model` accepts
   (the harness appends `[effort=…]`), so `provider:/` ids do not apply, and an
   `openrouter:/` skill model is rejected at config load for this runner
   ("cursor has no base-URL knob"). Anthropic and OpenAI credentials are not
