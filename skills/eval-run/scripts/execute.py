@@ -199,8 +199,7 @@ if __name__ == "__main__":
     _early_pidfile(sys.argv[1:])
 
 from agent_eval.actions_mask import (  # noqa: E402
-    actions_mask_values,
-    redact_actions_masks,
+    redact_actions_masks_across_streams,
 )
 from agent_eval.agent import RUNNERS  # noqa: E402 — after the early pidfile write
 from agent_eval.providers.reconcile import (  # noqa: E402
@@ -221,10 +220,8 @@ def _sanitize_run_result(result):
     """Scrub Actions mask values before runner output is persisted."""
     if result is None:
         return result
-    values = actions_mask_values(
-        (result.stdout or "") + (result.stderr or ""))
-    result.stdout = redact_actions_masks(result.stdout or "", values)
-    result.stderr = redact_actions_masks(result.stderr or "", values)
+    result.stdout, result.stderr = redact_actions_masks_across_streams(
+        result.stdout or "", result.stderr or "")
     return result
 
 _HARNESS_SYSTEM_PROMPT = (

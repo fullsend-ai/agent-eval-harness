@@ -493,6 +493,8 @@ clause — false positives that hide a progress detail where a miss would show a
 then stderr) is still the case's `stderr.log`, unfiltered and with its control
 sequences, except that GitHub Actions `::add-mask::` declarations and their
 values are scrubbed before persistence; the sandbox image is still read from it.
+With a log prefix, selected console lines are buffered until both pipes are
+captured so a mask declared on either pipe applies before any line is printed.
 
 fullsend writes some `💬` lines without a trailing newline, so they reach the log only
 when its next write ends the line — usually the `⏳` heartbeat, up to 30 seconds later,

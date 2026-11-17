@@ -23,8 +23,9 @@ unchanged, and every iteration's subagent transcripts copied into
 
 fullsend's own console (stdout, then stderr) is ``RunResult.stderr``, read
 from both pipes concurrently. With a log prefix (the harness sets one when it
-logs progress) a filtered subset of it is also streamed live, line by line,
-under the same ``  <prefix> | `` the claude-code runner uses: the section and
+logs progress) a filtered subset of it is buffered until capture completes,
+then printed under the same ``  <prefix> | `` the claude-code runner uses:
+the section and
 step lines (``→``, ``•``, ``✓``, ``✗``, ``!``) with the indented detail lines
 attached to them (the plan block, the ``→ Results`` block), the agent activity
 lines (``💬`` text, ``⚙`` tool call, ``⏳`` heartbeat), plain
@@ -70,7 +71,9 @@ from typing import Optional
 
 import yaml
 
-from agent_eval.actions_mask import ActionsMaskScrubber
+from agent_eval.actions_mask import (
+    actions_mask_values_across_streams, redact_actions_masks_across_streams,
+)
 from agent_eval.config import resolve_env_value, workspace_source_roots
 from .base import EvalRunner, RunResult, terminate_process_group
 from .stream_capture import (
@@ -679,8 +682,8 @@ class FullsendRunner(EvalRunner):
                 # Exit code -1 with a "Timed out" stderr; the caller still maps
                 # whatever the run directory holds (usage, stream, artifacts).
                 timeout_err = "\n".join(
-                    s for s in (f"Timed out after {timeout_s}s", console.stdout,
-                                console.stderr, hung) if s)
+                    s for s in (f"Timed out after {timeout_s}s", console.raw_stdout,
+                                console.raw_stderr, hung) if s)
                 return -1, "", timeout_err, time.monotonic() - start
             except BaseException:
                 # fullsend runs in its own session, so the terminal's SIGINT
@@ -697,7 +700,8 @@ class FullsendRunner(EvalRunner):
             # case's status line or under a later case's prefix. A no-op once
             # both pipes reached EOF.
             console.detach()
-        return proc.returncode, console.stdout, console.stderr, time.monotonic() - start
+        return (proc.returncode, console.raw_stdout, console.raw_stderr,
+                time.monotonic() - start)
 
     # ── Run directory → RunResult ────────────────────────────────────
 
@@ -772,6 +776,7 @@ class FullsendRunner(EvalRunner):
             raw_output["security_files"] = _count_files(run_dir / "security")
 
         denials = _telemetry_denials(run_dir / "run-telemetry.jsonl") if run_dir else []
+        stdout, stderr = redact_actions_masks_across_streams(stdout, stderr)
 
         return RunResult(
             exit_code=exit_code,
@@ -798,11 +803,12 @@ class _ConsoleCapture:
     """fullsend's stdout and stderr, read concurrently.
 
     One daemon thread per pipe keeps every line — the text is what
-    ``communicate`` would have returned: universal newlines, in order — and,
-    given a log prefix, prints the lines :class:`_ConsoleFilter` selects under
-    ``  <prefix> | `` as they arrive, with ``secrets`` (the values of the
-    credential-named environment variables, see :func:`_secret_values`)
-    masked in them. Reading both pipes at once is what keeps
+    ``communicate`` would have returned: universal newlines, in order. With a
+    log prefix, the lines :class:`_ConsoleFilter` selects are buffered until
+    capture completes, then printed under ``  <prefix> | `` with ``secrets``
+    (the values of the credential-named environment variables, see
+    :func:`_secret_values`) and Actions mask values from both pipes masked in
+    them. Reading both pipes at once is what keeps
     fullsend from blocking on a full one; the threads are daemons so a
     descendant that inherited a pipe and outlives fullsend cannot hang the
     harness (:meth:`join` is bounded, and what was read by then is kept).
@@ -817,11 +823,14 @@ class _ConsoleCapture:
                  secrets=()):
         self._lines: dict = {"stdout": [], "stderr": []}
         self._threads: list = []
-        self._mask_scrubber = ActionsMaskScrubber()
-        # Written under _print_lock by detach(), read under it before a print.
+        self._state_lock = threading.Lock()
+        # Written under _state_lock by detach(), read under it before keeping.
         self._detached = False
+        self._flushed = False
         if log_prefix:  # printed on every forwarded line: no workflow command
             log_prefix = _neutralise_commands(log_prefix)
+        self._log_prefix = log_prefix
+        self._secrets = secrets
         for name, stream in (("stdout", proc.stdout), ("stderr", proc.stderr)):
             if stream is None:
                 continue
@@ -834,35 +843,12 @@ class _ConsoleCapture:
     def _pump(self, name: str, stream, log_prefix: Optional[str],
               secrets=()) -> None:
         lines = self._lines[name]
-        select = _ConsoleFilter(secrets) if log_prefix else None
-        mid_line = False  # the previous piece did not end its line
         try:
             while (line := stream.readline(_MAX_PIPE_READ_CHARS)):
-                continued, mid_line = mid_line, not line.endswith("\n")
-                if self._detached:
-                    continue  # the run has returned: drain, keep nothing
-                lines.append(line)
-                self._mask_scrubber.observe(line)
-                if select is None or continued:
-                    continue  # the rest of a line already filtered by its head
-                shown = select.select(line, mask_values=self._mask_scrubber.values())
-                if shown is None:
-                    continue
-                try:
-                    with _print_lock:
-                        # Read under the lock detach() writes under: once
-                        # detach() has returned, no forwarded line follows
-                        # the status line the caller prints under this lock.
-                        if self._detached:
-                            select = None
-                            continue
-                        print(f"  {log_prefix} | {shown}", flush=True)
-                except (OSError, ValueError):
-                    # The harness's stdout is gone (closed pipe) or cannot
-                    # encode the line (a non-UTF-8 console): stop forwarding
-                    # but keep draining, or fullsend blocks on a full pipe
-                    # until the timeout. Draining never depended on printing.
-                    select = None
+                with self._state_lock:
+                    if self._detached:
+                        continue
+                    lines.append(line)
         except (OSError, ValueError):
             pass  # the pipe closed under the reader: keep what was read
         finally:
@@ -880,25 +866,71 @@ class _ConsoleCapture:
         return not any(thread.is_alive() for thread in self._threads)
 
     def detach(self) -> None:
-        """End the forwarding and the keeping of lines: the run is over.
+        """End the keeping of lines and flush buffered forwarding.
 
-        Taken under the print lock, so a forwarded line in flight has landed
-        before this returns and none lands after it — the caller's status
-        line, printed under the same lock, is the case's last. A reader still
+        Taken under the print lock, so every buffered forwarded line has landed
+        before this returns and none lands after it — the caller's status line,
+        printed under the same lock, is the case's last. A reader still
         blocked on a pipe (a descendant outside the killed group holds it)
         goes on emptying the pipe, keeping nothing, and closes it at EOF;
         what was read before is what :attr:`stdout`/:attr:`stderr` return.
         Idempotent, and a no-op once both pipes reached EOF."""
         with _print_lock:
-            self._detached = True
+            with self._state_lock:
+                if self._flushed:
+                    return
+                self._detached = True
+                self._flushed = True
+                lines = {name: list(parts) for name, parts in self._lines.items()}
+            self._flush(self._log_prefix, lines, self._secrets)
+
+    def _flush(self, log_prefix: Optional[str], lines: dict,
+               secrets=()) -> None:
+        if not log_prefix:
+            return
+        mask_values = actions_mask_values_across_streams(
+            "".join(lines["stdout"]), "".join(lines["stderr"]))
+        for name in ("stdout", "stderr"):
+            select = _ConsoleFilter(secrets)
+            mid_line = False  # the previous piece did not end its line
+            for line in lines[name]:
+                continued, mid_line = mid_line, not line.endswith("\n")
+                if continued:
+                    continue  # the rest of a line already filtered by its head
+                shown = select.select(line, mask_values=mask_values)
+                if shown is None:
+                    continue
+                try:
+                    print(f"  {log_prefix} | {shown}", flush=True)
+                except (OSError, ValueError):
+                    # The harness's stdout is gone (closed pipe) or cannot
+                    # encode a line (a non-UTF-8 console): stop forwarding.
+                    return
 
     @property
     def stdout(self) -> str:
-        return self._mask_scrubber.redact("".join(self._lines["stdout"]))
+        return self._redacted_streams()[0]
 
     @property
     def stderr(self) -> str:
-        return self._mask_scrubber.redact("".join(self._lines["stderr"]))
+        return self._redacted_streams()[1]
+
+    @property
+    def raw_stdout(self) -> str:
+        return self._raw_streams()[0]
+
+    @property
+    def raw_stderr(self) -> str:
+        return self._raw_streams()[1]
+
+    def _raw_streams(self) -> tuple:
+        with self._state_lock:
+            return ("".join(self._lines["stdout"]),
+                    "".join(self._lines["stderr"]))
+
+    def _redacted_streams(self) -> tuple:
+        stdout, stderr = self._raw_streams()
+        return redact_actions_masks_across_streams(stdout, stderr)
 
 
 class _ConsoleFilter:

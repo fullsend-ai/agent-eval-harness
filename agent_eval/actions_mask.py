@@ -1,10 +1,9 @@
 """GitHub Actions ``::add-mask::`` scrubbing for captured process output."""
-
 import re
-import threading
 
 
-_ADD_MASK_RE = re.compile(r"::add-mask::([^\r\n]*)")
+_ADD_MASK_RE = re.compile(
+    r"(?im)^(?P<indent>[ \t]*)::add-mask::(?P<value>[^\r\n]*)")
 _ACTIONS_ESCAPE_RE = re.compile(r"%25|%0D|%0A", re.IGNORECASE)
 _ACTIONS_ESCAPE_MAP = {
     "%25": "%",
@@ -28,13 +27,36 @@ def actions_mask_values(text: str) -> tuple:
     """
     values = set()
     for match in _ADD_MASK_RE.finditer(text or ""):
-        escaped = match.group(1)
+        escaped = match.group("value")
         decoded = _unescape_actions_value(escaped)
         if escaped:
             values.add(escaped)
         if decoded:
             values.add(decoded)
+        for decoded_line in decoded.splitlines():
+            if decoded_line.strip():
+                values.add(decoded_line.strip())
     return tuple(sorted(values, key=len, reverse=True))
+
+
+def actions_mask_values_across_streams(*texts: str) -> tuple:
+    """Return mask values collected independently from several streams.
+
+    Streams must not be concatenated before collection: a declaration at the
+    end of one stream without a newline would otherwise absorb the beginning
+    of the next stream.
+    """
+    values = set()
+    for text in texts:
+        values.update(actions_mask_values(text or ""))
+    return tuple(sorted(values, key=len, reverse=True))
+
+
+def redact_actions_masks_across_streams(*texts: str) -> tuple:
+    """Redact every stream with the union of their Actions mask values."""
+    values = actions_mask_values_across_streams(*texts)
+    return tuple(
+        redact_actions_masks(text or "", values) for text in texts)
 
 
 def redact_actions_masks(text: str, values=None) -> str:
@@ -50,31 +72,13 @@ def redact_actions_masks(text: str, values=None) -> str:
     mask_values = actions_mask_values(text) if values is None else tuple(values)
     for value in sorted(set(mask_values), key=len, reverse=True):
         text = text.replace(value, "***")
-    return _ADD_MASK_RE.sub("::add-mask::***", text)
+    return _ADD_MASK_RE.sub(
+        lambda match: f"{match.group('indent')}::add-mask::***", text)
 
 
-class ActionsMaskScrubber:
-    """Thread-safe accumulator for mask values from concurrent pipes."""
-
-    def __init__(self):
-        self._values = set()
-        self._lock = threading.Lock()
-        self._cached_values = None
-
-    def observe(self, text: str) -> None:
-        values = actions_mask_values(text)
-        if not values:
-            return
-        with self._lock:
-            self._values.update(values)
-            self._cached_values = None
-
-    def values(self) -> tuple:
-        with self._lock:
-            if self._cached_values is None:
-                self._cached_values = tuple(
-                    sorted(self._values, key=len, reverse=True))
-            return self._cached_values
-
-    def redact(self, text: str) -> str:
-        return redact_actions_masks(text, self.values())
+__all__ = [
+    "actions_mask_values",
+    "actions_mask_values_across_streams",
+    "redact_actions_masks",
+    "redact_actions_masks_across_streams",
+]

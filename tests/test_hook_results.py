@@ -179,6 +179,23 @@ def test_runner_actions_masks_are_scrubbed_before_persistence(tmp_path):
         assert "::add-mask::***" in text or "Error: ***" in text, path
 
 
+def test_runner_actions_masks_are_collected_per_stream_before_persistence(
+        tmp_path):
+    runner = _runner()
+    runner.execute.return_value = RunResult(
+        exit_code=0,
+        stdout="::add-mask::split-stream-secret",
+        stderr="Error: split-stream-secret\n",
+        duration_s=1.0,
+    )
+    _, _, case_output = _single(tmp_path, runner=runner)
+
+    stdout = (case_output / "stdout.log").read_text()
+    stderr = (case_output / "stderr.log").read_text()
+    assert stdout == "::add-mask::***"
+    assert stderr == "Error: ***\n"
+
+
 def test_after_each_failure_continue_is_recorded(tmp_path):
     result, on_disk, _ = _single(tmp_path, after_each=[
         HookEntry(command="exit 1", on_failure="continue",

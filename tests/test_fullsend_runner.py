@@ -120,7 +120,8 @@ FAKE_FULLSEND = textwrap.dedent('''\
         {"type": "system", "subtype": "init", "model": "claude-opus-4-6"},
         {"type": "assistant", "requestId": "gen-1", "message": {
             "id": "msg_1", "model": "claude-opus-4-6", "role": "assistant",
-            "content": [{"type": "text", "text": "Working"}],
+            "content": [{"type": "text", "text": os.environ.get(
+                "FAKE_FULLSEND_RESULT_TEXT", "Working")}],
             "usage": {"input_tokens": 10, "output_tokens": 5}}},
         {"type": "assistant", "requestId": "gen-2", "message": {
             "id": "msg_2", "model": "claude-opus-4-6", "role": "assistant",
@@ -199,7 +200,8 @@ def fake_fullsend(fake_bin, tmp_path, monkeypatch):
                 "FAKE_FULLSEND_NO_RUN", "FAKE_FULLSEND_HANG_AFTER_RUN",
                 "FAKE_FULLSEND_ITERATIONS",
                 "FAKE_FULLSEND_NO_IMAGE", "FAKE_FULLSEND_IMAGE",
-                "FAKE_FULLSEND_CONSOLE", "FAKE_FULLSEND_CONSOLE_ERR"):
+                "FAKE_FULLSEND_CONSOLE", "FAKE_FULLSEND_CONSOLE_ERR",
+                "FAKE_FULLSEND_RESULT_TEXT"):
         monkeypatch.delenv(var, raising=False)
     return record
 
@@ -1568,6 +1570,74 @@ def test_execute_py_batch_end_to_end(tmp_path, fake_bin):
     for n, case_id in enumerate(("case-001", "case-002"), start=1):
         report = output_dir / "cases" / case_id / "artifacts" / f"report-{n}.md"
         assert report.read_text() == f"report {n}"
+
+
+def test_execute_py_case_end_to_end_masks_actions_values(tmp_path, fake_bin):
+    """A one-case local pipeline run never leaks a declared Actions value."""
+    secret = "SYNTHETIC-SECRET-7f31"
+    project = tmp_path / "project"
+    (project / "cases" / "case-001").mkdir(parents=True)
+    (project / "cases" / "case-001" / "input.yaml").write_text(
+        yaml.dump({"prompt": "use the synthetic secret"}))
+    (project / "scripts").mkdir()
+    (project / "scripts" / "helper.sh").write_text("echo hi")
+    (project / ".claude" / "skills" / "rfe.speedrun").mkdir(parents=True)
+    (project / ".claude" / "skills" / "rfe.speedrun" / "SKILL.md").write_text("# s")
+    (project / ".fullsend").mkdir()
+    (project / ".fullsend" / "config.yaml").write_text("agents: []\n")
+    (project / "eval.yaml").write_text(yaml.dump({
+        "name": "fullsend-case-mask",
+        "execution": {"mode": "case", "skill": "rfe.speedrun",
+                      "arguments": "{{ input.prompt }}"},
+        "runner": {"type": "fullsend", "agent": "rfe-creator-eval"},
+        "models": {"skill": "opus"},
+        "dataset": {"path": "cases", "schema": "Each case has a prompt"},
+    }))
+
+    console_out = tmp_path / "console-out.txt"
+    console_out.write_text(f"→ Working with {secret}\n")
+    console_err = tmp_path / "console-err.txt"
+    console_err.write_text(f"::add-mask::{secret}\n")
+    record = tmp_path / "record.json"
+    runs_dir = tmp_path / "runs"
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("_AGENT_EVAL_BOOTSTRAP_DONE", "FAKE_FULLSEND_EXIT",
+                        "FAKE_FULLSEND_SLEEP")}
+    env.update({
+        "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}",
+        "AGENT_EVAL_RUNS_DIR": str(runs_dir),
+        "GITHUB_ACTIONS": "true",
+        "FAKE_FULLSEND_RECORD": str(record),
+        "FAKE_FULLSEND_CONSOLE": str(console_out),
+        "FAKE_FULLSEND_CONSOLE_ERR": str(console_err),
+        "FAKE_FULLSEND_RESULT_TEXT": secret,
+    })
+
+    ws_result = _run_script("workspace.py", ["--config", "eval.yaml", "--run-id", "r1"],
+                            cwd=project, env=env)
+    assert ws_result.returncode == 0, ws_result.stderr
+    workspace = next(Path(line.split(":", 1)[1].strip())
+                     for line in ws_result.stdout.splitlines()
+                     if line.startswith("WORKSPACE:"))
+
+    output_dir = runs_dir / "fullsend-case-mask" / "r1"
+    output_dir.mkdir(parents=True)
+    exec_result = _run_script("execute.py", [
+        "--workspace", str(workspace), "--model", "opus",
+        "--output", str(output_dir), "--config", str(project / "eval.yaml"),
+        "--run-id", "r1",
+    ], cwd=project, env=env)
+    assert exec_result.returncode == 0, exec_result.stderr
+    assert secret not in exec_result.stdout
+    assert secret not in exec_result.stderr
+
+    case_output = output_dir / "cases" / "case-001"
+    stdout = (case_output / "stdout.log").read_text()
+    stderr = (case_output / "stderr.log").read_text()
+    assert secret not in stdout
+    assert secret not in stderr
+    assert f'"text": "{secret}"' not in stdout
+    assert "::add-mask::***" in stderr
 
 
 # ── Run provenance ───────────────────────────────────────────────────
@@ -3712,6 +3782,22 @@ class TestFullsendConsoleStreaming:
             target="s", args="", workspace=ws, model="m", timeout_s=60)
 
         assert result.exit_code == 0
+        assert "cross-stream-secret" not in result.stderr
+        assert "::add-mask::***" in result.stderr
+
+    def test_actions_mask_live_stream_waits_for_cross_pipe_declarations(
+            self, tmp_path, fake_fullsend, monkeypatch, capsys):
+        out = "  ✓ Sandbox created cross-stream-secret\n"
+        err = "::add-mask::cross-stream-secret\n"
+        self._console_files(tmp_path, monkeypatch, out=out, err=err)
+        ws = _workspace(tmp_path)
+        result = _runner(tmp_path, log_prefix="eval").execute(
+            target="s", args="", workspace=ws, model="m", timeout_s=60)
+        printed = capsys.readouterr().out
+
+        assert result.exit_code == 0
+        assert "cross-stream-secret" not in printed
+        assert "  eval |   ✓ Sandbox created ***" in printed
         assert "cross-stream-secret" not in result.stderr
         assert "::add-mask::***" in result.stderr
 
