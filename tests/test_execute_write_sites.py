@@ -13,7 +13,8 @@ HARBOR_RUN = REPO_ROOT / "agent_eval" / "harbor" / "run.py"
 EVALHUB_RUNNER = REPO_ROOT / "agent_eval" / "evalhub" / "runner.py"
 RECONCILE = REPO_ROOT / "agent_eval" / "providers" / "reconcile.py"
 
-WRITE_SITE_COUNT = 8
+# execute.py's sites; 9 (Harbor) and 10 (EvalHub) live in their own modules.
+EXECUTE_WRITE_SITES = [*range(1, 9), 11]
 
 
 def _lines_writing_run_result(path):
@@ -44,12 +45,12 @@ def test_execute_has_no_direct_run_result_writer():
 def test_every_enumerated_write_site_calls_the_helper():
     text = EXECUTE.read_text()
     markers = sorted(int(m) for m in re.findall(r"# run_result write-site (\d+)", text))
-    assert markers == list(range(1, WRITE_SITE_COUNT + 1)), markers
+    assert markers == EXECUTE_WRITE_SITES, markers
     for n in markers:
         block = text.split(f"# run_result write-site {n}", 1)[1].splitlines()[1:4]
         assert any("write_run_result(" in line for line in block), (
             f"write-site {n} is not followed by a write_run_result( call")
-    assert text.count("write_run_result(") >= WRITE_SITE_COUNT + 1     # calls + the def
+    assert text.count("write_run_result(") >= len(EXECUTE_WRITE_SITES) + 1  # calls + the def
 
 
 def test_evalhub_runner_only_writes_through_the_helper():

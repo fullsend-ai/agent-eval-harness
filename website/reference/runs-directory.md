@@ -51,7 +51,7 @@ $AGENT_EVAL_RUNS_DIR/<run-id>/
 ├── summary.yaml        # judge results: judges (mean, pass_rate, scored_cases,
 │                       #   errored_cases, incomplete_cases, skipped_cases, selected_cases,
 │                       #   value_kind, stability)
-│                       #   + per_case + run_metrics
+│                       #   + per_case + unmeasured + run_metrics
 │                       #   + judge_usage / total_cost_usd (judge spend, see below)
 ├── analysis.md         # optional: the agent's written analysis + recommendation
 ├── review.yaml         # optional: human feedback from /eval-review — see below
@@ -96,6 +96,7 @@ channel**: what the LLM judges themselves consumed, kept apart from the agent's 
 | `judges.<judge>.selected_cases` | How many cases produced a result for this judge at all — the denominator the other counters are read against. A step-scoped judge (`step:`) counts only the cases carrying that step. |
 | `judges.<judge>.skipped_cases` | How many of those cases the judge's [`if:` condition](config/judges.md#conditional-judges-if) skipped. A condition that *raised* is an error, not a skip. When this equals `selected_cases` the judge is [not applicable](config/thresholds.md) and its `min_pass_rate`/`min_mean` are waived. |
 | `judges.<judge>.value_kind` | `bool` or `numeric` — the value type the judge's **config** declares (`feedback_type`, or `score_range`, or an LLM/agent judge's numeric default). Absent when the config does not settle it (a builtin, or a `check`/`module` judge declaring neither), since those may return either. Recorded so an all-skipped judge, which has no values to infer from, still fails a `min_pass_rate` aimed at a numeric judge. |
+| `unmeasured.<case>` | A list of entries, one per piece of evidence lost for that case; `{}` when nothing was lost (a clean re-score overwrites a previous run's section). Each entry has `phase` (`score`), `kind` (a slug such as `hardlinked_file`, `sparse_file`, `depth_limit`, `staging_limit`, `content_not_staged`), `attribution` (`agent` — the graded skill's own output tree), `detail` (the reason, with `(xN)` when it occurred N times), and `judge` **only on a scoped entry**. See [incomplete evidence](#incomplete-evidence). |
 | `per_case.<case>.<judge>.verdict_transport` | How the verdict travelled: `json_schema` (the provider's structured output) or `tool` (the forced tool call) — the [verdict transport](config/judges.md#verdict-transport). Absent on deterministic and runner/agent judges. |
 | `per_case.<case>.<judge>.tool_choice_mode` | Present only when a judge on the `tool` transport had to fall back from a forced tool call (`required` or `auto`). |
 | `judge_usage` | Run-level aggregate: `judge_cost_usd` — the sum over the priced calls, `null` only when none was priced; with judges on several providers it is a partial figure, so read `requests_missing_cost` next to it (the report shows `N unpriced`) — plus `requests`, token totals, `cost_sources` (count per source), `by_judge`, `by_model`, `verdict_transports` (calls per transport) and, when any happened, `verdict_fallbacks` (calls that did not run on the policy's first transport) and `tool_choice_fallbacks`. `total_cost_source: complete` means both addends were numeric, not that every judge call was priced. Absent when no judge produced usage (deterministic-only runs). |
@@ -127,6 +128,10 @@ third happens before any judge runs, so it is recorded against **all** of them �
 including judges that never read files, because none of them got a case to grade.
 It is not a list of error types: anything that stops the record being built
 counts, because a case that could not be assembled is one no judge graded.
+
+`judges.<judge>.incomplete_cases` is derived from the `unmeasured` entries
+rather than counted beside them. An unscoped entry (no `judge`) charges every
+judge; a `judge:`-scoped entry charges only the judge it names.
 
 Most of the record-building reads happen only when some judge needs file
 contents — an agent judge that does not render `{{ outputs }}` reads its

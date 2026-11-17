@@ -1,3 +1,17 @@
+## [1.65.2](https://github.com/fullsend-ai/agent-eval-harness/compare/v1.65.1...v1.65.2) (2026-11-17)
+
+
+### Bug Fixes
+
+* **eval-run:** fail the run when a case workspace is missing ([#314](https://github.com/fullsend-ai/agent-eval-harness/issues/314)) ([dce4287](https://github.com/fullsend-ai/agent-eval-harness/commit/dce42871e83b43930dddb0208c11559738e1a034)), closes [#313](https://github.com/fullsend-ai/agent-eval-harness/issues/313)
+
+## [1.65.1](https://github.com/fullsend-ai/agent-eval-harness/compare/v1.65.0...v1.65.1) (2026-11-17)
+
+
+### Bug Fixes
+
+* **collect:** one collection routine, read through no-follow descriptors ([#294](https://github.com/fullsend-ai/agent-eval-harness/issues/294)) ([d4fbfa0](https://github.com/fullsend-ai/agent-eval-harness/commit/d4fbfa0eeba16c2f07ecf5534516e29f81954311)), closes [#291](https://github.com/fullsend-ai/agent-eval-harness/issues/291) [#292](https://github.com/fullsend-ai/agent-eval-harness/issues/292)
+
 # [1.65.0](https://github.com/fullsend-ai/agent-eval-harness/compare/v1.64.0...v1.65.0) (2026-11-16)
 
 

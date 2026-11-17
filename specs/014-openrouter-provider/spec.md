@@ -2178,8 +2178,8 @@ env var. CLI: `--model openrouter:/…`, `--judge-model openrouter:/…`, `--str
   `skills/eval-run/scripts/execute.py` and asserts (a) every line matching
   `run_result\.json` that is not inside `write_run_result` (or a comment/log string) is
   zero — i.e. `open(`/`write_text(`/`json.dump(` never target that filename elsewhere;
-  (b) the count of `write_run_result(` call sites is ≥ 8 and each of the eight enumerated
-  paths (execute.py section) is covered by a named marker comment `# run_result write-site N`
+  (b) the count of `write_run_result(` call sites is ≥ 9 and each of the nine enumerated
+  paths (execute.py section; markers 1-8 and 11 — 9 and 10 belong to Harbor and EvalHub) is covered by a named marker comment `# run_result write-site N`
   next to the call, so a renumbering of line anchors fails the test loudly rather than
   silently; (c) `write_run_result` calls `reconcile(` exactly once; (d) the same filename
   grep over `agent_eval/harbor/run.py` finds only the helper call. Runs without a key.
