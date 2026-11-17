@@ -3176,8 +3176,9 @@ class TestConsoleFilter:
             "/home/me/creds.json", "-----BEGIN KEY-----", "MIIEpAIBAAKCAQEA",
             "-----END KEY-----", '{"auths": {"r.test": {"auth": "<b64>"}}}',
             "<oauth-value>", "abcdefgh", "abcdefgh-ijkl"}
-        assert list(secrets) == sorted(secrets, key=lambda v: (-len(v), v))
-        select = fullsend_mod._ConsoleFilter(secrets)
+        # _flush sorts the merged set before filtering; mirror that order.
+        select = fullsend_mod._ConsoleFilter(
+            tuple(sorted(secrets, key=lambda v: (-len(v), v))))
         shown = [select.select(line + "\n") for line in (
             "  ✓ Logged in with s3cr3t-value as <aws-key-id>",
             "  💬 The key abcdefgh-ijkl is not abcdefgh; short and auto-fix-long-value stay",
@@ -3771,6 +3772,27 @@ class TestFullsendConsoleStreaming:
         assert "::add-mask::***" in result.stderr
         assert "synthetic-secret" not in printed
         assert "  eval |   ✓ Sandbox created ***" in printed
+
+    def test_actions_mask_live_stream_masks_prefix_env_secret_whole(
+            self, tmp_path, fake_fullsend, monkeypatch, capsys):
+        # An environment secret that is a prefix of a declared mask value is
+        # masked only after the longer value: concatenated unsorted, the
+        # shorter one replaced first and the longer value's tail leaked.
+        monkeypatch.setenv("JIRA_TOKEN", "abcdefgh")
+        out = ("::add-mask::abcdefgh-123\n"
+               "  ✓ Sandbox created abcdefgh-123\n")
+        err = ""
+        self._console_files(tmp_path, monkeypatch, out=out, err=err)
+        ws = _workspace(tmp_path)
+        result = _runner(tmp_path, log_prefix="eval").execute(
+            target="s", args="", workspace=ws, model="m", timeout_s=60)
+        printed = capsys.readouterr().out
+
+        assert result.exit_code == 0
+        assert "  eval |   ✓ Sandbox created ***" in printed
+        assert "abcdefgh" not in printed
+        assert "abcdefgh-123" not in printed
+        assert "***-123" not in printed
 
     def test_actions_mask_values_redacted_across_both_pipes(
             self, tmp_path, fake_fullsend, monkeypatch):

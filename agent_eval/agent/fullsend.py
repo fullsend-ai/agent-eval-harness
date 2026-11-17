@@ -890,14 +890,19 @@ class _ConsoleCapture:
             return
         mask_values = actions_mask_values_across_streams(
             "".join(lines["stdout"]), "".join(lines["stderr"]))
+
+        # One merge per flush, not per line: a shorter secret that is a prefix
+        # of a longer mask value must be masked after it, longest first.
+        combined = set(secrets) | set(mask_values)
+        merged = tuple(sorted(combined, key=lambda v: (-len(v), v)))
         for name in ("stdout", "stderr"):
-            select = _ConsoleFilter(secrets)
+            select = _ConsoleFilter(merged)
             mid_line = False  # the previous piece did not end its line
             for line in lines[name]:
                 continued, mid_line = mid_line, not line.endswith("\n")
                 if continued:
                     continue  # the rest of a line already filtered by its head
-                shown = select.select(line, mask_values=mask_values)
+                shown = select.select(line)
                 if shown is None:
                     continue
                 try:
@@ -955,13 +960,12 @@ class _ConsoleFilter:
         self._in_block = False
         self._secrets = tuple(secrets)
 
-    def select(self, line: str, mask_values=()) -> Optional[str]:
+    def select(self, line: str) -> Optional[str]:
         text = _CONTROL_RE.sub("", line).rstrip()
         if not text.strip():
             self._in_block = False
             return None
-        secrets = self._secrets + tuple(mask_values)
-        return _present(text, secrets) if self._picks(text) else None
+        return _present(text, self._secrets) if self._picks(text) else None
 
     def _picks(self, text: str) -> bool:
         if _SECTION_LINE_RE.match(text) or (
@@ -992,9 +996,10 @@ def _neutralise_commands(text: str) -> str:
 
 def _present(text: str, secrets=()) -> str:
     """A console line as forwarded. A ``⚙`` line is rendered without its raw
-    argument first (:func:`_render_tool_call`); ``secrets`` (the values of the
-    credential-named environment variables, longest first) are masked
-    wherever they appear; the line is cut at :data:`_MAX_STREAM_LINE_CHARS`
+    argument first (:func:`_render_tool_call`); ``secrets`` (the values of
+    the credential-named environment variables and of the Actions
+    ``::add-mask::`` declarations, merged and sorted longest first) are
+    masked wherever they appear; the line is cut at :data:`_MAX_STREAM_LINE_CHARS`
     and then, cut, redacted (:func:`_redact`) — in that order, so the
     redaction's cost is bounded by the cut, as a ``Bash`` program name read
     from the cut command is. The cut cannot expose anything:
@@ -1059,9 +1064,8 @@ def _secret_values(env) -> tuple:
     a credential (:func:`_sensitive_env_name`: the key rule, or
     ``auth``/``oauth`` as a word of the name — DOCKER_AUTH_CONFIG's ``auth``
     field is none of the key rule's words) and whose value, each line of a
-    multi-line one on its own, is :data:`_MIN_MASKED_VALUE_CHARS` or longer;
-    longest first, so a value another is a prefix of is masked whole. They
-    live on the console filter and are never printed."""
+    multi-line one on its own, is :data:`_MIN_MASKED_VALUE_CHARS` or longer.
+    The values are never printed."""
     values = set()
     for name, value in (env or {}).items():
         if not isinstance(name, str) or not isinstance(value, str):
@@ -1072,7 +1076,7 @@ def _secret_values(env) -> tuple:
             part = part.strip()
             if len(part) >= _MIN_MASKED_VALUE_CHARS:
                 values.add(part)
-    return tuple(sorted(values, key=lambda v: (-len(v), v)))
+    return tuple(values)
 
 
 def _sensitive_key(name: str) -> bool:
