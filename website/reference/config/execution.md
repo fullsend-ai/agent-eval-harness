@@ -343,7 +343,9 @@ These errors are raised at **config load time** (`EvalConfig.from_yaml`), not mi
   `execution.parallelism`, else the CPU count) sets how many cases are judged at once,
   capped at the number of cases; judges within a case run sequentially. A higher value
   sends more simultaneous requests to the judge provider and may hit its rate limits —
-  it does not reduce the number of judge calls.
+  it does not reduce the number of judge calls. Conversely, a config that sets a low
+  `execution.parallelism` to pace case *execution* now paces judging at the same rate;
+  pass `score.py judges --parallelism <n>` to decouple the two.
 - **Per-case hooks need case/prompt mode.** `hooks.before_each` / `after_each` are
   ignored in batch mode (a warning is emitted); use `before_all` / `after_all` there. See
   [hooks](hooks.md).
