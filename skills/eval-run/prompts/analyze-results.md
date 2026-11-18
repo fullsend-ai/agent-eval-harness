@@ -120,7 +120,7 @@ Use tables for per-case data. Be decisive — don't hedge with "might" or "could
 
 ## Saving the analysis
 
-Write analysis to `$AGENT_EVAL_RUNS_DIR/<eval-name>/<id>/analysis.md` with YAML
+Write analysis to `<run-dir>/analysis.md` with YAML
 frontmatter so the HTML report can attribute it:
 
 ```markdown

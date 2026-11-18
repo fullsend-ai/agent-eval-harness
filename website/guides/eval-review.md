@@ -32,9 +32,10 @@ it: *"how did my skill do"*, *"what failed"*, *"look at the eval results"*,
 !!! note "Config auto-discovery"
     With no `--config`, the skill discovers configs automatically. One config is
     selected for you; multiple configs prompt you to choose; none errors and suggests
-    running [`/eval-analyze`](eval-analyze.md) first. The selected config's `skill`
-    field becomes the `<eval-name>` used in run paths
-    (`$AGENT_EVAL_RUNS_DIR/<eval-name>/<id>/`).
+    running [`/eval-analyze`](eval-analyze.md) first. The harness resolves the run
+    directory from the selected config (its `skill`, else its `name`, else its path)
+    as `$AGENT_EVAL_RUNS_DIR/<eval-name>/<id>/`; `scripts/discover.py --config <config>
+    --run-id <id>` prints it.
 
 ## What it does
 

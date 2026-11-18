@@ -219,6 +219,8 @@ def test_preflight_never_cleans_the_project_itself(tmp_path, runs):
     proc = _run(SCRIPTS / "preflight.py", "--config", cfg, "--run-dir", ".",
                 "--clean", "--force", cwd=project)
     assert "SKIPPED (dangerous)" in proc.stderr, proc.stdout + proc.stderr
+    assert proc.returncode != 0
+    assert "CLEAN" not in proc.stdout
     assert cfg.is_file()
 
 

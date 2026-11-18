@@ -171,10 +171,12 @@ def main():
             sys.exit(1)
 
     # Clean
+    refused = []
     for label, files in dirty.items():
         path = project_root / label
         if _is_dangerous_path(path):
             print(f"  SKIPPED (dangerous): {label}", file=sys.stderr)
+            refused.append(label)
             continue
         if path.is_file():
             path.unlink()
@@ -190,9 +192,15 @@ def main():
         if (_is_dangerous_path(run_path)
                 or project_root.resolve().is_relative_to(run_path.resolve())):
             print(f"  SKIPPED (dangerous): {run_dir}", file=sys.stderr)
+            refused.append(str(run_dir))
         else:
             shutil.rmtree(run_path)
             print(f"  cleaned: {run_dir}")
+
+    # A refused target still holds stale artifacts; don't report CLEAN.
+    if refused:
+        print(f"Not cleaned (refused): {', '.join(refused)}", file=sys.stderr)
+        sys.exit(1)
 
     print("CLEAN")
 
