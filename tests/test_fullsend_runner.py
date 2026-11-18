@@ -418,6 +418,8 @@ class TestFullsendExecute:
 
     def test_environment_content(self, tmp_path, fake_fullsend, monkeypatch):
         monkeypatch.setenv("CALLER_SECRET", "from-caller")
+        monkeypatch.setenv("_AGENT_EVAL_BOOTSTRAP_DONE", "1")   # the harness process always has it
+        monkeypatch.delenv("AGENT_EVAL_HARNESS_ROOT", raising=False)
         ws = _workspace(tmp_path)
         runner = _runner(
             tmp_path,
@@ -440,6 +442,12 @@ class TestFullsendExecute:
         assert env["GOOGLE_CLOUD_PROJECT"] == "proj"
         assert env["HOOK_VAR"] == "hooked"
         assert rec["env_task"] == f"/rfe.create {args}"
+        # Inheriting the whole environment must not inherit the per-process
+        # bootstrap sentinel (every skill script would skip activation), and
+        # the real checkout is named for staged copies of agent_eval.
+        from agent_eval._bootstrap import harness_root
+        assert "_AGENT_EVAL_BOOTSTRAP_DONE" not in env
+        assert env["AGENT_EVAL_HARNESS_ROOT"] == harness_root()
 
     def test_unset_model_and_effort_pass_nothing(self, tmp_path, fake_fullsend,
                                                  monkeypatch):

@@ -138,6 +138,7 @@ General harness knobs, read by the skills and runner directly.
 | Variable | Default | What it does |
 | --- | --- | --- |
 | `AGENT_EVAL_RUNS_DIR` | `eval/runs` | Base directory where each run's workspace, artifacts, scores, and `report.html` are written. See [the runs directory](runs-directory.md). |
+| `AGENT_EVAL_HARNESS_ROOT` | *(set by the runners)* | The harness checkout whose `.eval-venv` a skill script activates when the `agent_eval` it imported is a staged *copy* with no venv beside it — the runner's plugin staging materializes `scripts/agent_eval` links as content, and an optimization rollout restores them the same way. The `claude-code`, `codex`, `cursor`, `fullsend` and `cli` runners and the cap-evolve rollout runner set it to their own checkout in the environment they build; an explicit, non-blank value is forwarded instead (a blank one counts as unset). A venv beside the real package always takes precedence, so it only ever adds a second place to look. Note that this discloses the harness checkout's host path to the agent under test (as `AGENT_EVAL_RUNS_DIR` already does for the runs dir): accepted deliberately, since a staged copy cannot reach the venv without some real location — the plugin's own location stays hidden. |
 | `EVAL_JUDGE_MODEL` | *(none)* | Fallback model for LLM and pairwise judges. Resolution order: per-judge `model:` **>** `models.judge` **>** this variable. |
 | `CLAUDE_CODE_SUBAGENT_MODEL` | *(none)* | Model used for subagents spawned by the skill under test. Set automatically from `models.subagent` when configured. Under an OpenRouter plan it is one of the managed keys the plan sets (see [models → providers](config/models.md#providers-openrouter)). |
 | `AGENT_EVAL_SUBAGENT_MODEL` | *(none)* | The `fullsend` runner's counterpart of `CLAUDE_CODE_SUBAGENT_MODEL`: set from `models.subagent` in the environment of the `fullsend` process. It only takes effect if the project's `.fullsend/` agent definition references it (for example as `CLAUDE_CODE_SUBAGENT_MODEL`); the runner warns when nothing there does. |
@@ -148,7 +149,7 @@ General harness knobs, read by the skills and runner directly.
     The Claude Code, Codex and Cursor runners do **not** forward your whole environment
     into an eval workspace — each has an exact-name allowlist (Claude Code: the
     Anthropic / Vertex / GCP variables above, the model aliases, the `CLAUDE_CODE_*`
-    rows, MLflow and `AGENT_EVAL_RUNS_DIR`; Codex: the `OPENAI_*` / `CODEX_*` rows;
+    rows, MLflow, `AGENT_EVAL_RUNS_DIR` and `AGENT_EVAL_HARNESS_ROOT`; Codex: the `OPENAI_*` / `CODEX_*` rows;
     Cursor: `CURSOR_API_KEY` / `CURSOR_API_ENDPOINT` / `CURSOR_AGENT_BIN`). A name not on
     the list — `CLAUDE_CODE_USE_BEDROCK`, `AWS_*` or `OPENROUTER_*` for Claude Code — is
     dropped. To inject additional variables, use [`runner.env`](config/runner.md#env) or
