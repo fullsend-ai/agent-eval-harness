@@ -8,6 +8,7 @@ affects:
   - eval-run
 provenance:
   - https://github.com/fullsend-ai/agent-eval-harness/issues/332
+author: Ravelle Kelley
 superseded_by: null
 ---
 
@@ -81,6 +82,10 @@ Batch mode also brings back the single shared console, timeout and failure domai
 ### Keep the capturing runner and improve the filter
 
 The issue argues against this: the console format is explicitly not a contract (fullsend's ADR 0050), and judges never read the console. Not repeated here.
+
+A harness-side filter also re-implements log processing the CI platform already performs for every job. Two implementations of the same platform behavior must be kept in step, and only the platform maintains its own. Delegating console processing to the CI — the path production jobs already take — leaves one implementation.
+
+The alternative is therefore rejected on two grounds: an unstable format to parse, and a platform behavior duplicated.
 
 ## Consequences
 
