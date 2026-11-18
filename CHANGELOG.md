@@ -1,3 +1,10 @@
+## [1.66.1](https://github.com/fullsend-ai/agent-eval-harness/compare/v1.66.0...v1.66.1) (2026-11-18)
+
+
+### Bug Fixes
+
+* **bootstrap:** let a staged copy of agent_eval find the harness venv ([#304](https://github.com/fullsend-ai/agent-eval-harness/issues/304)) ([6f79ea5](https://github.com/fullsend-ai/agent-eval-harness/commit/6f79ea58dec3795a747401d554c2597e2d948963)), closes [#299](https://github.com/fullsend-ai/agent-eval-harness/issues/299) [#299](https://github.com/fullsend-ai/agent-eval-harness/issues/299) [#299](https://github.com/fullsend-ai/agent-eval-harness/issues/299) [#299](https://github.com/fullsend-ai/agent-eval-harness/issues/299) [#299](https://github.com/fullsend-ai/agent-eval-harness/issues/299)
+
 # [1.66.0](https://github.com/fullsend-ai/agent-eval-harness/compare/v1.65.2...v1.66.0) (2026-11-17)
 
 
