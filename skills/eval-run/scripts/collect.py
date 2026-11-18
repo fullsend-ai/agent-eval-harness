@@ -40,6 +40,7 @@ _HARNESS_DIRS = {
 _HARNESS_FILES = {
     "output/stdout.log", "output/stderr.log",
     "run_result.json", "batch.yaml", "case_order.yaml",
+    ".eval-overlay.json", ".eval-permissions.json",
 }
 
 # Every open beneath an agent-written root goes through these flags.

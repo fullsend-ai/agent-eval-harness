@@ -543,3 +543,41 @@ class TestCollectIgnoresStagedPlugins:
         assert (collected / "stdout.log").read_text().strip().startswith("{")
         events = json.loads((collected / "events.json").read_text())
         assert events and "canonical trace" in json.dumps(events)
+
+    def test_settings_overlay_excluded_from_modified_files(self, tmp_path):
+        """The claude-code runner writes a per-run settings overlay into the
+        case workspace (``.eval-overlay.json`` under a provider plan,
+        ``.eval-permissions.json`` otherwise) and removes it in a ``finally``
+        that covers every in-process exit path. A hard kill skips that
+        cleanup, so a stale copy can still be there at collection time, and
+        neither file is agent evidence. The exclusion is exact: an
+        agent-written file with the same name in a subdirectory stays
+        evidence."""
+        from types import SimpleNamespace
+        collect = self._load_collect()
+        case = tmp_path / "case-001"
+        case.mkdir()
+        (case / "input.yaml").write_text("prompt: x\n")
+        env = {**os.environ,
+               "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+               "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+        for cmd in (["git", "init", "-q"], ["git", "add", "-A"],
+                    ["git", "commit", "-q", "-m", "initial"]):
+            subprocess.run(cmd, cwd=case, env=env, check=True)
+        # Stale overlays a hard kill left behind: untracked, at the case root.
+        _write(case / ".eval-overlay.json",
+               '{"env": {"ANTHROPIC_AUTH_TOKEN": "stale"}}')
+        _write(case / ".eval-permissions.json", '{"permissions": {}}')
+        # Real agent output, including the same name in a subdirectory.
+        _write(case / "artifacts" / "out.md", "real agent output\n")
+        _write(case / "notes" / ".eval-overlay.json", "agent copy\n")
+
+        modified = collect._collect_modified_files(
+            case, SimpleNamespace(outputs=[]))
+        rels = [rel for rel, _ in modified]
+        assert "artifacts/out.md" in rels
+        assert "notes/.eval-overlay.json" in rels
+        assert ".eval-overlay.json" not in rels, (
+            "a stale settings overlay must never surface as agent-modified "
+            "evidence")
+        assert ".eval-permissions.json" not in rels
