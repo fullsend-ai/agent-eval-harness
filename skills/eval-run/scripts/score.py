@@ -43,6 +43,7 @@ from agent_eval.config import (
     COLLECTION_LOSS_KEY, EvalConfig, RunnerConfig, _is_valid_eval_name,
     _validate_path_segment,
 )
+from agent_eval.run_location import RunLocationError, resolve_run_dir
 from agent_eval.judge_status import (ERROR, FAIL, SKIP, classify_judge_result,
                                      judge_score_ranges)
 from agent_eval.prompt_backends import (
@@ -6196,15 +6197,21 @@ def _run_location(args, config):
     ``--run-dir`` names the directory outright (an optimization rollout lives
     in a parallel runs root, see agent_eval/optimize/export.py); its parent
     stands in for the runs dir and its basename for the run id, so every
-    ``runs_dir / run_id`` below lands on it unchanged.
+    ``runs_dir / run_id`` below lands on it unchanged. Both forms go through
+    agent_eval.run_location, the resolver execute.py and collect.py use.
     """
+    try:
+        run_dir, run_id = resolve_run_dir(config, getattr(args, "run_id", None),
+                                          getattr(args, "run_dir", None))
+    except RunLocationError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(1)
     if getattr(args, "run_dir", None):
-        run_dir = Path(args.run_dir).resolve()
+        run_dir = run_dir.resolve()
         if not run_dir.is_dir():
             print(f"ERROR: --run-dir is not a directory: {run_dir}", file=sys.stderr)
             sys.exit(1)
-        return run_dir.parent, run_dir.name
-    return _get_runs_dir(config.eval_name()), args.run_id
+    return run_dir.parent, run_id
 
 
 def format_case_failures(per_case, score_ranges):

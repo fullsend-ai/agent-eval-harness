@@ -20,6 +20,7 @@ Parse `$ARGUMENTS`:
 | `--subagent-model <model>` | no | `models.subagent` → falls back to skill model | Model for subagents (e.g., `claude-sonnet-4-6` while main is `claude-opus-4-7`) |
 | `--skill <name>` | no | from config | Override the skill to test |
 | `--run-id <id>` | no | `YYYY-MM-DD-<model>` | Identifier for this run |
+| `--run-dir <path>` | no | resolved from config + run id | Put the run in exactly this directory (CI). Its basename is the run id; a conflicting `--run-id` is an error. |
 | `--cases <id> [<id> ...]` | no | all cases | Exact case IDs to run |
 | `--baseline <run-id>` | no | — | Previous run to compare against |
 | `--no-llm-judges` | no | false | Skip LLM judges (prompt, prompt_file, LLM builtins, agent). Run deterministic judges (check, Python builtins, external code). |
@@ -46,7 +47,15 @@ python3 ${CLAUDE_SKILL_DIR}/../../scripts/discover.py
 - **Multiple configs found**: present the list and ask the user which to run
 - **No configs found**: proceed to the bootstrap flow below
 
-After selecting a config, read its `skill` field to set `<eval-name>` (used in `$AGENT_EVAL_RUNS_DIR/<eval-name>/<id>` paths below).
+### Run Directory
+
+Never build a run directory path yourself. The scripts resolve it from `--config` + `--run-id` with one shared resolver, so pass only those two and every step reads and writes the same place. To learn where the run lives (for reading `summary.yaml`, writing `analysis.md`, and the Harbor/EvalHub `--output`), ask the harness once:
+
+```bash
+python3 ${CLAUDE_SKILL_DIR}/../../scripts/discover.py --config <config> --run-id <id>
+```
+
+It prints one path; call it `<run-dir>` below. If `--run-dir <path>` was passed to `/eval-run`, `<run-dir>` is that path, and you pass `--run-dir <path>` in place of `--run-id <id>` to `execute.py`, `collect.py`, `score.py judges` and `report.py` (the run id is its basename).
 
 Check if the resolved config file exists:
 
@@ -95,11 +104,11 @@ python3 ${CLAUDE_SKILL_DIR}/scripts/preflight.py \
   [--baseline <baseline-id>]
 ```
 
-The script checks `tmp/` state files, whether `$AGENT_EVAL_RUNS_DIR/<eval-name>/<id>` already has results from a previous run, and (if `--baseline` is given) that the baseline run-id exists under the same eval-name directory.
+The script checks `tmp/` state files, whether `<run-dir>` already has results from a previous run, and (if `--baseline` is given) that the baseline run-id exists next to it.
 
 - **`CLEAN`**: proceed to workspace setup.
 - **`DIRTY`**: report the findings and ask the user to choose — *force clean* (`preflight.py --clean --force`, then proceed), *change run-id* (append a suffix like `-opus-v2`, then re-run preflight with `--clean` on the new id to avoid overwriting prior results), or *abort* for manual cleanup.
-- **`MISSING_BASELINE` (exit 2)**: the `--baseline` run-id wasn't found under `$AGENT_EVAL_RUNS_DIR/<eval-name>/`. The script lists nearby run-ids — confirm the correct one with the user before retrying.
+- **`MISSING_BASELINE` (exit 2)**: the `--baseline` run-id wasn't found next to `<run-dir>`. The script lists nearby run-ids — confirm the correct one with the user before retrying.
 
 ## Step 3: Prepare Workspace
 
@@ -142,16 +151,15 @@ Run the eval headlessly against test cases. `execute.py` auto-detects the execut
 
 In `case` mode (default), execute.py runs once per case with case-specific arguments and workspace — each case gets its own stdout.log and subagent transcripts. In `batch` mode, all cases run in a single invocation via batch.yaml.
 
-If `hooks:` is configured in eval.yaml, execute.py automatically runs lifecycle hooks at the appropriate points: `before_all` before any case executes, `before_each`/`after_each` around each case execution, and `after_all` after all cases complete (guaranteed, even on failure). Hook logs are written to `$AGENT_EVAL_RUNS_DIR/<id>/hooks/`.
+If `hooks:` is configured in eval.yaml, execute.py automatically runs lifecycle hooks at the appropriate points: `before_all` before any case executes, `before_each`/`after_each` around each case execution, and `after_all` after all cases complete (guaranteed, even on failure). Hook logs are written to `<run-dir>/hooks/`.
 
 ```bash
 python3 ${CLAUDE_SKILL_DIR}/scripts/execute.py \
   --config <config> \
   --workspace <workspace_path> \
-  --skill <skill_name> \
-  --skill-args "<skill arguments>" \
+  [--skill <skill_name>] \
+  [--skill-args "<skill arguments>"] \
   --model <model> \
-  --output $AGENT_EVAL_RUNS_DIR/<eval-name>/<id> \
   --run-id <id> \
   [--agent <runner>] \
   [--subagent-model <model>] \
@@ -159,6 +167,8 @@ python3 ${CLAUDE_SKILL_DIR}/scripts/execute.py \
   [--effort <level>] \
   [--parallelism <n>]
 ```
+
+Pass `--skill`/`--skill-args` only when the user overrode them on `/eval-run`; otherwise `execute.py` reads them from the config. Never pass `--skill` for a prompt-mode config.
 
 **Launch with `run_in_background: true` and do NOT redirect its output** (no `>`, `|`, `tee`, `2>&1`) — a redirect diverts the stream Claude Code's background viewer reads and leaves it blank. You don't need one: `execute.py` mirrors its live console to `<output_dir>/console.log`.
 
@@ -172,13 +182,13 @@ Distribute workspace outputs into per-case directories so judges can score each 
 python3 ${CLAUDE_SKILL_DIR}/scripts/collect.py \
   --config <config> \
   --workspace <workspace_path> \
-  --output $AGENT_EVAL_RUNS_DIR/<eval-name>/<id>
+  --run-id <id>
 ```
 
 Read the collection summary (JSON file — read it with `cat` or `jq`, not `state.py`):
 
 ```bash
-cat $AGENT_EVAL_RUNS_DIR/<eval-name>/<id>/collection.json
+cat <run-dir>/collection.json
 ```
 
 Report per-case counts. If any case has 0 artifacts, warn — the skill may not have produced output for that case.
@@ -216,14 +226,14 @@ python3 ${CLAUDE_SKILL_DIR}/scripts/score.py pairwise \
 Read the full results:
 
 ```bash
-python3 ${CLAUDE_SKILL_DIR}/scripts/agent_eval/state.py read $AGENT_EVAL_RUNS_DIR/<eval-name>/<id>/summary.yaml
+python3 ${CLAUDE_SKILL_DIR}/scripts/agent_eval/state.py read <run-dir>/summary.yaml
 ```
 
 `summary.yaml` carries `judges`, `per_case`, `unmeasured`, `judge_usage`, `total_cost_usd`, plus `pairwise` when --baseline was used (keys: [`data-pipeline.md`](references/data-pipeline.md)).
 
 ## Step 7: Interpret and Report
 
-Read the summary and analyze the results. Read `${CLAUDE_SKILL_DIR}/prompts/analyze-results.md` for the full analysis framework and output format. Lead with **Recommendation** (self-contained — many readers only read this section). Save the analysis to `$AGENT_EVAL_RUNS_DIR/<eval-name>/<id>/analysis.md` with YAML frontmatter (agent, model, date) — see the prompt file for the template.
+Read the summary and analyze the results. Read `${CLAUDE_SKILL_DIR}/prompts/analyze-results.md` for the full analysis framework and output format. Lead with **Recommendation** (self-contained — many readers only read this section). Save the analysis to `<run-dir>/analysis.md` with YAML frontmatter (agent, model, date) — see the prompt file for the template.
 
 **Generate HTML report**:
 
@@ -235,7 +245,7 @@ python3 ${CLAUDE_SKILL_DIR}/scripts/report.py \
   --open
 ```
 
-Tell the user the report is at `$AGENT_EVAL_RUNS_DIR/<eval-name>/<id>/report.html`.
+Tell the user the report is at `<run-dir>/report.html`.
 
 **If `--gold` flag**: After scoring, copy collected artifacts to dataset case dirs as reference files. Report which cases were saved.
 
@@ -269,7 +279,7 @@ VENV_PY="$PLUGIN_ROOT/.eval-venv/bin/python3"
 
 PYTHONPATH="$PLUGIN_ROOT:$(pwd)${PYTHONPATH:+:$PYTHONPATH}" "$VENV_PY" -m agent_eval.harbor.run \
     --config <config> --model <model> \
-    --output $AGENT_EVAL_RUNS_DIR/<eval-name>/<run-id> \
+    --output <run-dir> \
     --tasks-dir <tasks-dir> --jobs-dir <tmp-jobs> \
     [--image <image>] [--agent <agent>] [--n-concurrent N] \
     [--env kubernetes] [--mount <source:target:ro>] [--no-llm-judges] \
@@ -311,7 +321,7 @@ VENV_PY="$PLUGIN_ROOT/.eval-venv/bin/python3"
 
 PYTHONPATH="$PLUGIN_ROOT:$(pwd)${PYTHONPATH:+:$PYTHONPATH}" "$VENV_PY" -m agent_eval.evalhub.runner \
     --config <config> --model <model> \
-    --output $AGENT_EVAL_RUNS_DIR/<eval-name>/<run-id> \
+    --output <run-dir> \
     [--evalhub-url <url>] [--namespace <ns>] [--project-dir <path>]
 ```
 
