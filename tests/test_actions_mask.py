@@ -4,6 +4,7 @@ import json
 
 from agent_eval.actions_mask import (
     actions_mask_values,
+    actions_mask_values_in_data,
     redact_actions_masks,
     redact_actions_masks_across_streams,
 )
@@ -44,6 +45,10 @@ def test_collects_each_decoded_line_of_a_multiline_value():
 
     assert "LONGALPHA" in values
     assert "LONGBETA" in values
+    values = actions_mask_values("::add-mask::  LONGALPHA%0A  LONGBETA  \n")
+    assert "  LONGALPHA" in values
+    assert "  LONGBETA  " in values
+    assert "LONGALPHA" in values
 
 
 def test_collects_stream_values_without_concatenating_streams():
@@ -98,3 +103,37 @@ def test_ignores_declarations_inside_stop_commands_block():
     assert "unrelated text" in scrubbed
     assert "valid-secret-value" not in scrubbed
     assert scrubbed.count("::add-mask::***") == 2
+
+
+def test_collects_values_from_nested_data():
+    values = actions_mask_values_in_data({
+        "tool_input": {
+            "command": "::add-mask::nested-secret\n",
+            "args": ["nested-secret"],
+        },
+    })
+
+    assert values == ("nested-secret",)
+
+
+def test_stop_commands_token_comparison_ignores_case_and_padding():
+    text = (
+        "::stop-commands:: Pause-Token \n"
+        "::add-mask::inside-secret\n"
+        "Error: inside-secret\n"
+        "::PAUSE-TOKEN::\n"
+        "::add-mask::outside-secret\n"
+    )
+    scrubbed = redact_actions_masks(text)
+
+    assert "inside-secret" in scrubbed
+    assert "outside-secret" not in scrubbed
+
+
+def test_equal_length_overlaps_redact_deterministically():
+    text = "abcdef1234 and 1234abcde\n::add-mask::abcdef1234\n::add-mask::1234abcde\n"
+    scrubbed = redact_actions_masks(text)
+
+    assert "abcdef1234" not in scrubbed
+    assert "1234abcde" not in scrubbed
+    assert scrubbed.startswith("*** and ***\n")

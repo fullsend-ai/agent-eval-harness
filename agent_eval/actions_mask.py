@@ -33,7 +33,7 @@ def actions_mask_values(text: str) -> tuple:
     command are ignored, matching GitHub Actions.
     """
     collector = ActionsMaskCollector()
-    for line in (text or "").splitlines(keepends=True):
+    for line in (text or "").split("\n"):
         collector.observe_line(line)
     return collector.values()
 
@@ -48,7 +48,7 @@ def actions_mask_values_across_streams(*texts: str) -> tuple:
     values = set()
     for text in texts:
         values.update(actions_mask_values(text or ""))
-    return tuple(sorted(values, key=len, reverse=True))
+    return _sorted_mask_values(values)
 
 
 def redact_actions_masks_across_streams(*texts: str) -> tuple:
@@ -69,7 +69,7 @@ def redact_actions_masks(text: str, values=None) -> str:
     if not text:
         return text
     mask_values = actions_mask_values(text) if values is None else tuple(values)
-    for value in sorted(set(mask_values), key=len, reverse=True):
+    for value in _sorted_mask_values(set(mask_values)):
         text = text.replace(value, "***")
     return _ADD_MASK_RE.sub(
         lambda match: f"{match.group('indent')}::add-mask::***", text)
@@ -93,13 +93,14 @@ def actions_mask_values_in_data(value) -> tuple:
     """Collect mask values from every string in JSON-like data."""
     if isinstance(value, str):
         return actions_mask_values(value)
+    values = set()
     if isinstance(value, list):
-        return actions_mask_values_across_streams(
-            *(actions_mask_values_in_data(item) for item in value))
+        for item in value:
+            values.update(actions_mask_values_in_data(item))
     if isinstance(value, dict):
-        return actions_mask_values_across_streams(
-            *(actions_mask_values_in_data(item) for item in value.values()))
-    return ()
+        for item in value.values():
+            values.update(actions_mask_values_in_data(item))
+    return _sorted_mask_values(values)
 
 
 class ActionsMaskCollector:
@@ -112,13 +113,13 @@ class ActionsMaskCollector:
     def observe_line(self, line: str) -> tuple:
         if self._stop_token is not None:
             resume = _RESUME_COMMANDS_RE.match(line)
-            if resume and resume.group("token") == self._stop_token:
+            if resume and resume.group("token").strip().casefold() == self._stop_token:
                 self._stop_token = None
             return ()
 
         stop = _STOP_COMMANDS_RE.match(line)
         if stop:
-            self._stop_token = stop.group("token")
+            self._stop_token = stop.group("token").strip().casefold()
             return ()
 
         match = _ADD_MASK_RE.match(line)
@@ -127,19 +128,24 @@ class ActionsMaskCollector:
         escaped = match.group("value")
         decoded = _unescape_actions_value(escaped)
         added = []
-        for value in (escaped, decoded, *decoded.splitlines()):
+        for value in (escaped, decoded, *decoded.split("\n")):
             if self._add_value(value):
                 added.append(value)
         return tuple(added)
 
     def _add_value(self, value: str):
-        if len(value.strip()) >= _MIN_MASKED_VALUE_CHARS:
-            self._values.add(value)
-            return value
-        return None
+        stripped = value.strip()
+        if len(stripped) < _MIN_MASKED_VALUE_CHARS:
+            return None
+        self._values.update((value, stripped))
+        return value
 
     def values(self) -> tuple:
-        return tuple(sorted(self._values, key=lambda value: (-len(value), value)))
+        return _sorted_mask_values(self._values)
+
+
+def _sorted_mask_values(values) -> tuple:
+    return tuple(sorted(values, key=lambda value: (-len(value), value)))
 
 
 __all__ = [

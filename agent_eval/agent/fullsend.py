@@ -23,9 +23,8 @@ unchanged, and every iteration's subagent transcripts copied into
 
 fullsend's own console (stdout, then stderr) is ``RunResult.stderr``, read
 from both pipes concurrently. With a log prefix (the harness sets one when it
-logs progress) a filtered subset of it is buffered until capture completes,
-then printed under the same ``  <prefix> | `` the claude-code runner uses:
-the section and
+logs progress) a filtered subset of it is streamed live under the same
+``  <prefix> | `` the claude-code runner uses: the section and
 step lines (``→``, ``•``, ``✓``, ``✗``, ``!``) with the indented detail lines
 attached to them (the plan block, the ``→ Results`` block), the agent activity
 lines (``💬`` text, ``⚙`` tool call, ``⏳`` heartbeat), plain
@@ -76,7 +75,7 @@ from agent_eval._bootstrap import _SENTINEL, ensure_harness_root
 from agent_eval.actions_mask import (
     ActionsMaskCollector, actions_mask_values, actions_mask_values_across_streams,
     actions_mask_values_in_data, redact_actions_masks,
-    redact_actions_masks_across_streams, redact_actions_masks_in_data,
+    redact_actions_masks_in_data,
 )
 from agent_eval.config import resolve_env_value, workspace_source_roots
 from .base import EvalRunner, RunResult, terminate_process_group
@@ -597,9 +596,9 @@ class FullsendRunner(EvalRunner):
             with _print_lock:
                 print(f"  {self._log_prefix} | {status} ({duration:.0f}s)", flush=True)
 
-        stderr = "\n".join(s for s in (console_out, console_err) if s)
         return self._map_run_dir(
-            output_dir, workspace, returncode, stderr, duration, known=known)
+            output_dir, workspace, returncode, console_out, console_err,
+            duration, known=known)
 
     # ── Environment ──────────────────────────────────────────────────
 
@@ -720,8 +719,8 @@ class FullsendRunner(EvalRunner):
 
     # ── Run directory → RunResult ────────────────────────────────────
 
-    def _map_run_dir(self, output_dir, workspace, exit_code, stderr, duration,
-                     known=frozenset()):
+    def _map_run_dir(self, output_dir, workspace, exit_code, console_stdout,
+                     console_stderr, duration, known=frozenset()):
         run_dir = _newest_run_dir(output_dir, known)
         metrics = _read_json(run_dir / "metrics.json") if run_dir else {}
         iterations = _iterations(run_dir) if run_dir else []
@@ -748,10 +747,12 @@ class FullsendRunner(EvalRunner):
         denials = _telemetry_denials(
             run_dir / "run-telemetry.jsonl") if run_dir else []
         mask_values = set(actions_mask_values_across_streams(
-            stdout, stderr, *transcript_texts))
+            stdout, console_stdout, console_stderr, *transcript_texts))
         mask_values.update(actions_mask_values_in_data(denials))
         mask_values = tuple(sorted(
             mask_values, key=lambda value: (-len(value), value)))
+        console_stderr = "\n".join(
+            text for text in (console_stdout, console_stderr) if text)
 
         with tempfile.TemporaryDirectory(prefix="fullsend-subagents-") as staging:
             # Stage this invocation's transcripts (every iteration) so per-model
@@ -809,12 +810,13 @@ class FullsendRunner(EvalRunner):
             raw_output["security_files"] = _count_files(run_dir / "security")
 
         denials = redact_actions_masks_in_data(denials, mask_values)
-        stdout, stderr = redact_actions_masks_across_streams(stdout, stderr)
+        stdout = redact_actions_masks(stdout, mask_values)
+        console_stderr = redact_actions_masks(console_stderr, mask_values)
 
         return RunResult(
             exit_code=exit_code,
             stdout=stdout,
-            stderr=stderr,
+            stderr=console_stderr,
             duration_s=duration,
             token_usage=token_usage,
             cost_usd=cost_usd,
@@ -839,8 +841,10 @@ class _ConsoleCapture:
     ``communicate`` would have returned: universal newlines, in order — and,
     given a log prefix, prints the lines :class:`_ConsoleFilter` selects under
     ``  <prefix> | `` as they arrive. Credential-named environment variables
-    and Actions mask values already declared on either pipe are masked before
-    printing; persistence later applies the complete cross-stream scrub.
+    and same-pipe Actions mask declarations are masked before printing; a
+    declaration on the other pipe is only a best-effort mask for a line already
+    queued to print. Persistence always applies the complete cross-stream,
+    transcript, and denial union.
     Reading both pipes at once is what keeps
     fullsend from blocking on a full one; the threads are daemons so a
     descendant that inherited a pipe and outlives fullsend cannot hang the
@@ -859,6 +863,8 @@ class _ConsoleCapture:
         self._state_lock = threading.Lock()
         # Written under _state_lock by detach(); read before a live print.
         self._detached = False
+        self._stop_forwarding = False
+        self._forward_alive = bool(log_prefix)
         self._mask_values = set()
         self._mask_values_lock = threading.Lock()
         self._forward_queue = queue.Queue()
@@ -901,7 +907,7 @@ class _ConsoleCapture:
                             line, mask_values=self._current_mask_values(),
                             present=False)
                         if shown is not None:
-                            self._forward_queue.put(shown)
+                            self._enqueue_forward(shown)
                     continue
                 new_values = collector.observe_line(pending_mask_line + line)
                 pending_mask_line = ""
@@ -915,14 +921,27 @@ class _ConsoleCapture:
                     present=False)
                 if shown is None:
                     continue
-                self._forward_queue.put(shown)
+                self._enqueue_forward(shown)
         except (OSError, ValueError):
             pass  # the pipe closed under the reader: keep what was read
         finally:
+            if pending_mask_line:
+                new_values = ()
+                with self._state_lock:
+                    if not self._detached:
+                        new_values = collector.observe_line(pending_mask_line)
+                with self._mask_values_lock:
+                    self._mask_values.update(new_values)
             try:
                 stream.close()  # at EOF, or closed under the reader
             except OSError:
                 pass
+
+    def _enqueue_forward(self, text: str) -> None:
+        with self._state_lock:
+            if self._detached or not self._forward_alive:
+                return
+            self._forward_queue.put(text)
 
     def join(self, timeout_s: float) -> bool:
         """Wait up to ``timeout_s`` for both pipes to reach EOF; ``False``
@@ -938,42 +957,62 @@ class _ConsoleCapture:
     def detach(self) -> None:
         """End the keeping and forwarding of lines.
 
-        Taken under the print lock, so a forwarded line in flight has landed
-        before this returns and none lands after it — the caller's status line,
-        printed under the same lock, is the case's last. A reader still
-        blocked on a pipe (a descendant outside the killed group holds it)
+        On a normal return, the forwarding thread has drained its finite queue,
+        so a forwarded line in flight has landed before this returns and none
+        lands after it — the caller's status line, printed under the print lock,
+        is the case's last. An interrupt sets a stop flag first, so the backlog
+        does not keep printing after the exception. A reader still blocked on a
+        pipe (a descendant outside the killed group holds it)
         goes on emptying the pipe, keeping nothing, and closes it at EOF;
         what was read before is what :attr:`stdout`/:attr:`stderr` return.
         Idempotent."""
-        with _print_lock:
+        with self._state_lock:
+            if self._detached:
+                return
+            self._detached = True
+            self._forward_queue.put(None)
+        try:
+            for thread in self._threads:
+                if thread.name == "fullsend-console":
+                    thread.join()
+        except BaseException:
             with self._state_lock:
-                if self._detached:
-                    return
-                self._detached = True
-        self._forward_queue.put(None)
-        for thread in self._threads:
-            if thread.name == "fullsend-console":
-                thread.join()
+                self._stop_forwarding = True
+                self._forward_queue.put(None)
+            raise
 
     def _forward(self) -> None:
         first = True
         forwarding = True
-        while forwarding:
-            text = self._forward_queue.get()
-            if text is None:
-                break
-            try:
-                if first:
-                    first = False
-                    time.sleep(_LIVE_MASK_SETTLE_S)
-                secrets = tuple(sorted(
-                    set(self._secrets) | set(self._current_mask_values()),
-                    key=lambda value: (-len(value), value)))
-                shown = _present(text, secrets)
-                with _print_lock:
-                    print(f"  {self._log_prefix} | {shown}", flush=True)
-            except (OSError, ValueError):
-                forwarding = False
+        try:
+            while forwarding:
+                text = self._forward_queue.get()
+                if text is None:
+                    break
+                try:
+                    if first:
+                        first = False
+                        time.sleep(_LIVE_MASK_SETTLE_S)
+                    secrets = tuple(sorted(
+                        set(self._secrets) | set(self._current_mask_values()),
+                        key=lambda value: (-len(value), value)))
+                    shown = _present(text, secrets)
+                    with _print_lock:
+                        with self._state_lock:
+                            if self._stop_forwarding:
+                                forwarding = False
+                                break
+                        print(f"  {self._log_prefix} | {shown}", flush=True)
+                except (OSError, ValueError):
+                    forwarding = False
+        finally:
+            with self._state_lock:
+                self._forward_alive = False
+            while True:
+                try:
+                    self._forward_queue.get_nowait()
+                except queue.Empty:
+                    break
 
     def _current_mask_values(self) -> tuple:
         with self._mask_values_lock:
@@ -2245,7 +2284,6 @@ def _copy_subagent_transcripts(src: Path, dest: Path, workspace: Path,
             continue
         values = actions_mask_values(text) if mask_values is None else mask_values
         dest.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(f, target)
         target.write_text(redact_actions_masks(text, values))
 
 
