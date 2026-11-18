@@ -196,6 +196,31 @@ def test_runner_actions_masks_are_collected_per_stream_before_persistence(
     assert stderr == "Error: ***\n"
 
 
+def test_runner_actions_masks_redact_denials_before_persistence(tmp_path):
+    runner = _runner()
+    runner.execute.return_value = RunResult(
+        exit_code=0,
+        stdout="::add-mask::denial-secret\n",
+        stderr="",
+        duration_s=1.0,
+        permission_denials=[{
+            "tool_name": "Bash",
+            "tool_input": {"command": "echo denial-secret"},
+            "reason": "blocked denial-secret",
+        }],
+    )
+    _, on_disk, _ = _single(tmp_path, runner=runner)
+
+    assert on_disk["permission_denials"] == [{
+        "tool_name": "Bash",
+        "tool_input": {"command": "echo ***"},
+        "reason": "blocked ***",
+    }]
+    assert "denial-secret" not in json.dumps(on_disk)
+
+
+
+
 def test_after_each_failure_continue_is_recorded(tmp_path):
     result, on_disk, _ = _single(tmp_path, after_each=[
         HookEntry(command="exit 1", on_failure="continue",

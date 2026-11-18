@@ -138,15 +138,18 @@ FAKE_FULLSEND = textwrap.dedent('''\
     (it / "output.jsonl").write_text(
         "\\n".join(json.dumps(e) for e in events) + "\\n")
     (it / "output" / "agent-result.json").write_text(json.dumps({"ok": True}))
+    secret = os.environ.get("FAKE_FULLSEND_SECRET", "")
     (it / "transcripts" / "s1-agent-a1.jsonl").write_text(json.dumps(
         {"requestId": "gen-sub-1", "message": {"role": "assistant", "id": "msg_sub_1",
-                     "model": "claude-haiku-4-5"}}) + "\\n")
+                     "model": "claude-haiku-4-5",
+                     "content": [{"type": "text", "text": secret}]}}) + "\\n")
     (it / "transcripts" / "main.jsonl").write_text("{}\\n")
     (run / "run-telemetry.jsonl").write_text("\\n".join([
         json.dumps({"event": "tool", "attributes": {"gen_ai.tool.name": "Read"}}),
         json.dumps({"event": "hook", "attributes": {
             "decision": "block", "gen_ai.tool.name": "Bash",
-            "gen_ai.tool.call.id": "toolu_9", "reason": "Tirith: curl | sh"}}),
+            "gen_ai.tool.call.id": "toolu_9",
+            "reason": "Tirith: curl | sh" + (f" {secret}" if secret else "")}}),
     ]) + "\\n")
     (run / "security" / "findings.jsonl").write_text("{}\\n")
 
@@ -201,7 +204,7 @@ def fake_fullsend(fake_bin, tmp_path, monkeypatch):
                 "FAKE_FULLSEND_ITERATIONS",
                 "FAKE_FULLSEND_NO_IMAGE", "FAKE_FULLSEND_IMAGE",
                 "FAKE_FULLSEND_CONSOLE", "FAKE_FULLSEND_CONSOLE_ERR",
-                "FAKE_FULLSEND_RESULT_TEXT"):
+                "FAKE_FULLSEND_RESULT_TEXT", "FAKE_FULLSEND_SECRET"):
         monkeypatch.delenv(var, raising=False)
     return record
 
@@ -1611,6 +1614,7 @@ def test_execute_py_case_end_to_end_masks_actions_values(tmp_path, fake_bin):
         "FAKE_FULLSEND_CONSOLE": str(console_out),
         "FAKE_FULLSEND_CONSOLE_ERR": str(console_err),
         "FAKE_FULLSEND_RESULT_TEXT": secret,
+        "FAKE_FULLSEND_SECRET": secret,
     })
 
     ws_result = _run_script("workspace.py", ["--config", "eval.yaml", "--run-id", "r1"],
@@ -1638,6 +1642,16 @@ def test_execute_py_case_end_to_end_masks_actions_values(tmp_path, fake_bin):
     assert secret not in stderr
     assert f'"text": "{secret}"' not in stdout
     assert "::add-mask::***" in stderr
+    run_result = json.loads((case_output / "run_result.json").read_text())
+    assert secret not in json.dumps(run_result)
+    assert run_result["permission_denials"][0]["reason"] == "Tirith: curl | sh ***"
+    for transcript in (
+        workspace / "cases" / "case-001" / "subagents" / "s1-agent-a1.jsonl",
+        case_output / "subagents" / "s1-agent-a1.jsonl",
+    ):
+        text = transcript.read_text()
+        assert secret not in text
+        assert "text\": \"***\"" in text
 
 
 # ── Run provenance ───────────────────────────────────────────────────
@@ -2383,7 +2397,7 @@ class TestInterruptCleanup:
             if not interrupted:
                 interrupted.append(True)
                 deadline = time.monotonic() + 10
-                while "holder " not in self.stdout and time.monotonic() < deadline:
+                while "holder " not in self.raw_stdout and time.monotonic() < deadline:
                     time.sleep(0.05)
                 raise KeyboardInterrupt
             return real_join(self, timeout_s)
@@ -2395,7 +2409,7 @@ class TestInterruptCleanup:
             runner._run([str(script)], _workspace(tmp_path), dict(os.environ), 60)
         elapsed = time.monotonic() - start
         ((proc, console),) = captures
-        holder = _holder_pid(console.stdout)
+        holder = _holder_pid(console.raw_stdout)
         try:
             assert elapsed < 10
             assert proc.poll() is not None  # the leader was stopped and reaped
@@ -2405,7 +2419,7 @@ class TestInterruptCleanup:
             assert console.join(10)  # the holder wrote its line and exited: EOF
             assert proc.stdout.closed and proc.stderr.closed
             assert "Late line" not in capsys.readouterr().out
-            assert "Late line" not in console.stdout
+            assert "Late line" not in console.raw_stdout
         finally:
             _kill_quietly(holder)
 
@@ -2428,7 +2442,7 @@ class TestInterruptCleanup:
         with pytest.raises(KeyboardInterrupt):
             runner._run([str(script)], _workspace(tmp_path), dict(os.environ), 3)
         ((proc, console),) = captures
-        holder = _holder_pid(console.stdout)
+        holder = _holder_pid(console.raw_stdout)
         try:
             assert "  ✓ Sandbox created (1.0s)" in _streamed(capsys)
             flag.write_text("")
@@ -2437,7 +2451,7 @@ class TestInterruptCleanup:
             assert console.join(10)  # the holder wrote its line and exited: EOF
             assert proc.stdout.closed and proc.stderr.closed
             assert "Late line" not in capsys.readouterr().out
-            assert "Late line" not in console.stdout
+            assert "Late line" not in console.raw_stdout
         finally:
             _kill_quietly(holder)
             _kill_quietly(proc.pid)
@@ -2534,6 +2548,33 @@ class TestRunDirContainment:
         (run / "run-telemetry.jsonl").write_text((line + "\n") * 3)
         monkeypatch.setattr(fullsend_mod, "_MAX_TELEMETRY_BYTES", len(line) + 1)
         assert len(self._map(tmp_path, ws).permission_denials) == 1
+
+    def test_actions_masks_redact_denials_and_subagent_transcripts(
+            self, tmp_path):
+        secret = "denial-secret"
+        ws, run = self._run_dir(tmp_path)
+        iteration = run / "iteration-1"
+        transcripts = iteration / "transcripts"
+        transcripts.mkdir(parents=True)
+        (iteration / "output.jsonl").write_text(
+            f"::add-mask::{secret}\n")
+        (transcripts / "s1-agent-a1.jsonl").write_text(json.dumps({
+            "message": {"content": [{"type": "text", "text": secret}]}}) + "\n")
+        (run / "run-telemetry.jsonl").write_text(json.dumps({
+            "attributes": {
+                "decision": "block", "gen_ai.tool.name": "Bash",
+                "tool_input": {"command": f"echo {secret}"},
+                "reason": f"blocked {secret}",
+            }}) + "\n")
+
+        result = self._map(tmp_path, ws)
+        assert result.permission_denials == [{
+            "tool_name": "Bash", "tool_use_id": "",
+            "tool_input": {"command": "echo ***"},
+            "reason": "blocked ***"}]
+        transcript = (ws / "subagents" / "s1-agent-a1.jsonl").read_text()
+        assert secret not in transcript
+        assert "text\": \"***\"" in transcript
 
     def test_symlinked_security_dir_not_walked(self, tmp_path):
         ws, run = self._run_dir(tmp_path)
@@ -3176,9 +3217,8 @@ class TestConsoleFilter:
             "/home/me/creds.json", "-----BEGIN KEY-----", "MIIEpAIBAAKCAQEA",
             "-----END KEY-----", '{"auths": {"r.test": {"auth": "<b64>"}}}',
             "<oauth-value>", "abcdefgh", "abcdefgh-ijkl"}
-        # _flush sorts the merged set before filtering; mirror that order.
-        select = fullsend_mod._ConsoleFilter(
-            tuple(sorted(secrets, key=lambda v: (-len(v), v))))
+        assert list(secrets) == sorted(secrets, key=lambda v: (-len(v), v))
+        select = fullsend_mod._ConsoleFilter(secrets)
         shown = [select.select(line + "\n") for line in (
             "  ✓ Logged in with s3cr3t-value as <aws-key-id>",
             "  💬 The key abcdefgh-ijkl is not abcdefgh; short and auto-fix-long-value stay",
@@ -3540,6 +3580,26 @@ class TestFullsendConsoleStreaming:
         assert "  ✓ Sandbox created (17.6s)" in streamed
         assert streamed[-1].startswith("FAIL (exit -1)")
 
+    def test_timeout_still_masks_actions_values(
+            self, tmp_path, fake_fullsend, monkeypatch, capsys):
+        secret = "timeout-secret"
+        self._console_files(
+            tmp_path, monkeypatch,
+            out=f"::add-mask::{secret}\n  ✓ Sandbox created {secret}\n",
+            err=f"Error: {secret}\n")
+        monkeypatch.setenv("FAKE_FULLSEND_SLEEP", "30")
+        ws = _workspace(tmp_path)
+        result = _runner(tmp_path, term_grace_s=2, log_prefix="eval").execute(
+            target="s", args="", workspace=ws, model="m", timeout_s=1)
+        printed = capsys.readouterr().out
+
+        assert result.exit_code == -1
+        assert secret not in result.stderr
+        assert "::add-mask::***" in result.stderr
+        assert secret not in printed
+        assert "  eval |   ✓ Sandbox created ***" in printed
+        assert printed.splitlines()[-1].startswith("  eval | FAIL (exit -1)")
+
     def test_both_pipes_drained_past_the_pipe_buffer(
             self, tmp_path, fake_fullsend, monkeypatch, capsys):
         # Far more than a pipe buffer (64 KiB) on each pipe at once: a reader
@@ -3825,8 +3885,8 @@ class TestFullsendConsoleStreaming:
 
     def test_actions_mask_escaped_values_redacted(
             self, tmp_path, fake_fullsend, monkeypatch, capsys):
-        out = ("::add-mask::abc%25def\n"
-               "  ✓ Sandbox created abc%def\n")
+        out = ("::add-mask::abc%25defg\n"
+               "  ✓ Sandbox created abc%defg\n")
         self._console_files(tmp_path, monkeypatch, out=out, err="")
         ws = _workspace(tmp_path)
         result = _runner(tmp_path, log_prefix="eval").execute(
@@ -3834,10 +3894,10 @@ class TestFullsendConsoleStreaming:
         printed = capsys.readouterr().out
 
         assert result.exit_code == 0
-        assert "abc%25def%0A" not in result.stderr
-        assert "abc%def" not in result.stderr
+        assert "abc%25defg%0A" not in result.stderr
+        assert "abc%defg" not in result.stderr
         assert "::add-mask::***" in result.stderr
-        assert "abc%def" not in printed
+        assert "abc%defg" not in printed
 
     def test_line_longer_than_one_read_kept_whole_and_forwarded_once(
             self, tmp_path, capsys):
@@ -3887,6 +3947,30 @@ class TestFullsendConsoleStreaming:
             assert console.join(10)  # the holder wrote its line and exited: EOF
             assert proc.stdout.closed and proc.stderr.closed
             assert "Late line" not in capsys.readouterr().out
-            assert "Late line" not in console.stdout
+            assert "Late line" not in console.raw_stdout
         finally:
             _kill_quietly(holder)
+
+    def test_selected_line_is_forwarded_while_the_process_is_alive(
+            self, tmp_path, capsys):
+        child = ("import sys, time; "
+                 "sys.stdout.write('  ✓ Sandbox created live\\n'); "
+                 "sys.stdout.flush(); time.sleep(30)")
+        proc = subprocess.Popen(
+            [sys.executable, "-c", child], stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, start_new_session=True)
+        console = fullsend_mod._ConsoleCapture(proc, log_prefix="eval")
+        try:
+            deadline = time.monotonic() + 10
+            printed = ""
+            while "Sandbox created live" not in printed:
+                assert time.monotonic() < deadline
+                printed += capsys.readouterr().out
+                time.sleep(0.01)
+            assert proc.poll() is None
+        finally:
+            fullsend_mod.terminate_process_group(
+                proc, 1.0, capture_output=False)
+            console.join(5)
+            console.detach()
+            proc.wait(timeout=5)

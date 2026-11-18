@@ -476,9 +476,13 @@ Per case (or once per batch) the runner:
    Per-model usage, turns and message ids come from those streams plus every
    iteration's subagent transcripts (`transcripts/*-agent-*.jsonl`), which are copied
    into `<workspace>/subagents/` (a name already taken by an earlier iteration gets an
-   `itN-` prefix). Hook block events in `run-telemetry.jsonl` become
-   `permission_denials` (best effort). Per-model turns and message ids cover only the
-   current invocation's transcripts. The exit code is fullsend's.
+   `itN-` prefix). Actions mask values are collected from every console, stream,
+   transcript and permission-denial source, then applied to `RunResult`, the persisted
+   logs, `run_result.json` and the copied subagent transcripts. Hook block events in
+   `run-telemetry.jsonl` become `permission_denials` (best effort). Per-model turns and
+   message ids cover only the current invocation's transcripts. The exit code is
+   fullsend's. fullsend's raw `.fullsend-runs/` tree is not an eval output and must not
+   be uploaded or archived.
 6. **Collects artifacts from the workspace.** Repo-relative `outputs[*].path` reach
    the workspace the way they do in production: the project's post-script, which
    `fullsend run` executes after the agent, copies the agent's outputs into

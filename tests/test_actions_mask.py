@@ -19,10 +19,10 @@ def test_redacts_declaration_repeated_and_earlier_values():
 
 
 def test_collects_escaped_and_decoded_forms():
-    values = actions_mask_values("::add-mask::abc%25def%0A")
+    values = actions_mask_values("::add-mask::abcdef%25ghij%0A")
 
-    assert "abc%25def%0A" in values
-    assert "abc%def\n" in values
+    assert "abcdef%25ghij%0A" in values
+    assert "abcdef%ghij\n" in values
 
 
 def test_collects_case_insensitive_and_indented_declarations():
@@ -40,10 +40,10 @@ def test_ignores_declarations_embedded_in_other_text():
 
 
 def test_collects_each_decoded_line_of_a_multiline_value():
-    values = actions_mask_values("::add-mask::ALPHA%0ABETA\n")
+    values = actions_mask_values("::add-mask::LONGALPHA%0ALONGBETA\n")
 
-    assert "ALPHA" in values
-    assert "BETA" in values
+    assert "LONGALPHA" in values
+    assert "LONGBETA" in values
 
 
 def test_collects_stream_values_without_concatenating_streams():
@@ -59,11 +59,11 @@ def test_collects_stream_values_without_concatenating_streams():
 
 
 def test_redacts_both_escaped_and_decoded_forms():
-    text = "::add-mask::abc%25def%0Aabc%def\n"
+    text = "::add-mask::abcdef%25ghij%0Aabcdef%ghij\n"
     scrubbed = redact_actions_masks(text)
 
-    assert "abc%25def%0A" not in scrubbed
-    assert "abc%def" not in scrubbed
+    assert "abcdef%25ghij%0A" not in scrubbed
+    assert "abcdef%ghij" not in scrubbed
     assert scrubbed == "::add-mask::***\n"
 
 
@@ -73,3 +73,28 @@ def test_preserves_non_secret_diagnostics():
 
     assert "Error: unrelated diagnostic" in scrubbed
     assert "synthetic-secret" not in scrubbed
+
+
+def test_ignores_short_and_whitespace_only_values_without_shredding_text():
+    text = "::add-mask::e\n::add-mask::   \nError: hello there\n"
+    scrubbed = redact_actions_masks(text)
+
+    assert scrubbed == (
+        "::add-mask::***\n::add-mask::***\nError: hello there\n")
+
+
+def test_ignores_declarations_inside_stop_commands_block():
+    text = (
+        "::stop-commands::pause-token\n"
+        "::add-mask::short-secret\n"
+        "Error: short-secret and unrelated text\n"
+        "::pause-token::\n"
+        "::add-mask::valid-secret-value\n"
+        "Error: valid-secret-value\n"
+    )
+    scrubbed = redact_actions_masks(text)
+
+    assert "short-secret" in scrubbed
+    assert "unrelated text" in scrubbed
+    assert "valid-secret-value" not in scrubbed
+    assert scrubbed.count("::add-mask::***") == 2

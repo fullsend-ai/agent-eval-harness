@@ -491,10 +491,23 @@ userinfo, whole (`https://***@host`: a username is a token as often as not, as i
 `signature: f(a, b)` are redacted too, and a prose `authorization:` loses the rest of its
 clause — false positives that hide a progress detail where a miss would show a credential. The full console (stdout,
 then stderr) is still the case's `stderr.log`, unfiltered and with its control
-sequences, except that GitHub Actions `::add-mask::` declarations and their
-values are scrubbed before persistence; the sandbox image is still read from it.
-With a log prefix, selected console lines are buffered until both pipes are
-captured so a mask declared on either pipe applies before any line is printed.
+sequences, except that GitHub Actions `::add-mask::` declarations and their values are
+scrubbed before persistence. Persistence collects declarations from both console
+streams, all iteration streams, subagent transcripts and permission-denial telemetry,
+then applies the union retroactively to `RunResult`, `stdout.log`, `stderr.log`,
+`run_result.json` and the copied subagent transcripts. The sandbox image is still read
+from the console. With a log prefix, selected console lines are forwarded live; mask
+values already seen on either pipe are applied at print time, with a brief startup
+settle so declarations emitted with the first console burst are available before the
+first selected line is printed.
+
+Actions masking is literal and Actions-escaped only. JSON-escaped, URL-encoded,
+base64-encoded and derived forms of a declared value — including a bare JWT behind a
+declared `Bearer` header — are not reconstructed, and a declaration must start its line
+(after optional whitespace), matching Actions command parsing. fullsend's own
+`.fullsend-runs/` tree remains a raw provider artifact and must not be uploaded or
+archived as eval output; only the mapped and redacted harness outputs are safe to
+persist.
 
 fullsend writes some `💬` lines without a trailing newline, so they reach the log only
 when its next write ends the line — usually the `⏳` heartbeat, up to 30 seconds later,

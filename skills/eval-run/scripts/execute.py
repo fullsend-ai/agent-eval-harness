@@ -199,7 +199,8 @@ if __name__ == "__main__":
     _early_pidfile(sys.argv[1:])
 
 from agent_eval.actions_mask import (  # noqa: E402
-    redact_actions_masks_across_streams,
+    actions_mask_values_across_streams, redact_actions_masks_across_streams,
+    redact_actions_masks_in_data,
 )
 from agent_eval.agent import RUNNERS  # noqa: E402 — after the early pidfile write
 from agent_eval.providers.reconcile import (  # noqa: E402
@@ -220,6 +221,11 @@ def _sanitize_run_result(result):
     """Scrub Actions mask values before runner output is persisted."""
     if result is None:
         return result
+    mask_values = actions_mask_values_across_streams(
+        result.stdout or "", result.stderr or "")
+    if result.permission_denials is not None:
+        result.permission_denials = redact_actions_masks_in_data(
+            result.permission_denials, mask_values)
     result.stdout, result.stderr = redact_actions_masks_across_streams(
         result.stdout or "", result.stderr or "")
     return result
