@@ -1,3 +1,10 @@
+## [1.66.2](https://github.com/fullsend-ai/agent-eval-harness/compare/v1.66.1...v1.66.2) (2026-11-18)
+
+
+### Bug Fixes
+
+* **#321:** record a missing case workspace as lost evidence ([#322](https://github.com/fullsend-ai/agent-eval-harness/issues/322)) ([53f401e](https://github.com/fullsend-ai/agent-eval-harness/commit/53f401ec0e7dc58140b53c803e883a0ef4912927)), closes [#321](https://github.com/fullsend-ai/agent-eval-harness/issues/321) [#321](https://github.com/fullsend-ai/agent-eval-harness/issues/321) [#321](https://github.com/fullsend-ai/agent-eval-harness/issues/321)
+
 ## [1.66.1](https://github.com/fullsend-ai/agent-eval-harness/compare/v1.66.0...v1.66.1) (2026-11-18)
 
 
