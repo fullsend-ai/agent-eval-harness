@@ -279,7 +279,7 @@ A tool-using judge run through the runner abstraction.
 For each judge across all cases:
 - **Boolean values**: aggregated as `pass_rate` (fraction True)
 - **Numeric values**: aggregated as `mean`
-- Results written to `summary.yaml` with `per_case` and `aggregated` sections
+- Results written to `summary.yaml` with `per_case` and `aggregated` sections, plus `unmeasured` (per-case entries for evidence a judge could not see; `incomplete_cases` is derived from it)
 - `summary.yaml` also carries `judge_usage` (judge cost, tokens, verdict transport counters) and `total_cost_usd`
 
 ### Gating `min_win_rate` and the pairwise `max_error_rate`

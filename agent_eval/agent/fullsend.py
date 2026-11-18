@@ -72,6 +72,7 @@ from typing import Optional
 
 import yaml
 
+from agent_eval._bootstrap import _SENTINEL, ensure_harness_root
 from agent_eval.actions_mask import (
     ActionsMaskCollector, actions_mask_values, actions_mask_values_across_streams,
     actions_mask_values_in_data, redact_actions_masks,
@@ -582,6 +583,12 @@ class FullsendRunner(EvalRunner):
 
         env = os.environ.copy()
         env.update(entries)
+        # The harness's own bootstrap sentinel is per-process: carried into
+        # the launcher it would make every skill script skip activation.
+        env.pop(_SENTINEL, None)
+        # Staged copies of agent_eval have no venv beside them; name the real
+        # checkout for _bootstrap (see claude_code._build_env).
+        ensure_harness_root(env)
         returncode, console_out, console_err, duration = self._run(
             cmd, workspace, env, timeout_s)
 

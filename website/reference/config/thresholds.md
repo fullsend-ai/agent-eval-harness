@@ -69,13 +69,24 @@ When a threshold key is configured but the metric it targets is unavailable
 missing metric almost always means a misconfiguration or a run that produced no
 data:
 
-- the judge was **skipped for every case** (e.g. an `if:` condition never fired),
+- the judge **produced no value** on any case,
 - the judge **errored on every case** — every value rejected by its
   [`score_range`](judges.md), say, since an off-scale value is recorded as an error
   sample and never aggregated (the detail names it: *"…judge errored on N cases; see
   the per-case rationales"*), or
 - the threshold **targets the wrong judge type** — `min_pass_rate` on a numeric
   judge, or `min_win_rate` without a pairwise comparison.
+
+The one exception is a judge whose `if:` condition was false for **every** selected
+case: its `min_pass_rate` and `min_mean` are **not applicable** — neither a pass nor a
+regression. It is read from `skipped_cases` and `selected_cases` in `summary.yaml` (equal
+counts); a local summary without those fields keeps failing as before. Harbor and
+EvalHub summaries never carry them and omit a judge that produced no values, so its
+thresholds are simply not evaluated there. A `min_pass_rate` on a numeric judge
+(`feedback_type: int`/`float`, a `score_range`, or an LLM/agent judge not declared
+`feedback_type: bool`; recorded as `value_kind` in `summary.yaml`) is still a
+wrong-type failure. See
+[not applicable judges](../../concepts/thresholds.md#match-the-key-to-the-judges-value-type).
 
 ```mermaid
 flowchart TD
@@ -88,9 +99,10 @@ flowchart TD
 
 !!! warning "Wrong-type thresholds fail loudly"
     `min_pass_rate` on a numeric judge (whose `pass_rate` is always `None`) is
-    reported as a regression with the detail *"pass_rate unavailable — judge
-    skipped for all cases or not a boolean judge"*. Fix it by switching to
-    `min_mean`, not by removing the threshold.
+    reported as a regression with the detail *"pass_rate unavailable — not a
+    boolean judge"* (*"…judge skipped for all cases or not a boolean judge"* on
+    a summary without `skipped_cases`). Fix it by switching to `min_mean`, not
+    by removing the threshold.
 
 ## What happens on a regression
 

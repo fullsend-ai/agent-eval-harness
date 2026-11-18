@@ -87,11 +87,13 @@ One row per judge with its type, aggregated metric, and threshold status.
 | Metric | `pass_rate` for boolean judges, `mean` for numeric judges |
 | Value | The aggregate (e.g. `80%` or `3.75`) |
 | Threshold | The gate from [`thresholds`](../concepts/thresholds.md) (`≥ …`) |
-| Status | `PASS` / `FAIL` / `SKIP` / `ERROR` |
+| Status | `PASS` / `FAIL` / `SKIP` / `ERROR` / `N/A` |
 
 Boolean judges aggregate as a **pass rate** (fraction `True`); numeric judges
 aggregate as a **mean**. A `SKIP` means the judge's `if` condition was false for
-those cases; `ERROR` means the judge raised. When a [pairwise
+those cases; `ERROR` means the judge raised. `N/A` means the `if` condition was false for
+every selected case, so the judge's score thresholds (`min_pass_rate`, `min_mean`) are
+waived; the Value column reads `skipped (N cases)`. When a [pairwise
 baseline](../concepts/pairwise-and-sampling.md) is present, a final `pairwise`
 row shows the `W / L / T` record.
 

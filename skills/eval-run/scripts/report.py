@@ -31,6 +31,10 @@ from pathlib import Path
 
 import yaml
 
+from agent_eval.judge_status import (FAIL, PASS, classify_judge_result,
+                                     judge_score_ranges)
+from agent_eval.judge_status import score_band_class as _score_band_class
+
 
 # ---------------------------------------------------------------------------
 # Helpers (ported from rfe-creator eval/reporting/report.py)
@@ -1537,12 +1541,22 @@ def _render_scoring_summary(summary, config, baseline_summary=None):
         pass_rate = agg.get("pass_rate")
         mean = agg.get("mean")
 
+        # Display only: an all-skipped judge shows how many cases it skipped.
+        # The N/A status comes from the thresholds the detector waived.
+        try:
+            all_skipped = _judge_not_applicable(agg)
+        except Exception:
+            all_skipped = False
+
         if pass_rate is not None:
             metric_name = "pass_rate"
             metric_val = f"{pass_rate:.0%}"
         elif mean is not None:
             metric_name = "mean"
             metric_val = f"{mean:.2f}"
+        elif all_skipped:
+            metric_name = "—"
+            metric_val = f"skipped ({_esc(str(agg['skipped_cases']))} cases)"
         else:
             metric_name = "—"
             metric_val = "—"
@@ -1569,15 +1583,21 @@ def _render_scoring_summary(summary, config, baseline_summary=None):
 
         # Threshold and status
         thresh = thresholds.get(judge_name, {})
+        try:
+            waived = _waived_thresholds(agg, thresh)
+        except Exception:
+            waived = ()
         thresh_str = "—"
         status_cls = "skip"
         status_label = "—"
 
         # The column shows one representative bound; which one is cosmetic.
         if isinstance(thresh, dict):
-            if "min_pass_rate" in thresh and pass_rate is not None:
+            if "min_pass_rate" in thresh and (pass_rate is not None
+                                              or "min_pass_rate" in waived):
                 thresh_str = f"&ge; {_esc(_pct(thresh['min_pass_rate']))}"
-            elif "min_mean" in thresh and mean is not None:
+            elif "min_mean" in thresh and (mean is not None
+                                           or "min_mean" in waived):
                 thresh_str = f"&ge; {_esc(str(thresh['min_mean']))}"
             elif "min_win_rate" in thresh:
                 thresh_str = f"&ge; {_esc(_pct(thresh['min_win_rate']))}"
@@ -1593,6 +1613,13 @@ def _render_scoring_summary(summary, config, baseline_summary=None):
         if judge_name in _breached:
             status_cls = "fail"
             status_label = "FAIL"
+        elif waived:
+            # `if:` false for every case: the detector waived its score
+            # thresholds — neither a pass nor a regression. A judge gated only
+            # by thresholds the detector still checks (`max_error_rate`) has
+            # none waived and takes the PASS/FAIL branches.
+            status_cls = "skip"
+            status_label = "N/A"
         elif thresh_str != "—" and _breach_known:
             # A satisfied threshold is a PASS even when the metric it gates on
             # isn't one this table displays (win_rate, error rate).
@@ -1696,6 +1723,19 @@ def _detect_regressions(judges, thresholds, pairwise=None):
     """
     from score import detect_regressions
     return detect_regressions(judges, thresholds, pairwise=pairwise)
+
+
+def _judge_not_applicable(agg):
+    """score.py's test for a judge whose `if:` was false for every case."""
+    from score import judge_not_applicable
+    return judge_not_applicable(agg)
+
+
+def _waived_thresholds(agg, threshold):
+    """The score thresholds `detect_regressions` waives for this judge — the
+    same predicate, so the report's N/A agrees with the scoring command."""
+    from score import waived_thresholds
+    return waived_thresholds(agg, threshold)
 
 
 def _render_regressions(summary, config):
@@ -2304,19 +2344,8 @@ def _judge_score_ranges(config):
     into `[0, 2]` and banded a legitimate 2.4 as off-scale. Only the histogram
     needs whole numbers, and it derives its own bins.
     """
-    ranges = {}
-    for j in config.get("judges", []):
-        name = j.get("name", "")
-        sr = j.get("score_range")
-        if not isinstance(sr, list) or len(sr) != 2:
-            continue
-        try:
-            lo, hi = float(sr[0]), float(sr[1])
-        except (TypeError, ValueError):
-            continue
-        if lo < hi:
-            ranges[name] = (lo, hi)
-    return ranges
+    return judge_score_ranges((j.get("name", ""), j.get("score_range"))
+                              for j in config.get("judges", []))
 
 
 def _render_reward_overview(summary, config, reward_cfg=None):
@@ -2499,29 +2528,6 @@ def _render_reward_overview(summary, config, reward_cfg=None):
 
     html += '</table></div>\n'
     return html
-
-
-def _score_band_class(val, lo, hi):
-    """CSS class for a numeric score by its position in its own [lo, hi] range:
-    green (top quartile) / amber (mid) / red (bottom third).
-
-    Per-case cells are coloured by where the score sits on the judge's own
-    scale — NOT against the aggregate `min_mean` threshold, which is a floor on
-    the mean ACROSS cases and mis-flags valid per-case scores (e.g. a 1 on a
-    0-2 judge with min_mean 1.5 would render red even though the judge passes).
-
-    A value OFF the scale is invalid, not excellent: without the guard below a
-    stray 4 from a 0-2 judge scores frac 2.0 and renders as a green pass.
-    """
-    if val < lo or val > hi:
-        return "fail"
-    span = hi - lo
-    frac = (val - lo) / span if span else 0.5
-    if frac >= 0.75:
-        return "pass"
-    if frac >= 0.375:
-        return "warn"
-    return "fail"
 
 
 def _render_artifact_body(f, rel, config, gold_image_uri, gold_diagram_uri):
@@ -2767,25 +2773,19 @@ def _render_per_case(summary, run_dir, config, baseline_dir, review):
         skipped = 0
         total = len(case_results)
         for jname, r in case_results.items():
-            if not isinstance(r, dict):
-                continue
-            val = r.get("value")
-            if val is None:
-                skipped += 1
-            elif val is True:
+            # Shared with the `score.py judges` log (agent_eval.judge_status).
+            # A numeric cell drags its case red only on a genuine low (a
+            # bottom-band score on the judge's own scale), not for being below
+            # the aggregate min_mean floor. Judges without a declared
+            # score_range (e.g. pipeline_total) are neutral -> count as pass.
+            # Judge errors render as SKIP here, so they count as skipped.
+            verdict = classify_judge_result(r, judge_score_range.get(jname))
+            if verdict == PASS:
                 passed += 1
-            elif val is False:
+            elif verdict == FAIL:
                 failed += 1
-            elif isinstance(val, (int, float)):
-                # A numeric cell drags its case red only on a genuine low (a
-                # bottom-band score on the judge's own scale), not for being
-                # below the aggregate min_mean floor. Judges without a declared
-                # score_range (e.g. pipeline_total) are neutral -> count as pass.
-                lo, hi = judge_score_range.get(jname, (None, None))
-                if lo is not None and hi is not None and _score_band_class(val, lo, hi) == "fail":
-                    failed += 1
-                else:
-                    passed += 1
+            elif verdict is not None:
+                skipped += 1
         status = "pass" if failed == 0 else "fail"
 
         # Pairwise badge or pass/fail accent — applied as a left-border class

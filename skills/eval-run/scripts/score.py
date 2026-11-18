@@ -43,6 +43,8 @@ from agent_eval.config import (
     COLLECTION_LOSS_KEY, EvalConfig, RunnerConfig, _is_valid_eval_name,
     _validate_path_segment,
 )
+from agent_eval.judge_status import (ERROR, FAIL, SKIP, classify_judge_result,
+                                     judge_score_ranges)
 from agent_eval.prompt_backends import (
     extract_runner_text,
     require_sdk_judge_for_runner,
@@ -365,13 +367,22 @@ def load_case_record(case_dir, config, run_id=None, runs_dir=None,
             # took every judge of the case down before any ran.
             try:
                 with open(annotations_path, encoding="utf-8") as f:
-                    record["annotations"] = yaml.safe_load(f) or {}
-            except (yaml.YAMLError, OSError, ValueError):
-                pass
-            if not isinstance(record["annotations"], dict):
+                    loaded_annotations = yaml.safe_load(f)
+            except (yaml.YAMLError, OSError, ValueError) as e:
+                loaded_annotations = {}
+                record["annotations_error"] = (
+                    f"annotations.yaml unreadable: {type(e).__name__}")
+            # Only an empty document (None) defaults to {}; check the raw
+            # value so falsy non-mappings ([], false, 0, "") are flagged.
+            if loaded_annotations is None:
+                loaded_annotations = {}
+            if not isinstance(loaded_annotations, dict):
                 # A scalar or list document is not an annotations mapping;
                 # `.items()` below would raise on it.
-                record["annotations"] = {}
+                loaded_annotations = {}
+                record["annotations_error"] = (
+                    "annotations.yaml is not a mapping")
+            record["annotations"] = loaded_annotations
             # Load annotation-referenced files into the record.
             # Only treat values as file paths if they look like filenames:
             # - Short enough to be a valid filename (< 256 chars)
@@ -1348,6 +1359,26 @@ def _numeric_bounds(jc):
         # 0-2.5" with an unreachable maximum helps nobody.
         is_int = float(lo).is_integer() and float(hi).is_integer()
     return (lo, hi, is_int)
+
+
+def _declared_value_kind(jc):
+    """The value type a judge produces: ``"bool"``, ``"numeric"`` or None when
+    the config does not settle it.
+
+    Declared by `feedback_type` or `score_range`. A non-builtin LLM/agent judge
+    that declares neither is numeric too — `_numeric_bounds` scores it on the
+    default scale — so a boolean-only threshold on it is a wrong-type one. An
+    undeclared check/module judge may return either type: None.
+    """
+    ft = getattr(jc, "feedback_type", "")
+    if ft == "bool":
+        return "bool"
+    if ft in ("int", "float") or getattr(jc, "score_range", None):
+        return "numeric"
+    if (not jc.builtin and jc.name != "pairwise"
+            and (jc.agent or jc.prompt or jc.prompt_file or jc.llm_rubric)):
+        return "numeric"
+    return None
 
 
 def _coerce_number(value, is_int):
@@ -3648,10 +3679,13 @@ def score_cases(judges, case_dirs, config, run_id=None, samples_override=None, r
     (LLM) judges are sampled; deterministic judges always run once.
     """
     if not case_dirs:
-        return {"per_case": {}, "aggregated": {n: {"values": [], "mean": None, "pass_rate": None} for n, *_ in judges}}
+        return {"per_case": {}, "unmeasured": {},
+                "aggregated": {n: {"values": [], "mean": None, "pass_rate": None} for n, *_ in judges}}
     per_case = {}
+    unmeasured = {}          # spec 016: {case_id: [entry, ...]}
     aggregated = {name: {"values": [], "errored_cases": 0,
-                         "incomplete_cases": 0}
+                         "incomplete_cases": 0, "skipped_cases": 0,
+                         "selected_cases": 0}
                   for name, *_ in judges}
     _reset_tool_choice_fallbacks()
     _reset_verdict_state()
@@ -3667,6 +3701,12 @@ def score_cases(judges, case_dirs, config, run_id=None, samples_override=None, r
     judge_bounds = {jc.name: _numeric_bounds(jc)
                     for jc in config.judges if jc.score_range}
     load_files = _judges_read_files(judges)
+    # Recorded so an all-skipped judge cannot hide a wrong-type threshold: with
+    # no values there is nothing else to tell a numeric judge from a boolean.
+    for jc in config.judges:
+        kind = _declared_value_kind(jc)
+        if kind and jc.name in aggregated:
+            aggregated[jc.name]["value_kind"] = kind
 
     def _score_case(case_dir):
         case_id = case_dir.name
@@ -3700,13 +3740,23 @@ def score_cases(judges, case_dirs, config, run_id=None, samples_override=None, r
             # Check condition — skip if it evaluates to False
             if condition:
                 try:
+                    if rec.get("annotations_error"):
+                        # Unreadable annotations are not annotations that
+                        # make the judge inapplicable: raising here records
+                        # a condition error, not a deliberate skip.
+                        raise ValueError(rec["annotations_error"])
                     annotations = rec.get("annotations", {})
                     if not eval(condition, {"__builtins__": {}},
                                 {"annotations": annotations, "outputs": rec}):
+                        # `skipped` marks a deliberate skip explicitly, so
+                        # the aggregate can count it without inferring it
+                        # from a missing value (which an invalid result
+                        # also produces).
                         case_results[name] = {
                             "value": None,
                             "rationale": f"Skipped: condition '{condition}' is false",
                             "judge_type": judge_type,
+                            "skipped": True,
                         }
                         continue
                 except Exception as e:
@@ -3837,6 +3887,13 @@ def score_cases(judges, case_dirs, config, run_id=None, samples_override=None, r
                 for name, _, _, jt, _ in judges:
                     result = {"value": None, "error": str(e), "judge_type": jt}
                     if lost:
+                        # The record could not be built, so NO judge got
+                        # anything — the loss belongs to the case, not to any
+                        # judge. Recorded here because this is where that is
+                        # known; inferring it later from "how many judges
+                        # carry the entry" is wrong whenever a run has one
+                        # judge (spec 016 scope).
+                        result["unmeasured_scope"] = "case"
                         # Summarised per judge, not once and shared: `yaml.dump`
                         # turns a repeated object into an `&id001`/`*id001`
                         # anchor pair, and `summary.yaml` is read by things
@@ -3847,10 +3904,23 @@ def score_cases(judges, case_dirs, config, run_id=None, samples_override=None, r
                       file=sys.stderr, flush=True)
             per_case[case_id] = case_results
             with lock:
+                # spec 016. One list per case; `incomplete_cases` is DERIVED
+                # from it rather than counted alongside, so the field the gate
+                # already reads and the entries that will replace it cannot
+                # disagree.
+                entries = _unmeasured_from_case(case_results)
+                # Internal routing only — `case_results` is persisted as the
+                # per-judge record, and this is not part of that schema.
+                for _r in case_results.values():
+                    if isinstance(_r, dict):
+                        _r.pop("unmeasured_scope", None)
+                if entries:
+                    unmeasured[case_id] = entries
                 for name, result in case_results.items():
                     if name not in aggregated:
                         continue
-                    if _evidence_was_omitted(result.get("staging_skips")):
+                    aggregated[name]["selected_cases"] += 1
+                    if any(_applies_to(e, name) for e in entries):
                         # Counted as well as, not instead of, the error below:
                         # the sample already failed, and this records WHY so a
                         # score threshold can refuse to pass on the survivors.
@@ -3863,6 +3933,11 @@ def score_cases(judges, case_dirs, config, run_id=None, samples_override=None, r
                         # threshold diagnostics conflated into "skipped".
                         aggregated[name]["errored_cases"] = (
                             aggregated[name].get("errored_cases", 0) + 1)
+                    elif result.get("skipped"):
+                        # Only an `if:` that evaluated false. A condition that
+                        # raised carries an `error` and is counted above.
+                        aggregated[name]["skipped_cases"] = (
+                            aggregated[name].get("skipped_cases", 0) + 1)
                 print(f"  [{completed}/{len(case_dirs)}] {case_id}", flush=True)
 
     # Compute aggregates
@@ -3906,7 +3981,13 @@ def score_cases(judges, case_dirs, config, run_id=None, samples_override=None, r
                     "total_cases": len(scored),
                 }
 
-    result = {"per_case": per_case, "aggregated": aggregated}
+    # `unmeasured` rides beside `per_case`, not inside it: `per_case[<case>]`
+    # is a judge-name -> record map and every consumer iterates its members
+    # expecting a record (spec 016). Returned from `score_cases` because the
+    # Harbor verifier composes its reward in-container, where no summary.yaml
+    # exists yet, and takes what it needs straight from this return value.
+    result = {"per_case": per_case, "aggregated": aggregated,
+              "unmeasured": unmeasured}
     # Judge-side usage (spec 014 Decision 15): tokens/cost per judge call,
     # aggregated here and written to summary.yaml — never into run_result.
     judge_usage = aggregate_judge_usage(per_case, _tool_choice_fallback_count(),
@@ -4236,6 +4317,108 @@ _CASE_OUTPUT_SKIP_REASONS = ("deeper than", "staging limit exceeded",
 # the OS said, content the judge was meant to see never reached it. It lets
 # the recorded entry count as evidence-bearing without naming each cause.
 _CONTENT_LOST = "content not staged"
+
+
+# --- spec 016: the one field for "this case produced no measurement" ---------
+#
+# Step 1 of #277: producers 1-3 only (a staging skip, staging that could copy
+# nothing, a case record that could not be built). All three are discovered
+# during scoring and all three are the graded skill's own output tree, so they
+# are `phase: score`, `attribution: agent` — the argument #260 and #276 make.
+#
+# `incomplete_cases` is DERIVED from these rather than counted beside them, so
+# the entries cannot silently disagree with the gate that already ships. Later
+# steps add producers; the legacy field keeps being derived from these three
+# until the gate itself reads `unmeasured` (spec 016, step 3).
+
+# The judge a staging entry belongs to. Staging is per-judge — only the judge
+# whose workspace was short is affected, and the others read the record — so
+# these are judge-SCOPED. A record-build failure reaches every judge and is
+# recorded unscoped by `_unmeasured_from_case`.
+_STAGING_KINDS = {
+    "hardlinked file": "hardlinked_file",
+    "sparse file": "sparse_file",
+    "deeper than": "depth_limit",
+    "staging limit exceeded": "staging_limit",
+    _CONTENT_LOST: "content_not_staged",
+}
+
+
+def _unmeasured_kind(reason):
+    """A stable slug for a `staging_skips` reason prefix."""
+    for prefix, slug in _STAGING_KINDS.items():
+        if str(reason).startswith(prefix):
+            return slug
+    return "evidence_lost"
+
+
+def _evidence_bearing(reasons):
+    """The reasons in a `staging_skips` summary that lost gradeable content.
+
+    `_evidence_was_omitted` answers "did this case lose anything?" for the
+    whole summary, so a case that lost a hardlinked file AND skipped a
+    dangling link is true overall. The entries have to be narrower than that:
+    a dangling link, a socket or a loop carries nothing the judge could have
+    read, and publishing it as an `agent`-attributed loss says the skill
+    withheld something it did not.
+    """
+    bearing = _CASE_OUTPUT_SKIP_REASONS + (_CONTENT_LOST,)
+    return {r: n for r, n in (reasons or {}).items()
+            if str(r).startswith(bearing)}
+
+
+def _unmeasured_from_case(case_results):
+    """`unmeasured` entries for one case, from its per-judge results.
+
+    Returns `[]` when nothing was lost. An entry names the judge it applies to
+    when the loss was that judge's staging; a loss that reached every judge
+    (the record could not be built, so all of them carry the same reasons) is
+    emitted once, unscoped, which is what spec 016 means by an entry that
+    applies everywhere.
+    """
+    per_judge = {
+        name: result.get("staging_skips")
+        for name, result in case_results.items()
+        if isinstance(result, dict)
+        and _evidence_was_omitted(result.get("staging_skips"))
+    }
+    if not per_judge:
+        return []
+    # Not inferred from how many judges carry the entry — with a single judge
+    # that is indistinguishable, and the scope is part of a published shape.
+    # The record-build path marks it where it is known.
+    unscoped = any(
+        isinstance(r, dict) and r.get("unmeasured_scope") == "case"
+        for r in case_results.values())
+
+    def entry(reason, count, judge=None):
+        e = {"phase": "score", "kind": _unmeasured_kind(reason),
+             "attribution": "agent", "detail": str(reason)}
+        if count > 1:
+            e["detail"] = f"{reason} (x{count})"
+        if judge is not None:
+            e["judge"] = judge
+        return e
+
+    if unscoped:
+        skips = next(iter(per_judge.values())) or {}
+        return [entry(r, n) for r, n
+                in sorted(_evidence_bearing(skips.get("reasons")).items())]
+    return [entry(r, n, judge=name)
+            for name, skips in sorted(per_judge.items())
+            for r, n in sorted(
+                _evidence_bearing((skips or {}).get("reasons")).items())]
+
+
+def _applies_to(entry, judge_name):
+    """Whether an `unmeasured` entry is in scope for `judge_name`.
+
+    Spec 016: an unscoped entry applies everywhere, a judge-scoped one only to
+    the judge it names. Consumers filter by this BEFORE resolving anything.
+    """
+    named = entry.get("judge")
+    return named is None or named == judge_name
+
 
 # Cumulative bounds on one staging operation. Depth and ancestor-loop checks do
 # not stop an acyclic fan-out (two links per level to an already-visited
@@ -5619,8 +5802,74 @@ def _unavailable_reason(current, metric, kind):
     if errored:
         return (f"{metric} unavailable — judge errored on {errored} case"
                 f"{'s' if errored != 1 else ''}; see the per-case rationales")
+    if "skipped_cases" in current:
+        # A summary that counts skips can tell the causes apart: an all-skipped
+        # judge is not applicable and never reaches here (see
+        # `judge_not_applicable`, except a wrong-type `min_pass_rate` on a
+        # numeric judge), so values without a metric are a wrong-type
+        # threshold, and no values at all are results that carried none.
+        if current.get("scored_cases") or _all_cases_skipped(current):
+            return f"{metric} unavailable — not {kind}"
+        return f"{metric} unavailable — no case produced a value"
+    # Older summaries do not record skips, so the two causes stay merged.
     return (f"{metric} unavailable — judge skipped for all cases "
             f"or not {kind}")
+
+
+def _all_cases_skipped(current):
+    """Whether every selected case was an explicit `if:`-false skip.
+
+    Read only from the explicit `skipped_cases` count that `score_cases` records
+    for a condition that evaluated false — never inferred from a missing
+    mean, and required to equal `selected_cases` — so any error, incomplete
+    evidence or result without a value is not a skip. Summaries written before
+    `skipped_cases` existed have no count and never qualify.
+    """
+    if not isinstance(current, dict) or not current.get("skipped_cases"):
+        return False
+    # Every selected case must be an explicit skip. A condition-true case
+    # whose judge returned no value and no error moves none of the other
+    # counters, so only the selected-case total can tell it from a skip. A
+    # summary that does not record the total cannot prove it.
+    if current.get("selected_cases") != current["skipped_cases"]:
+        return False
+    return not (current.get("scored_cases") or current.get("values")
+                or current.get("errored_cases")
+                or current.get("incomplete_cases")
+                or current.get("mean") is not None
+                or current.get("pass_rate") is not None)
+
+
+def judge_not_applicable(current, metric=None):
+    """Whether a judge's `if:` condition was false for every selected case.
+
+    Such a judge was deliberately inapplicable, so its score thresholds
+    (`min_pass_rate`, `min_mean`) are neither a pass nor a regression. Any
+    error, incomplete evidence or result without a value keeps the judge
+    applicable (see `_all_cases_skipped`).
+
+    With `metric` (a threshold key), the exemption is withheld from a
+    threshold that can never measure the judge's declared value type:
+    `min_pass_rate` on a numeric judge stays a wrong-type failure.
+    """
+    if not _all_cases_skipped(current):
+        return False
+    return not (metric == "min_pass_rate"
+                and current.get("value_kind") == "numeric")
+
+
+def waived_thresholds(current, threshold):
+    """The score thresholds (`min_pass_rate`, `min_mean`) in one judge's
+    `threshold` mapping that its aggregate makes not applicable.
+
+    The one predicate the detector, the CLI and the report share, so none of
+    them can call a judge N/A on a threshold the detector still evaluates
+    (`max_error_rate`, `min_win_rate`, a wrong-type `min_pass_rate`).
+    """
+    if not isinstance(threshold, dict):
+        return ()
+    return tuple(k for k in ("min_pass_rate", "min_mean")
+                 if k in threshold and judge_not_applicable(current, k))
 
 
 # Default for `detect_regressions(pairwise=...)`: the caller has no pairwise
@@ -5735,12 +5984,15 @@ def detect_regressions(current_results, thresholds, baseline_results=None,
         if current is None:
             continue
         incomplete = current.get("incomplete_cases") or 0
+        # A judge whose `if:` was false for every selected case has nothing to
+        # gate: its score thresholds are not applicable rather than breached.
+        waived = waived_thresholds(current, threshold)
         # When a threshold is configured but its metric is unavailable (None),
         # surface it as a regression instead of silently skipping — a missing
-        # metric usually means the judge was skipped for all cases or the
-        # threshold targets the wrong judge type (e.g. min_pass_rate on a
-        # numeric judge, whose pass_rate is always None).
-        if "min_pass_rate" in threshold:
+        # metric means the judge errored, produced no value, or the threshold
+        # targets the wrong judge type (e.g. min_pass_rate on a numeric judge,
+        # whose pass_rate is always None).
+        if "min_pass_rate" in threshold and "min_pass_rate" not in waived:
             rate = current.get("pass_rate")
             if rate is None:
                 regressions.append(Regression(
@@ -5799,7 +6051,7 @@ def detect_regressions(current_results, thresholds, baseline_results=None,
                 "omitted evidence from the judge's workspace (see "
                 "`staging_skips`); a score over the remaining cases is not a "
                 "measurement of the agent"))
-        if "min_mean" in threshold:
+        if "min_mean" in threshold and "min_mean" not in waived:
             mean = current.get("mean")
             if mean is None:
                 regressions.append(Regression(
@@ -5827,6 +6079,18 @@ def detect_regressions(current_results, thresholds, baseline_results=None,
                                 judge_name, f"{key}_vs_baseline",
                                 str(base_val), str(curr_val), "Degraded vs baseline"))
     return regressions
+
+
+def _print_not_applicable(current_results, thresholds, indent=""):
+    """Name each thresholded judge whose score thresholds were not evaluated
+    because its `if:` was false for every case — so a waived gate is visible
+    in the CLI output, not mistaken for a pass."""
+    for judge_name, threshold in thresholds.items():
+        current = current_results.get(judge_name)
+        if waived_thresholds(current, threshold):
+            print(f"{indent}NOT APPLICABLE: [{judge_name}] `if:` false for "
+                  f"all {current['skipped_cases']} cases; score thresholds "
+                  "not evaluated")
 
 
 # ---------------------------------------------------------------------------
@@ -5943,6 +6207,52 @@ def _run_location(args, config):
     return _get_runs_dir(config.eval_name()), args.run_id
 
 
+def format_case_failures(per_case, score_ranges):
+    """Log lines summarising per-case judge failures, errors and skips.
+
+    An aggregate threshold can pass while one case fails a judge, and that
+    case was visible only in the HTML report. The verdict comes from
+    `classify_judge_result`, the same one the report colours its cells with.
+    Failures and errors are listed per case; skips (an ``if:`` that was false)
+    are counted only. Errors name only the case and judge, never the exception
+    message. Case ids, judge names and values are untrusted, so each goes
+    through `escape_log_text` — no line can start a ``::`` workflow
+    command. Purely informational: nothing here affects the exit code.
+    """
+    failures, errors, skipped = [], [], 0
+    for case_id in sorted(per_case, key=str):
+        results = per_case[case_id]
+        if not isinstance(results, dict):
+            continue
+        for jname in sorted(results, key=str):
+            r = results[jname]
+            rng = score_ranges.get(jname)
+            verdict = classify_judge_result(r, rng)
+            if verdict == SKIP:
+                skipped += 1
+                continue
+            if verdict not in (FAIL, ERROR):
+                continue
+            where = f"{escape_log_text(case_id)} / {escape_log_text(jname)}"
+            if verdict == ERROR:
+                # Exception text is deliberately not logged: it can carry
+                # secrets or paths. Case and judge name only.
+                errors.append(f"    ERROR {where}")
+            else:
+                val = r.get("value")
+                scale = (f" (scale {_fmt_bound(rng[0])}-{_fmt_bound(rng[1])})"
+                         if rng is not None and not isinstance(val, bool) else "")
+                failures.append(
+                    f"    FAIL  {where} = {escape_log_text(val)}{scale}")
+    header = (f"  CASE FAILURES: {len(failures)} failed, {len(errors)} errored, "
+              f"{skipped} skipped")
+    lines = [header] + failures + errors
+    if failures or errors:
+        lines.append("  See report.html or summary.yaml in the run directory "
+                     "for details.")
+    return lines
+
+
 def cmd_judges(args):
     config = EvalConfig.from_yaml(args.config)
     runs_dir, args.run_id = _run_location(args, config)
@@ -5999,12 +6309,26 @@ def cmd_judges(args):
             print(f"  {name}: pass_rate={rate:.1%}{st_note}")
         elif mean is not None:
             print(f"  {name}: mean={mean:.2f}{st_note}")
+        elif judge_not_applicable(agg):
+            print(f"  {name}: not applicable (`if:` false for all "
+                  f"{agg['skipped_cases']} cases)")
 
     _merge_summary(args.run_id, "judges", {
         name: {k: v for k, v in agg.items() if k != "values"}
         for name, agg in judge_results.get("aggregated", {}).items()
     }, runs_dir)
     _merge_summary(args.run_id, "per_case", judge_results.get("per_case", {}), runs_dir)
+    # spec 016. A top-level sibling keyed by case id. Written unconditionally:
+    # `_merge_summary` replaces only the key it is
+    # given, so skipping the write when nothing was lost would leave a
+    # previous run's section standing next to this run's clean `per_case` and
+    # `incomplete_cases` — a field contradicting the rest of the file.
+    unmeasured = judge_results.get("unmeasured") or {}
+    _merge_summary(args.run_id, "unmeasured", unmeasured, runs_dir)
+    if unmeasured:
+        n = len(unmeasured)
+        print(f"  unmeasured: {n} case{'s' if n != 1 else ''} produced no "
+              f"valid measurement (see summary.yaml)")
     judge_usage = judge_results.get("judge_usage") or {}
     if judge_usage:
         _merge_summary(args.run_id, "judge_usage", judge_usage, runs_dir)
@@ -6042,6 +6366,15 @@ def cmd_judges(args):
                 else:
                     print(f"  {k}: {v:,.1f}")
 
+    # Per-case failures — an aggregate can pass over a failing case. Log only.
+    per_case = judge_results.get("per_case", {})
+    if per_case:
+        score_ranges = judge_score_ranges(
+            (jc.name, jc.score_range) for jc in config.judges)
+        print()
+        for line in format_case_failures(per_case, score_ranges):
+            print(line)
+
     # Regression detection
     has_regressions = False
     if config.thresholds:
@@ -6055,6 +6388,7 @@ def cmd_judges(args):
                       f"{r.baseline_value} -> {r.current_value}")
         else:
             print("\n  REGRESSIONS: 0")
+        _print_not_applicable(current_agg, config.thresholds, indent="  ")
         # The comparison `min_win_rate` gates runs after this step.
         if any(isinstance(t, dict) and "min_win_rate" in t
                for t in config.thresholds.values()):
@@ -6169,9 +6503,11 @@ def cmd_regression(args):
         for r in regressions:
             print(f"  [{r.judge_name}] {r.metric}: "
                   f"{r.baseline_value} -> {r.current_value}")
+        _print_not_applicable(current_agg, config.thresholds)
         sys.exit(1)
     else:
         print("REGRESSIONS: 0")
+        _print_not_applicable(current_agg, config.thresholds)
 
 
 def main():

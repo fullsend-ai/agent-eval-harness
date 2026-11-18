@@ -23,6 +23,7 @@ from .stream_capture import (
     classify_stream_errors,
     generation_ids_for_run, message_ids_for_run,
 )
+from agent_eval._bootstrap import HARNESS_ROOT_ENV, ensure_harness_root
 from agent_eval.tools.permissions import compile_permission_rules
 from agent_eval.config import (
     resolve_env_value, resolve_plugin_dir, resolve_plugin_skill_roots)
@@ -99,6 +100,16 @@ def stage_plugin_dir(plugin_dir: Path, workspace: Path) -> Path:
     so the staged tree cannot point back outside the workspace. Idempotent
     per workspace: an existing destination is reused; a partial copy never
     becomes the destination (copy into a temp sibling, then rename).
+
+    One host path is still disclosed, on purpose: ``AGENT_EVAL_HARNESS_ROOT``
+    (``_build_env``) names the harness checkout so that the staged copies of
+    ``agent_eval`` this function produces can activate its ``.eval-venv``
+    (``agent_eval._bootstrap``). That is a trade-off, not an oversight — the
+    copies cannot run their third-party imports without some real location,
+    ``AGENT_EVAL_RUNS_DIR`` already discloses a sibling host path, and Bash
+    was never path-scoped — but it means an agent that goes looking can find
+    the harness install. What this staging hides is the *plugin's* real
+    location, which is a different thing: the project under evaluation.
     """
     plugin = Path(plugin_dir).resolve()
     dest = workspace / ".staged-plugins" / plugin.name
@@ -862,7 +873,7 @@ class ClaudeCodeRunner(EvalRunner):
         "GOOGLE_APPLICATION_CREDENTIALS", "GOOGLE_CLOUD_PROJECT",
         "CLOUDSDK_CONFIG", "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE",
         "MLFLOW_TRACKING_URI", "MLFLOW_EXPERIMENT_NAME",
-        "AGENT_EVAL_RUNS_DIR",
+        "AGENT_EVAL_RUNS_DIR", HARNESS_ROOT_ENV,
     }
 
     # Forwarded from the ambient environment only without a provider plan: the
@@ -925,6 +936,12 @@ class ClaudeCodeRunner(EvalRunner):
             # put a managed key back into the process env (CWE-15).
             for k in MANAGED_ENV_KEYS:
                 env.pop(k, None)
+        # Last, after every overlay: the agent's skill scripts import agent_eval
+        # from wherever they were staged, and a copy has no venv beside it, so
+        # name the real checkout for _bootstrap (fallback only there). A
+        # non-blank value from the ambient env, runner.env or a hook wins; a
+        # blank one from any of them counts as unset.
+        ensure_harness_root(env)
         return env
 
 

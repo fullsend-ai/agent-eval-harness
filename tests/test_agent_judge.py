@@ -14,6 +14,7 @@ import json
 import os
 import sys
 import textwrap
+import yaml
 from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
@@ -3170,3 +3171,443 @@ def test_batch_tool_only_output_does_not_record_unrelated_losses(tmp_path,
                 if (out / "collection.json").exists() else {})
     assert not any(collect.UNLISTABLE_KEY in v
                    for v in manifest.values() if isinstance(v, dict)), manifest
+
+
+class TestUnmeasuredField:
+    """spec 016 step 1 (#277): the `unmeasured` list, with producers 1-3
+    behind it and `incomplete_cases` derived from it rather than counted
+    beside it — so the field the gate already reads and the entries that will
+    replace it cannot disagree."""
+
+    @contextmanager
+    def _unreadable(self, path):
+        mode = path.stat().st_mode & 0o777
+        path.chmod(0)
+        try:
+            yield
+        finally:
+            path.chmod(mode)
+
+    def _runner(self):
+        class R:
+            @classmethod
+            def from_config(cls, config, *, log_prefix=None, **overrides):
+                return cls()
+
+            @property
+            def name(self):
+                return "stg"
+
+            def execute(self, target=None, args="", workspace=None,
+                        model=None, **kwargs):
+                out = Path(workspace) / "output"
+                out.mkdir(parents=True, exist_ok=True)
+                (out / "score.json").write_text(
+                    json.dumps({"passed": True, "rationale": "x"}))
+                return RunResult(exit_code=0, stdout="", stderr="",
+                                 duration_s=0.01)
+        return R
+
+    def _case(self, tmp_path, name, *, suppress=False):
+        case_dir = tmp_path / name
+        _make_case(case_dir, {"out/ok.md": "fine"})
+        if suppress:
+            outside = tmp_path / f"{name}-outside.txt"
+            outside.write_text("the failing artifact")
+            os.link(outside, case_dir / "out" / "linked.txt")
+        return case_dir
+
+    def _run(self, tmp_path, cases, config=None):
+        import score
+        config = config or _config(
+            _agent_judge(feedback_type="bool", inputs=["out"]), outputs=["out"])
+        with _patched_runners(self._runner()):
+            return score.score_cases(
+                load_judges(config, project_root=str(tmp_path)), cases, config)
+
+    def test_a_staging_skip_produces_a_scoped_entry(self, tmp_path):
+        """Staging is per judge — only that judge's workspace was short, the
+        others read the record — so the entry names it."""
+        res = self._run(tmp_path,
+                        [self._case(tmp_path, "c0", suppress=True)]
+                        + [self._case(tmp_path, f"c{i}") for i in range(1, 4)])
+        entries = res["unmeasured"]["c0"]
+        assert len(entries) == 1
+        e = entries[0]
+        assert e["phase"] == "score"
+        assert e["kind"] == "hardlinked_file"
+        assert e["attribution"] == "agent"
+        assert e["judge"] == "arch_score"
+        assert "c1" not in res["unmeasured"]
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file modes")
+    def test_a_record_build_failure_produces_an_unscoped_entry(self, tmp_path):
+        """It reached every judge, so it belongs to the case, not a judge."""
+        bad = self._case(tmp_path, "c0")
+        (bad / "out" / "bad.txt").write_text("FAILING EVIDENCE")
+        config = _config(_agent_judge(feedback_type="bool", inputs=["out"]),
+                         outputs=["out"])
+        config.judges = [config.judges[0],
+                         JudgeConfig(name="shape", check="return True, 'ok'")]
+        with self._unreadable(bad / "out" / "bad.txt"):
+            res = self._run(tmp_path,
+                            [bad] + [self._case(tmp_path, f"c{i}")
+                                     for i in range(1, 4)],
+                            config=config)
+        entries = res["unmeasured"]["c0"]
+        assert all("judge" not in e for e in entries), entries
+        assert {e["kind"] for e in entries} == {"content_not_staged"}
+        # unscoped ⇒ charged to every judge, which is #276's behaviour
+        for judge in ("arch_score", "shape"):
+            assert res["aggregated"][judge]["incomplete_cases"] == 1, judge
+
+    def test_a_scoped_entry_does_not_charge_another_judge(self, tmp_path):
+        """The point of scoping. Judge A's staging was short; judge B read the
+        record and measured the case fine, so B's coverage is untouched."""
+        bad = self._case(tmp_path, "c0", suppress=True)
+        config = _config(_agent_judge(feedback_type="bool", inputs=["out"]),
+                         outputs=["out"])
+        config.judges = [config.judges[0],
+                         JudgeConfig(name="shape", check="return True, 'ok'")]
+        res = self._run(tmp_path,
+                        [bad] + [self._case(tmp_path, f"c{i}")
+                                 for i in range(1, 4)],
+                        config=config)
+        entry, = res["unmeasured"]["c0"]
+        assert entry["judge"] == "arch_score"
+        assert res["aggregated"]["arch_score"]["incomplete_cases"] == 1
+        assert res["aggregated"]["shape"]["incomplete_cases"] == 0
+
+    def test_incomplete_cases_is_derived_from_the_entries(self, tmp_path):
+        """Not counted beside them. A case with no entry must not be charged,
+        and a case with one must be — whichever way round a future producer
+        gets it wrong, this is the invariant that catches it."""
+        res = self._run(tmp_path,
+                        [self._case(tmp_path, "c0", suppress=True)]
+                        + [self._case(tmp_path, f"c{i}") for i in range(1, 10)])
+        agg = res["aggregated"]["arch_score"]
+        charged = sum(1 for case, entries in res["unmeasured"].items()
+                      if any(e.get("judge") in (None, "arch_score")
+                             for e in entries))
+        assert agg["incomplete_cases"] == charged == 1
+
+    def test_only_evidence_bearing_reasons_become_entries(self, tmp_path):
+        """`_evidence_was_omitted` answers "did this case lose anything" for
+        the whole summary, so a case that lost a hardlinked file AND skipped
+        a dangling link is true overall. The entries must be narrower: a
+        dangling link carries nothing, and publishing it as an
+        `agent`-attributed loss says the skill withheld what it did not."""
+        import score
+        mixed = {"a": {"staging_skips": {"count": 2, "reasons": {
+            "hardlinked file": 1,
+            "dangling symlink or special file": 1}}}}
+        kinds = [e["kind"] for e in score._unmeasured_from_case(mixed)]
+        assert kinds == ["hardlinked_file"]
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file modes")
+    def test_the_scope_flag_does_not_reach_the_published_record(self,
+                                                                tmp_path):
+        """`unmeasured_scope` routes the scope decision; `per_case` is a
+        published schema and it is not part of it. The config needs a second,
+        non-agent judge: only then do the judges read files, the unreadable
+        file fail the record build, and an entry get built at all."""
+        bad = self._case(tmp_path, "c0")
+        (bad / "out" / "bad.txt").write_text("FAILING EVIDENCE")
+        config = _config(_agent_judge(feedback_type="bool", inputs=["out"]),
+                         outputs=["out"])
+        config.judges = [config.judges[0],
+                         JudgeConfig(name="shape", check="return True, 'ok'")]
+        with self._unreadable(bad / "out" / "bad.txt"):
+            res = self._run(tmp_path,
+                            [bad] + [self._case(tmp_path, f"c{i}")
+                                     for i in range(1, 3)],
+                            config=config)
+        # the path ran: an unscoped entry was built
+        entries = res["unmeasured"]["c0"]
+        assert entries and all("judge" not in e for e in entries), entries
+        for judge_record in res["per_case"]["c0"].values():
+            assert "unmeasured_scope" not in judge_record
+
+    def test_a_clean_rescore_clears_a_stale_unmeasured_section(self,
+                                                               tmp_path):
+        """`_merge_summary` replaces only the key it is handed. Writing
+        `unmeasured` only when something was lost would leave a previous
+        run's section standing beside this run's clean `per_case` and
+        `incomplete_cases` — a field contradicting the rest of the file.
+        Driven through `cmd_judges`, the writer under test."""
+        import argparse
+        import score
+        config = tmp_path / "eval.yaml"
+        config.write_text(
+            "name: t\nexecution: {mode: case}\n"
+            "judges:\n  - name: ok\n    check: \"return True\"\n")
+        run_dir = tmp_path / "runs" / "r1"
+        (run_dir / "cases" / "c0").mkdir(parents=True)
+        (run_dir / "summary.yaml").write_text(yaml.dump({
+            "run_id": "r1",
+            "unmeasured": {"c0": [{"phase": "score", "kind": "hardlinked_file",
+                                   "attribution": "agent", "detail": "stale"}]},
+        }))
+        score.cmd_judges(argparse.Namespace(
+            config=str(config), run_dir=str(run_dir), run_id=None,
+            samples=None, no_llm_judges=False, workspace=None, model=None))
+        after = yaml.safe_load((run_dir / "summary.yaml").read_text())
+        assert after["unmeasured"] == {}, after
+
+    def test_a_clean_run_has_no_unmeasured_section(self, tmp_path):
+        res = self._run(tmp_path,
+                        [self._case(tmp_path, f"c{i}") for i in range(3)])
+        assert res["unmeasured"] == {}
+        assert res["aggregated"]["arch_score"]["incomplete_cases"] == 0
+
+
+# ── #292: the TOCTOU between checking a path and reading it ─────────────
+
+_OUTSIDE = "NOT THE AGENT'S TO SHOW"
+
+
+def _swap_at_open(monkeypatch, root, targets):
+    """Swap each ``root/<name>`` for a symlink to ``targets[name]`` from inside
+    the first open whose path names it — the latest moment any implementation
+    could have checked it. A check-then-reopen-by-pathname (the `_confined`
+    + `shutil.copy2` shape) has already checked by then and follows the link;
+    an open made link-free relative to a held directory descriptor refuses
+    it. Both `os.open` and `builtins.open` are covered so either shape trips
+    the swap. Returns the set of names actually swapped."""
+    import builtins
+    swapped = set()
+    real_os_open, real_open = os.open, builtins.open
+
+    def trigger(path):
+        if isinstance(path, int):
+            return
+        path = os.fspath(path)
+        if isinstance(path, bytes):
+            return
+        segments = path.split(os.sep)
+        for name, target in targets.items():
+            if name in segments and name not in swapped:
+                swapped.add(name)
+                victim = root / name
+                victim.rename(victim.with_name(victim.name + ".orig"))
+                os.symlink(target, victim)
+
+    def os_open(path, *args, **kwargs):
+        trigger(path)
+        return real_os_open(path, *args, **kwargs)
+
+    def builtin_open(file, *args, **kwargs):
+        trigger(file)
+        return real_open(file, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", os_open)
+    monkeypatch.setattr(builtins, "open", builtin_open)
+    return swapped
+
+
+def _leaked(run):
+    return [p for p in run.rglob("*")
+            if p.is_file() and not p.is_symlink()
+            and _OUTSIDE in p.read_text(errors="replace")]
+
+
+@pytest.mark.parametrize("mode", ["case", "batch"])
+def test_a_path_swapped_for_a_symlink_at_use_is_not_followed(tmp_path,
+                                                             monkeypatch,
+                                                             mode):
+    """A live agent process can swap a checked file — or a directory above
+    one — for a symlink between validation and use. Collection opens every
+    component link-free relative to a held descriptor and reads the bytes
+    from the descriptor it checked, so the swapped paths are recorded as
+    lost and nothing outside the workspace is copied.
+
+    Parametrised over both modes because they share one routine: reverting
+    either loop to its own pathname walk and copy fails here."""
+    import collect
+    outside = tmp_path / "outside"
+    (outside / "dir").mkdir(parents=True)
+    (outside / "secret.md").write_text(_OUTSIDE)
+    (outside / "dir" / "f.md").write_text(_OUTSIDE)
+    ws = tmp_path / "ws"
+    root = ws / "cases" / "c0" if mode == "case" else ws
+    (root / "out" / "swapdir").mkdir(parents=True)
+    (root / "out" / "keep.md").write_text("fine")
+    (root / "out" / "swapme.md").write_text("inside")
+    (root / "out" / "swapdir" / "f.md").write_text("inside")
+    if mode == "batch":
+        (ws / "case_order.yaml").write_text(
+            json.dumps([{"case_id": "c0", "entry_count": 1}]))
+    cfg = tmp_path / "eval.yaml"
+    cfg.write_text(textwrap.dedent(f"""\
+        name: t
+        execution:
+          mode: {mode}
+          skill: s
+        outputs:
+          - path: out
+            batch_pattern: "*"
+        traces:
+          events: false
+    """))
+    run = tmp_path / "run"
+    monkeypatch.setattr(sys, "argv", [
+        "collect", "--config", str(cfg), "--workspace", str(ws),
+        "--output", str(run)])
+    swapped = _swap_at_open(monkeypatch, root / "out", {
+        "swapme.md": outside / "secret.md", "swapdir": outside / "dir"})
+    collect.main()
+    monkeypatch.undo()
+
+    assert swapped == {"swapme.md", "swapdir"}   # the race really happened
+    assert _leaked(run) == []
+    assert (run / "cases" / "c0" / "out" / "keep.md").read_text() == "fine"
+    lost = json.loads((run / "collection.json").read_text())["c0"][
+        collect.UNLISTABLE_KEY]
+    assert "out/swapme.md" in lost
+    assert any(p.startswith("out/swapdir") for p in lost)
+
+
+def test_a_modified_file_swapped_for_a_symlink_at_use_is_not_followed(
+        tmp_path, monkeypatch):
+    """The in-place edits under `_modified/` are copied from the same
+    agent-written case directory, through the same descriptor-based copy.
+    The git scan already skips a link; one swapped in after it is skipped
+    the same way rather than followed."""
+    import subprocess
+
+    import collect
+    outside = tmp_path / "outside.md"
+    outside.write_text(_OUTSIDE)
+    ws = tmp_path / "ws"
+    case = ws / "cases" / "c0"
+    case.mkdir(parents=True)
+    (case / "notes.md").write_text("before\n")
+    env = {**os.environ,
+           "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    for cmd in (["git", "init", "-q"], ["git", "add", "-A"],
+                ["git", "commit", "-q", "-m", "initial"]):
+        subprocess.run(cmd, cwd=case, env=env, check=True)
+    (case / "notes.md").write_text("after\n")
+    (case / "kept.md").write_text("kept\n")
+    cfg = tmp_path / "eval.yaml"
+    cfg.write_text(textwrap.dedent("""\
+        name: t
+        execution:
+          skill: s
+        outputs:
+          - path: out
+        traces:
+          events: false
+    """))
+    run = tmp_path / "run"
+    monkeypatch.setattr(sys, "argv", [
+        "collect", "--config", str(cfg), "--workspace", str(ws),
+        "--output", str(run)])
+    real_modified = collect._collect_modified_files
+
+    def scan_then_race(case_dir, config):
+        found = real_modified(case_dir, config)   # vetted by the scan...
+        _swap_at_open(monkeypatch, case, {"notes.md": outside})
+        return found                              # ...swapped before use
+
+    monkeypatch.setattr(collect, "_collect_modified_files", scan_then_race)
+    collect.main()
+    monkeypatch.undo()
+
+    assert _leaked(run) == []
+    assert not (run / "cases" / "c0" / "_modified" / "notes.md").exists()
+    assert ((run / "cases" / "c0" / "_modified" / "kept.md").read_text()
+            == "kept\n")
+    # The refusal is evidence lost, not silence, and only the copy that
+    # succeeded is counted as collected.
+    info = json.loads((run / "collection.json").read_text())["c0"]
+    assert "notes.md" in info[collect.UNLISTABLE_KEY]
+    assert info["_modified"] == 1
+
+
+def _modified_case(tmp_path):
+    """A case workspace with one tracked file edited in place, plus `kept.md`."""
+    import subprocess
+    ws = tmp_path / "ws"
+    case = ws / "cases" / "c0"
+    case.mkdir(parents=True)
+    (case / "notes.md").write_text("before\n")
+    env = {**os.environ,
+           "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    for cmd in (["git", "init", "-q"], ["git", "add", "-A"],
+                ["git", "commit", "-q", "-m", "initial"]):
+        subprocess.run(cmd, cwd=case, env=env, check=True)
+    (case / "notes.md").write_text("after\n")
+    (case / "kept.md").write_text("kept\n")
+    cfg = tmp_path / "eval.yaml"
+    cfg.write_text(textwrap.dedent("""\
+        name: t
+        execution:
+          skill: s
+        outputs:
+          - path: out
+        traces:
+          events: false
+    """))
+    return ws, case, cfg
+
+
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0,
+                    reason="root reads files regardless of mode")
+def test_an_unreadable_modified_file_is_recorded_as_lost(tmp_path,
+                                                         monkeypatch):
+    """A modified file that cannot be opened must reach collection.json as
+    lost evidence, not vanish while the rest are graded as complete."""
+    import collect
+    ws, case, cfg = _modified_case(tmp_path)
+    run = tmp_path / "run"
+    monkeypatch.setattr(sys, "argv", [
+        "collect", "--config", str(cfg), "--workspace", str(ws),
+        "--output", str(run)])
+    real_modified = collect._collect_modified_files
+
+    def scan_then_lock(case_dir, config):
+        found = real_modified(case_dir, config)
+        (case / "notes.md").chmod(0o000)
+        return found
+
+    monkeypatch.setattr(collect, "_collect_modified_files", scan_then_lock)
+    try:
+        collect.main()
+    finally:
+        (case / "notes.md").chmod(0o644)
+
+    info = json.loads((run / "collection.json").read_text())["c0"]
+    assert "notes.md" in info[collect.UNLISTABLE_KEY]
+    assert info["_modified"] == 1
+    assert not (run / "cases" / "c0" / "_modified" / "notes.md").exists()
+
+
+def test_a_modified_file_swapped_for_a_directory_is_recorded_as_lost(
+        tmp_path, monkeypatch):
+    """A path swapped from file to directory between the scan and the copy
+    is refused and recorded; it does not abort collection."""
+    import collect
+    ws, case, cfg = _modified_case(tmp_path)
+    run = tmp_path / "run"
+    monkeypatch.setattr(sys, "argv", [
+        "collect", "--config", str(cfg), "--workspace", str(ws),
+        "--output", str(run)])
+    real_modified = collect._collect_modified_files
+
+    def scan_then_swap(case_dir, config):
+        found = real_modified(case_dir, config)
+        (case / "notes.md").unlink()
+        (case / "notes.md").mkdir()
+        return found
+
+    monkeypatch.setattr(collect, "_collect_modified_files", scan_then_swap)
+    collect.main()
+
+    info = json.loads((run / "collection.json").read_text())["c0"]
+    assert "notes.md" in info[collect.UNLISTABLE_KEY]
+    assert info["_modified"] == 1
+    assert ((run / "cases" / "c0" / "_modified" / "kept.md").read_text()
+            == "kept\n")

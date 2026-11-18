@@ -29,12 +29,18 @@ from pathlib import Path
 
 import yaml
 
+from agent_eval._bootstrap import ensure_harness_root
 from agent_eval.config import EvalConfig
 from agent_eval.optimize import artifact, export, intake, redact
 
 
 def _child_env() -> dict[str, str]:
     env = dict(os.environ)
+    # The children stage agent_eval copies for the agent's skill scripts (the
+    # restored plumbing, the runner's plugin staging); a copy has no venv
+    # beside it. Name the real checkout so _bootstrap still finds .eval-venv;
+    # an operator's explicit value wins.
+    ensure_harness_root(env)
     # The sentinel records bootstrap completion in this process, not in a
     # newly spawned process.
     env.pop("_AGENT_EVAL_BOOTSTRAP_DONE", None)

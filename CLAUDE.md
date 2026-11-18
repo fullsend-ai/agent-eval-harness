@@ -4,7 +4,7 @@ Generic evaluation framework for Claude Code skills and agent capabilities. Uses
 
 ## Project Status
 
-Phase 1 (core framework), Phase 2 (scoring integration), and Phase 3 (prompt-based evaluation) are implemented. See `eval/plans/agent-eval-harness-design.md` in the rfe-creator project for the full design doc.
+Phases 1–3 (core framework, scoring integration, prompt-based evaluation) are implemented; the full design doc is `eval/plans/agent-eval-harness-design.md` in the rfe-creator project.
 
 ## Execution Model
 
@@ -198,7 +198,8 @@ required, and both have been forgotten before:
    import** in any script that uses a third-party package (`yaml`, `mlflow`,
    `anthropic`, `jinja2`, `pandas`, …) or imports `agent_eval`. It puts
    `.eval-venv`'s site-packages on `sys.path`, or re-execs into the venv
-   interpreter on an ABI mismatch. It must precede the third-party imports —
+   interpreter on an ABI mismatch (`$AGENT_EVAL_HARNESS_ROOT` names the venv
+   for a staged copy). It must precede the third-party imports —
    including ones deferred inside functions, which still need the venv when they run.
 
 Stdlib-only scripts need neither. `scripts/ensure_deps.py` is exempt: it *creates*
@@ -226,7 +227,7 @@ changing a key's behavior, and update it when you do:
 - `outputs` — artifact dirs (`path`) and/or tool calls (`tool`); `batch_pattern` maps batch outputs to cases
 - `traces` — execution data to capture: stdout/stderr, events, metrics
 - `judges` — `builtin`, inline `check`, LLM `prompt`/`prompt_file`/`llm_rubric`, external `module`/`function`; optional `arguments`, `if`, `verdict`, `examples`. A declared `score_range` is enforced on every judge type (off-scale → error sample, never clamped).
-- `thresholds` — per-judge `min_mean`/`min_pass_rate`/`min_win_rate`/`max_error_rate`
+- `thresholds` — per-judge `min_mean`/`min_pass_rate`/`min_win_rate`/`max_error_rate`. A judge whose `if:` is false for every selected case (`skipped_cases` equals `selected_cases` in `summary.yaml`) is not applicable: `min_pass_rate`/`min_mean` are waived rather than regressed.
 - `reward` — optional scalar in `[0, 1]` for RL (GRPO): a single `judge`, or a `formula` (`weighted` or an AST-validated expression). `gate: true` zeros the reward on *any* false boolean judge.
 
 Runs are stored in `$AGENT_EVAL_RUNS_DIR` (default `eval/runs`), configured during `/eval-setup`.

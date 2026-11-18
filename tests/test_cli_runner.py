@@ -359,3 +359,20 @@ class TestCliRunnerInRegistry:
     def test_is_eval_runner(self):
         from agent_eval.agent.base import EvalRunner
         assert issubclass(CliRunner, EvalRunner)
+
+
+def test_cli_env_drops_the_bootstrap_sentinel_and_names_the_harness_root(monkeypatch):
+    """The harness process has always bootstrapped by the time it builds a
+    child environment, so the sentinel is always there to inherit; a child
+    that inherits it skips activation entirely, staged-copy fallback
+    included. Strip it; name the checkout last, after every overlay."""
+    from agent_eval._bootstrap import HARNESS_ROOT_ENV, harness_root
+    from agent_eval.agent.cli_runner import CliRunner
+    monkeypatch.setenv("_AGENT_EVAL_BOOTSTRAP_DONE", "1")
+    monkeypatch.delenv(HARNESS_ROOT_ENV, raising=False)
+    env = CliRunner("echo hi")._build_env()
+    assert "_AGENT_EVAL_BOOTSTRAP_DONE" not in env
+    assert env[HARNESS_ROOT_ENV] == harness_root()
+    assert CliRunner("echo hi", env={HARNESS_ROOT_ENV: ""})._build_env()[HARNESS_ROOT_ENV] == harness_root()
+    assert CliRunner("echo hi")._build_env({HARNESS_ROOT_ENV: ""})[HARNESS_ROOT_ENV] == harness_root()
+    assert CliRunner("echo hi")._build_env({HARNESS_ROOT_ENV: "/hook"})[HARNESS_ROOT_ENV] == "/hook"

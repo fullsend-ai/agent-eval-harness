@@ -1,3 +1,59 @@
+## [1.66.2](https://github.com/fullsend-ai/agent-eval-harness/compare/v1.66.1...v1.66.2) (2026-11-18)
+
+
+### Bug Fixes
+
+* **#321:** record a missing case workspace as lost evidence ([#322](https://github.com/fullsend-ai/agent-eval-harness/issues/322)) ([53f401e](https://github.com/fullsend-ai/agent-eval-harness/commit/53f401ec0e7dc58140b53c803e883a0ef4912927)), closes [#321](https://github.com/fullsend-ai/agent-eval-harness/issues/321) [#321](https://github.com/fullsend-ai/agent-eval-harness/issues/321) [#321](https://github.com/fullsend-ai/agent-eval-harness/issues/321)
+
+## [1.66.1](https://github.com/fullsend-ai/agent-eval-harness/compare/v1.66.0...v1.66.1) (2026-11-18)
+
+
+### Bug Fixes
+
+* **bootstrap:** let a staged copy of agent_eval find the harness venv ([#304](https://github.com/fullsend-ai/agent-eval-harness/issues/304)) ([6f79ea5](https://github.com/fullsend-ai/agent-eval-harness/commit/6f79ea58dec3795a747401d554c2597e2d948963)), closes [#299](https://github.com/fullsend-ai/agent-eval-harness/issues/299) [#299](https://github.com/fullsend-ai/agent-eval-harness/issues/299) [#299](https://github.com/fullsend-ai/agent-eval-harness/issues/299) [#299](https://github.com/fullsend-ai/agent-eval-harness/issues/299) [#299](https://github.com/fullsend-ai/agent-eval-harness/issues/299)
+
+# [1.66.0](https://github.com/fullsend-ai/agent-eval-harness/compare/v1.65.2...v1.66.0) (2026-11-17)
+
+
+### Features
+
+* **score:** the unmeasured field, with incomplete_cases derived from it ([#293](https://github.com/fullsend-ai/agent-eval-harness/issues/293)) ([ad30f32](https://github.com/fullsend-ai/agent-eval-harness/commit/ad30f32b262d7dbbf57deb556e8fb8a3673d918c)), closes [#277](https://github.com/fullsend-ai/agent-eval-harness/issues/277) [#280](https://github.com/fullsend-ai/agent-eval-harness/issues/280) [#260](https://github.com/fullsend-ai/agent-eval-harness/issues/260) [#276](https://github.com/fullsend-ai/agent-eval-harness/issues/276) [#282](https://github.com/fullsend-ai/agent-eval-harness/issues/282) [#291](https://github.com/fullsend-ai/agent-eval-harness/issues/291) [#260](https://github.com/fullsend-ai/agent-eval-harness/issues/260) [#276](https://github.com/fullsend-ai/agent-eval-harness/issues/276)
+
+## [1.65.2](https://github.com/fullsend-ai/agent-eval-harness/compare/v1.65.1...v1.65.2) (2026-11-17)
+
+
+### Bug Fixes
+
+* **eval-run:** fail the run when a case workspace is missing ([#314](https://github.com/fullsend-ai/agent-eval-harness/issues/314)) ([dce4287](https://github.com/fullsend-ai/agent-eval-harness/commit/dce42871e83b43930dddb0208c11559738e1a034)), closes [#313](https://github.com/fullsend-ai/agent-eval-harness/issues/313)
+
+## [1.65.1](https://github.com/fullsend-ai/agent-eval-harness/compare/v1.65.0...v1.65.1) (2026-11-17)
+
+
+### Bug Fixes
+
+* **collect:** one collection routine, read through no-follow descriptors ([#294](https://github.com/fullsend-ai/agent-eval-harness/issues/294)) ([d4fbfa0](https://github.com/fullsend-ai/agent-eval-harness/commit/d4fbfa0eeba16c2f07ecf5534516e29f81954311)), closes [#291](https://github.com/fullsend-ai/agent-eval-harness/issues/291) [#292](https://github.com/fullsend-ai/agent-eval-harness/issues/292)
+
+# [1.65.0](https://github.com/fullsend-ai/agent-eval-harness/compare/v1.64.0...v1.65.0) (2026-11-16)
+
+
+### Features
+
+* **eval-run:** treat all-skipped conditional judges as N/A ([#312](https://github.com/fullsend-ai/agent-eval-harness/issues/312)) ([b2a86d3](https://github.com/fullsend-ai/agent-eval-harness/commit/b2a86d3e3fb5cde4367c4bf4b0c2a96dcede6522)), closes [#311](https://github.com/fullsend-ai/agent-eval-harness/issues/311)
+
+# [1.64.0](https://github.com/fullsend-ai/agent-eval-harness/compare/v1.63.3...v1.64.0) (2026-11-13)
+
+
+### Bug Fixes
+
+* address review feedback on PR [#318](https://github.com/fullsend-ai/agent-eval-harness/issues/318) ([1b4abcf](https://github.com/fullsend-ai/agent-eval-harness/commit/1b4abcf9a519069504fa1553c1465ebb01683484))
+* omit exception messages from per-case failure log (PR [#318](https://github.com/fullsend-ai/agent-eval-harness/issues/318)) ([f81e4a3](https://github.com/fullsend-ai/agent-eval-harness/commit/f81e4a3bd05cbfc530d852f7d31a664cbc2b554e))
+* point to report.html/summary.yaml in case failure log (PR [#318](https://github.com/fullsend-ai/agent-eval-harness/issues/318)) ([a50327d](https://github.com/fullsend-ai/agent-eval-harness/commit/a50327db666c2a36c24bc101a669d1030a082fda))
+
+
+### Features
+
+* **#317:** log per-case judge failures after scoring ([a39336f](https://github.com/fullsend-ai/agent-eval-harness/commit/a39336fce6305281855c6221e4bd39bcd362200a)), closes [#317](https://github.com/fullsend-ai/agent-eval-harness/issues/317) [#317](https://github.com/fullsend-ai/agent-eval-harness/issues/317)
+
 ## [1.63.3](https://github.com/fullsend-ai/agent-eval-harness/compare/v1.63.2...v1.63.3) (2026-11-12)
 
 
