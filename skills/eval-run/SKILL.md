@@ -210,7 +210,8 @@ If `--baseline` was specified, also run pairwise comparison:
 python3 ${CLAUDE_SKILL_DIR}/scripts/score.py pairwise \
   --run-id <id> \
   --baseline <baseline_id> \
-  --config <config>
+  --config <config> \
+  [--parallelism <n>]
 ```
 
 `min_win_rate`: see [`data-pipeline.md`](references/data-pipeline.md).
