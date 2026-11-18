@@ -118,7 +118,7 @@ material it should have. The cause does not matter; three reach it:
 | --- | --- |
 | Staging left an entry out | a hardlinked or sparse file, a tree past a staging limit |
 | Staging could not copy content at all | an unreadable file or unlistable directory under a declared output |
-| The case record could not be **built** | an output file that cannot be read, a directory that cannot be listed, or a declared output resolving outside the case dir |
+| The case record could not be **built** | an output file that cannot be read, a directory that cannot be listed, a declared output resolving outside the case dir, or a case workspace that is missing or whose directory could not be opened (recorded by `collect.py`, raised by `_require_no_collection_loss`) |
 
 The first two are agent-judge staging and are recorded against that judge. The
 third happens before any judge runs, so it is recorded against **all** of them —

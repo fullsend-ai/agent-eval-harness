@@ -119,6 +119,24 @@ def test_a_dangling_case_link_is_recorded_as_lost(tmp_path, monkeypatch):
     assert recorded["c2"][UNLISTABLE_KEY] == ["c2"]
 
 
+def test_a_hostile_case_id_cannot_forge_a_log_line(tmp_path, monkeypatch,
+                                                   capsys):
+    """`case_order.yaml` is a source of ids reaching the per-case summary
+    print; a newline or a leading `::` must not forge a log line or a
+    workflow command, in the id or in the counts that repeat it."""
+    hostile = "::error::forged\nFORGED LINE"
+    ws = _workspace(tmp_path, case_order=("c0", "c1", hostile))
+    _, recorded = _collect(tmp_path, monkeypatch, ws)
+    assert recorded[hostile][UNLISTABLE_KEY] == [hostile]
+    captured = capsys.readouterr()
+    for stream in (captured.out, captured.err):
+        lines = stream.splitlines()
+        assert not [ln for ln in lines if ln.startswith("::")]
+        assert "FORGED LINE" not in lines
+        assert not [ln for ln in lines if ln.lstrip().startswith("FORGED")]
+    assert "\\nFORGED LINE" in captured.out
+
+
 @pytest.mark.parametrize("content", [
     None,                    # no case_order.yaml
     "- [unclosed\n",         # unparseable

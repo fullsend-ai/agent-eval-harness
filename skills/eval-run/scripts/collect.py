@@ -421,7 +421,7 @@ def main():
 
     for case_id, info in sorted(results.items()):
         counts = ", ".join(f"{k}={v}" for k, v in info.items())
-        print(f"  {case_id}: {counts}")
+        print(f"  {escape_log_text(case_id)}: {escape_log_text(counts)}")
 
     # Generate events.json from run-level stdout.log (shared across all cases)
     if config.traces.events:
@@ -568,7 +568,7 @@ def _collect_per_case(workspace, output_dir, config):
 
     for case_id, info in sorted(results.items()):
         counts = ", ".join(f"{k}={v}" for k, v in info.items())
-        print(f"  {case_id}: {counts}")
+        print(f"  {escape_log_text(case_id)}: {escape_log_text(counts)}")
 
     if not results:
         print("WARNING: no artifacts collected", file=sys.stderr)
