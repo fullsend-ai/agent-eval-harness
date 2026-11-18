@@ -220,3 +220,26 @@ def test_preflight_never_cleans_the_project_itself(tmp_path, runs):
                 "--clean", "--force", cwd=project)
     assert "SKIPPED (dangerous)" in proc.stderr, proc.stdout + proc.stderr
     assert cfg.is_file()
+
+
+def _render_params(eval_params):
+    sys.path.insert(0, str(SCRIPTS))
+    try:
+        from report import _render_eval_params
+        return _render_eval_params({"eval_params": eval_params})
+    finally:
+        sys.path.remove(str(SCRIPTS))
+
+
+def test_report_never_invents_a_skill_name(tmp_path):
+    """Prompt-mode runs record no `skill`; the report must not print `/skill`."""
+    html = _render_params({"execution_mode": "case", "skill_args": "do the thing"})
+    assert "/skill" not in html
+    assert "do the thing" in html
+    assert "Skill Args" not in html and "Arguments" in html
+
+
+def test_report_shows_the_skill_invocation_when_recorded(tmp_path):
+    html = _render_params({"skill": "plugin:foo", "skill_args": "--x 1"})
+    assert "/plugin:foo --x 1" in html
+    assert "Skill Args" in html

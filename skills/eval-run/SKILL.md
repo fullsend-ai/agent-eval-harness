@@ -20,7 +20,7 @@ Parse `$ARGUMENTS`:
 | `--subagent-model <model>` | no | `models.subagent` → falls back to skill model | Model for subagents (e.g., `claude-sonnet-4-6` while main is `claude-opus-4-7`) |
 | `--skill <name>` | no | from config | Override the skill to test |
 | `--run-id <id>` | no | `YYYY-MM-DD-<model>` | Identifier for this run |
-| `--run-dir <path>` | no | resolved from config + run id | Put the run in exactly this directory (CI). Its basename is the run id; a conflicting `--run-id` is an error. |
+| `--run-dir <path>` | no | resolved from config + run id | Put the run in exactly this directory; its basename is the run id |
 | `--cases <id> [<id> ...]` | no | all cases | Exact case IDs to run |
 | `--baseline <run-id>` | no | — | Previous run to compare against |
 | `--no-llm-judges` | no | false | Skip LLM judges (prompt, prompt_file, LLM builtins, agent). Run deterministic judges (check, Python builtins, external code). |
@@ -49,13 +49,13 @@ python3 ${CLAUDE_SKILL_DIR}/../../scripts/discover.py
 
 ### Run Directory
 
-Never build a run directory path yourself. The scripts resolve it from `--config` + `--run-id` with one shared resolver, so pass only those two and every step reads and writes the same place. To learn where the run lives (for reading `summary.yaml`, writing `analysis.md`, and the Harbor/EvalHub `--output`), ask the harness once:
+Never build a run directory path yourself. Get it from the harness:
 
 ```bash
 python3 ${CLAUDE_SKILL_DIR}/../../scripts/discover.py --config <config> --run-id <id>
 ```
 
-It prints one path; call it `<run-dir>` below. If `--run-dir <path>` was passed to `/eval-run`, `<run-dir>` is that path, and you pass `--run-dir <path>` in place of `--run-id <id>` to `preflight.py`, `execute.py`, `collect.py`, `score.py` (`judges`, `pairwise`, `regression`) and `report.py` (the run id is its basename; a `--baseline` is still an ordinary run under the default runs directory).
+Its output is `<run-dir>` below. For `--run-dir`, see [`references/execution-monitoring.md`](references/execution-monitoring.md).
 
 Check if the resolved config file exists:
 
@@ -65,9 +65,9 @@ test -f <config> && echo "CONFIG_EXISTS" || echo "NO_CONFIG"
 
 **If config is missing**: bootstrap via `/eval-analyze` (invoked through the Skill tool) — if `skills/` contains skills, suggest `/eval-analyze --skill <name>`; otherwise `/eval-analyze --prompt <path>` (prompt mode).
 
-Once config exists, read it to understand the eval setup — the skill under test, runner, dataset, outputs, judges, models, and any tool interception. The downstream scripts read the same config; you don't need to pass these fields through, just confirm they're present and warn the user about anything missing or surprising.
+Once config exists, read it to understand the eval setup (skill under test, runner, dataset, outputs, judges, models, tool interception). Scripts read the same config; just warn the user about anything missing or surprising.
 
-`inputs.tools` is claude-code-only (codex/cursor/fullsend reject it at load). For claude-code, if it has entries but the skill uses AskUserQuestion or external APIs, verify the handlers cover those tools — an unintercepted tool can hang headless execution.
+`inputs.tools` is claude-code-only (others reject it at load). If the skill uses AskUserQuestion or external APIs, verify the handlers cover them — an unintercepted tool can hang headless execution.
 
 Persist parsed flags:
 
@@ -95,7 +95,7 @@ If no cases found, stop and tell the user clearly:
 
 ## Step 2: Preflight Check
 
-Before setting up the workspace, verify the project's artifact directories are clean. Skills write to the project directory (not the workspace), so stale artifacts from previous runs contaminate results — wrong IDs, stale run reports, inflated file counts.
+Before setting up the workspace, verify the project's artifact directories are clean. Skills write to the project directory, so stale artifacts from previous runs contaminate results (wrong IDs, stale reports, inflated file counts).
 
 ```bash
 python3 ${CLAUDE_SKILL_DIR}/scripts/preflight.py \
@@ -104,11 +104,11 @@ python3 ${CLAUDE_SKILL_DIR}/scripts/preflight.py \
   [--baseline <baseline-id>]
 ```
 
-The script checks `tmp/` state files, whether `<run-dir>` already has results from a previous run, and (if `--baseline` is given) that the baseline run-id exists for this config.
+The script checks `tmp/` state files, whether `<run-dir>` already has results, and (with `--baseline`) that the baseline run exists.
 
 - **`CLEAN`**: proceed to workspace setup.
-- **`DIRTY`**: report the findings and ask the user to choose — *force clean* (`preflight.py --clean --force`, then proceed), *change run-id* (append a suffix like `-opus-v2`, then re-run preflight with `--clean` on the new id to avoid overwriting prior results), or *abort* for manual cleanup.
-- **`MISSING_BASELINE` (exit 2)**: the `--baseline` run-id wasn't found among this config's runs. The script lists nearby run-ids — confirm the correct one with the user before retrying.
+- **`DIRTY`**: report the findings and ask the user to choose — *force clean* (`preflight.py --clean --force`, then proceed), *change run-id* (append a suffix like `-opus-v2`, then re-run preflight with `--clean` on the new id), or *abort* for manual cleanup.
+- **`MISSING_BASELINE` (exit 2)**: the `--baseline` run-id wasn't found. The script lists nearby run-ids — confirm the right one with the user.
 
 ## Step 3: Prepare Workspace
 
@@ -130,9 +130,8 @@ If the case count is 0, stop — the filter matched nothing.
 
 ## Step 3a: Resolve Tool Interception (if `inputs.tools` configured)
 
-If eval.yaml has `inputs.tools` entries, this step is **mandatory for Claude Code**.
-Codex, Cursor and fullsend reject `inputs.tools` because their runtimes cannot consume the
-harness interception handlers. `workspace.py` emits a skeleton in
+If eval.yaml has `inputs.tools` entries, this step is **mandatory for Claude Code**
+(other runtimes reject `inputs.tools`). `workspace.py` emits a skeleton in
 `tool_handlers.yaml`; you must resolve each handler's `prompt` into concrete runtime
 checks (`input_filters`, `env_checks`, `case_overrides`). Do not skip this even when
 the eval.yaml is unchanged — the workspace is created fresh each time.
@@ -149,9 +148,9 @@ Write the resolved handlers back to `tool_handlers.yaml`.
 
 Run the eval headlessly against test cases. `execute.py` auto-detects the execution mode from the config: **skill mode** (`execution.skill` + `arguments`) invokes the skill, while **prompt mode** (`execution.prompt`) sends the prompt directly with no skill wrapper. For how the mode is selected and how templates are resolved, see `${CLAUDE_SKILL_DIR}/references/execution-modes.md`.
 
-In `case` mode (default), execute.py runs once per case with case-specific arguments and workspace — each case gets its own stdout.log and subagent transcripts. In `batch` mode, all cases run in a single invocation via batch.yaml.
+In `case` mode (default), execute.py runs once per case, each with its own stdout.log and subagent transcripts. In `batch` mode, all cases run in one invocation via batch.yaml.
 
-If `hooks:` is configured in eval.yaml, execute.py automatically runs lifecycle hooks at the appropriate points: `before_all` before any case executes, `before_each`/`after_each` around each case execution, and `after_all` after all cases complete (guaranteed, even on failure). Hook logs are written to `<run-dir>/hooks/`.
+If `hooks:` is configured, execute.py runs the lifecycle hooks itself (`before_all`, `before_each`/`after_each`, `after_all` — guaranteed, even on failure). Logs go to `<run-dir>/hooks/`.
 
 ```bash
 python3 ${CLAUDE_SKILL_DIR}/scripts/execute.py \
@@ -168,9 +167,9 @@ python3 ${CLAUDE_SKILL_DIR}/scripts/execute.py \
   [--parallelism <n>]
 ```
 
-Pass `--skill`/`--skill-args` only when the user overrode them on `/eval-run`; otherwise `execute.py` reads them from the config. Never pass `--skill` for a prompt-mode config.
+Pass `--skill`/`--skill-args` only to override the config (never `--skill` in prompt mode).
 
-**Launch with `run_in_background: true` and do NOT redirect its output** (no `>`, `|`, `tee`, `2>&1`) — a redirect diverts the stream Claude Code's background viewer reads and leaves it blank. You don't need one: `execute.py` mirrors its live console to `<output_dir>/console.log`.
+**Launch with `run_in_background: true` and do NOT redirect its output** (no `>`, `|`, `tee`, `2>&1`) — a redirect diverts the stream Claude Code's background viewer reads and leaves it blank. `execute.py` mirrors its console to `<output_dir>/console.log`.
 
 When it finishes, read `run_result.json` — if `exit_code` is non-zero, report the failure and stop. If `stderr.log` ends with a bg-wait-ceiling `ERROR:`, see the reference below. For session lifecycle, polling, problem detection, and CLI fallbacks, see [`references/execution-monitoring.md`](references/execution-monitoring.md).
 

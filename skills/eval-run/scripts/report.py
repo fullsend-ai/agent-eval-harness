@@ -1266,11 +1266,15 @@ def _render_eval_params(run_result):
         body += '<dl class="config-grid">\n' + "\n".join(chips) + '\n</dl>\n'
 
     skill_args = params.get("skill_args")
+    # Prompt-mode and multi-step runs record no `skill`: show the arguments
+    # alone rather than a made-up `/skill` invocation.
+    skill = params.get("skill")
+    invocation = f"/{skill} {skill_args}" if skill else skill_args
     if skill_args:
         body += (
             '<div class="run-command">'
-            '<span class="run-command-label">Skill Args</span>'
-            f'<pre><code>/{_esc(params.get("skill", "skill"))} {_esc(skill_args)}</code></pre>'
+            f'<span class="run-command-label">{"Skill Args" if skill else "Arguments"}</span>'
+            f'<pre><code>{_esc(invocation)}</code></pre>'
             '</div>\n'
         )
 
@@ -1282,7 +1286,7 @@ def _render_eval_params(run_result):
     # comma-joined view of the short params.
     preview_text = ""
     if skill_args:
-        preview_text = f'/{params.get("skill", "skill")} {skill_args}'
+        preview_text = invocation
     else:
         bits = [_fmt(k, params.get(k))
                 for _, k in short_fields if _fmt(k, params.get(k))]

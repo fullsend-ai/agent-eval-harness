@@ -97,6 +97,14 @@ list with exit_code 0 means the agent was silently blocked from tool calls
 (e.g. a nested Skill call missing from `permissions.allow`) and may have
 partially completed without failing.
 
+## Passing `--run-dir`
+
+If `--run-dir <path>` was passed to `/eval-run`, `<run-dir>` is that path, and
+you pass `--run-dir <path>` in place of `--run-id <id>` to `preflight.py`,
+`execute.py`, `collect.py`, `score.py` (`judges`, `pairwise`, `regression`) and
+`report.py`. The run id is the basename of the path. A `--baseline` is still an
+ordinary run under the default runs directory.
+
 ## CLI flag fallbacks
 
 Most execute.py flags fall back to eval.yaml config values:
