@@ -22,6 +22,26 @@ Scope stays as the issue sets it: case mode only. Batch-mode suites keep the cur
 
 Adopt the plan / case / aggregate topology from the issue, with the following decisions.
 
+```mermaid
+flowchart TD
+    PLAN["Plan job<br/>resolve refs · enumerate cases · emit matrix + run-id + case_order.yaml"]
+    PLAN -->|matrix| CASE
+    subgraph CASE ["Case job — one per case (matrix max-parallel)"]
+        FS["fullsend run<br/>(direct, as the job's main process)"]
+        FS -->|console inherits| LOG[("CI job log<br/>platform-processed")]
+        FS -->|files| RD[("run dir")]
+        RD --> MAP["mapping CLI<br/>(reads run dir only)"]
+        MAP --> RF["run_result.json + stdout.log"]
+        RF --> UP["upload slice:<br/>results files + case workspace"]
+    end
+    UP --> AGG
+    subgraph AGG ["Aggregate job (if: always)"]
+        ASM["assembler<br/>rebuild workspace · union provenance · surface drift"]
+        ASM --> CSR["collect.py · score.py · report.py<br/>(unchanged)"]
+    end
+    LOG -.->|"CI log API — Image:/Arch: (observed sandbox, temporary)"| ASM
+```
+
 ### Hooks
 
 Each phase in `agent_eval/hooks.py` maps to exactly one job, at the same position in the pipeline that it has today.
@@ -38,11 +58,17 @@ Some hooks don't port: a hook that mutates a shared in-process workspace, or tha
 
 ### Case-job artifact contract
 
-`collect.py` in case mode is not satisfied by a run directory alone. It requires `--workspace`, exits with an error when `workspace/cases/` is absent, scans each case workspace for the configured `outputs` and for modified files, and reads `case_order.yaml` from the workspace root to know which cases were selected. The aggregate job therefore cannot run it "unchanged" on `run_result.json` and `stdout.log` slices. Each case job uploads, as its slice:
+`collect.py` in case mode is not satisfied by a run directory alone. It requires `--workspace`, exits with an error when `workspace/cases/` is absent, scans each case workspace for the configured `outputs` and for modified files, and reads `case_order.yaml` from the workspace root to know which cases were selected. The aggregate job therefore cannot run it "unchanged" on result files alone. Each case job uploads, as its slice:
 
-- the run-dir files (`run_result.json`, `stdout.log`, and what the mapping CLI emits);
-- the complete executed case workspace, so that the collector sees the same tree it sees today. If the full tree is too large to ship, the minimum slice is exactly these four things: the files matching the configured `outputs` paths; the case's `.git` directory with its baseline commit, because modified-file detection runs `git diff --name-only HEAD` and `git ls-files --others` against that commit and silently returns no modified files when `.git` is absent; the working-tree contents of every file that detection would report, meaning each tracked file the agent edited and each new untracked file, outside the configured `outputs` paths and the harness directories and files; and `subagents/` when events are collected, because `collect.py` merges the transcripts there into `events.json` and `subagents` is a harness directory, so it never matches an `outputs` path and is never reported as a modified file. The working-tree contents are needed in addition to `.git`, because `.git` holds only the baseline commit, not the agent's edits: `collect.py` keeps a candidate only if the file exists in the case workspace, so an edited tracked file left out of the slice looks deleted and is dropped, and a new untracked file left out is never listed. A slice that lacks either `.git` or those working-tree files would silently lose modified-file evidence. The assembler keeps `.git`, the modified and new files, and `subagents/` when it rebuilds `<workspace>/cases/<id>/`, and a parity test for the assembler covers tracked edits and new files outside the output paths;
-- nothing else is needed for `case_order.yaml`: the plan job already enumerates and orders the selected cases, so it writes `case_order.yaml` once and publishes it alongside the matrix and run-id.
+- the results files (`run_result.json`, `stdout.log`) — the same shape for every runner. Fullsend produces them from the run directory through the mapping CLI; runners without a run directory (claude-code, codex) emit them from the structured stdout their runner captures, with no mapping step.
+- the complete executed case workspace, so the collector sees the same tree it sees today. If the full tree is too large to ship, the minimum slice is exactly:
+  - the files matching the configured `outputs` paths;
+  - the case's `.git` with its baseline commit (without it, modified-file detection silently returns nothing);
+  - the working-tree contents of every file that detection would report (`.git` holds the baseline, not the edits — an edited tracked file left out looks deleted and is dropped; a new untracked file left out is never listed);
+  - `subagents/` when events are collected (merged into `events.json`; a harness directory, so never an `outputs` match or a modified file).
+
+  The assembler keeps `.git`, the modified and new files, and `subagents/` when it rebuilds `<workspace>/cases/<id>/`; a parity test covers tracked edits and new files outside the output paths.
+- nothing else is needed for `case_order.yaml`: the plan job writes it once and publishes it alongside the matrix and run-id.
 
 Before it invokes the collector, the assembler reconstructs a workspace tree: `<workspace>/cases/<id>/` from each case's workspace slice, and `<workspace>/case_order.yaml` from the plan job's copy. It then calls `collect.py --workspace <workspace>` with no change to the collector. A selected case whose slice is missing keeps its entry in `case_order.yaml` with no workspace directory under `cases/`, so the collector records it as lost evidence (as it does today for a missing case workspace) instead of dropping it. If the slice upload turns out to be too large or too sensitive to ship, the alternative is a different collection stage that reads the configured output paths from per-case artifacts directly. That would be a collector change, to be decided in its own ADR, and not an unchanged collector.
 
@@ -54,7 +80,7 @@ Before it invokes the collector, the assembler reconstructs a workspace tree: `<
 - **Union in the assembler, with drift visible.** If all slices agree, the run-level value is that value. If they differ (for example, a runner image rolled mid-run), the assembler keeps each case's value, warns with the cases named, and reports the drift. It does not pick one value. Mixed versions within one run are a validity concern for the eval, not noise to smooth over.
 - **Observed `sandbox_image` / `sandbox_arch` from the CI job log.** The aggregate job fetches each case job's processed log through the CI log API and applies the existing `parse_sandbox_image` (`Image:` / `Arch:` lines) to the fetched text:
   - GitHub: `GET /repos/{owner}/{repo}/actions/jobs/{job_id}/logs`, with `GITHUB_TOKEN` granted `actions: read`. The aggregate job finds the job ids by listing the workflow run's jobs and matching the matrix job names.
-  - GitLab: `GET /projects/:id/jobs/:job_id/trace`, with a project access token that has the `read_api` scope, supplied to the aggregate job as a masked CI/CD variable. The default `CI_JOB_TOKEN` is not relied on: it is not known to be authorized for listing pipeline jobs or downloading another job's trace, and this has not been confirmed. The aggregate job finds the job ids by listing the pipeline's jobs (`GET /projects/:id/pipelines/:pipeline_id/jobs`). Using the job token instead would need the supported GitLab version and the job-token allowlist configuration to be stated and verified first.
+  - GitLab: `GET /projects/:id/jobs/:job_id/trace`, with a `read_api` project access token supplied to the aggregate job as a masked CI/CD variable; job ids come from listing the pipeline's jobs (`GET /projects/:id/pipelines/:pipeline_id/jobs`). The default `CI_JOB_TOKEN` is not relied on — its authorization for these endpoints is unverified, and using it would need the supported GitLab version and job-token allowlist confirmed first.
   - Failures are surfaced, not hidden. An authorization failure, a missing job, or an expired log on either platform is an error that names the case and the HTTP status, and the run's provenance records the image as unresolved. It is not treated as a log with no `Image:` line.
 
   The authentication glue is platform-specific and the parsing is shared. One normalisation is needed: GitHub prefixes every log line with an ISO-8601 timestamp, and `_IMAGE_LINE_RE` / `_ARCH_LINE_RE` only allow non-word characters before the label, so the prefix is stripped before parsing. `Image:` lines survive GitHub's `***` masking because they are not secrets. GitLab's trace is the raw console, subject only to masked CI/CD variables. `sandbox_image_source` stays `fullsend-output` (the text is fullsend's console, read from a different place), and the harness-file fallback applies only when the log was fetched successfully and contains no `Image:` line.
@@ -66,6 +92,8 @@ The matrix and the assembler are runner-agnostic, and console capture is removed
 
 - **fullsend**: the case job inherits the console into the job log and reads results from the run directory through the mapping CLI.
 - **Runners without a run directory** (claude-code's stream-json on stdout, codex's `--json`): the case job collects results from the invocation's structured stdout, which plays the run directory's role. The human console (stderr) inherits to the job log, optionally tee'd to a per-case file. This is what production's `run-claude.sh` already does.
+
+The fullsend runner is the only one that interposes on a console today; the others already collect their results from structured output (or API responses) with no console processing to remove. For them the topology is an opt-in benefit — isolation, per-case timeouts and logs — with no runner change beyond the optional stderr inheritance noted above.
 
 Each runner therefore contributes one file-reading "results → `run_result.json`" step. Nothing in the plan or aggregate job depends on which runner produced a slice.
 
@@ -100,7 +128,7 @@ The alternative is therefore rejected on two grounds: an unstable format to pars
 
 ## Consequences
 
-- Each case's job log is its console: live, unfiltered, isolated per case in the CI UI. The harness no longer tracks fullsend's console shapes, and the `stderr.log` artifact is replaced by the CI job log as the console of record.
+- Each case's job log is its console: live, unfiltered, isolated per case in the CI UI. The harness no longer tracks fullsend's console shapes, and the `stderr.log` artifact is replaced by the CI job log as the console of record (runners whose console is stderr may still tee it per case, per Runner scoping).
 - Parallelism and timeouts become CI concerns: matrix concurrency replaces `--parallelism`, and per-case job timeouts replace the shared run budget. Platform limits apply. GitHub caps a matrix at 256 jobs, so larger suites need chunking in the plan job, and every case job pays runner startup and tool installation.
 - Provenance for `sandbox_image` depends on CI log access (a token scope and log retention) until fullsend writes it into the run directory. A local run without capture has no console to parse, so it falls back to the harness-file image (`sandbox_image_source: harness-file`) until then.
 - Hooks that relied on a shared process or workspace across cases must be rewritten as per-case hooks or CI setup steps. This should be called out in the hooks reference when the CI path ships.
