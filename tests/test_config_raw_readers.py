@@ -60,7 +60,8 @@ ALLOWED_YAML_READERS = {
     "skills/eval-mlflow/scripts/from_traces.py": {"_attach_input_artifacts": "batch/input YAML"},
     "skills/eval-mlflow/scripts/log_results.py": {"main": "summary.yaml"},
     "skills/eval-mlflow/scripts/sync_dataset.py": {"_extract_field": "case input.yaml"},
-    "skills/eval-run/scripts/collect.py": {"main": "batch case order"},
+    "skills/eval-run/scripts/collect.py": {"main": "batch case order",
+                                           "_selected_case_ids": "per-case case order"},
     "skills/eval-run/scripts/execute.py": {
         "main": "batch.yaml", "_execute_per_case": "case order / meta",
         "_merge_input_overrides": "case input.yaml", "_run_multi_step_case": "case input.yaml",

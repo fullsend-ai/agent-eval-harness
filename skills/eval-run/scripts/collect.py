@@ -421,7 +421,7 @@ def main():
 
     for case_id, info in sorted(results.items()):
         counts = ", ".join(f"{k}={v}" for k, v in info.items())
-        print(f"  {case_id}: {counts}")
+        print(f"  {escape_log_text(case_id)}: {escape_log_text(counts)}")
 
     # Generate events.json from run-level stdout.log (shared across all cases)
     if config.traces.events:
@@ -451,6 +451,34 @@ def main():
         print("WARNING: no artifacts collected", file=sys.stderr)
 
 
+def _selected_case_ids(workspace):
+    """The case ids selected for this run, from ``case_order.yaml``.
+
+    The same list `execute.py::_execute_per_case` iterates, in order and
+    without duplicates. A missing or unparseable file yields ``[]`` — the
+    caller then collects exactly what the workspace holds, as before. An
+    entry whose id is not a single plain path component is skipped: it
+    cannot name a ``cases/<id>`` directory, and it must not become a path
+    under the run's output directory.
+    """
+    try:
+        with open(workspace / "case_order.yaml") as f:
+            case_order = yaml.safe_load(f)
+    except (OSError, ValueError, yaml.YAMLError):  # ValueError: undecodable
+        return []
+    if not isinstance(case_order, list):
+        return []
+    ids = []
+    for entry in case_order:
+        cid = entry.get("case_id") if isinstance(entry, dict) else entry
+        if (not isinstance(cid, str) or cid in ("", ".", "..")
+                or Path(cid).name != cid):
+            continue
+        if cid not in ids:
+            ids.append(cid)
+    return ids
+
+
 def _collect_per_case(workspace, output_dir, config):
     """Collect artifacts from per-case workspaces.
 
@@ -467,9 +495,23 @@ def _collect_per_case(workspace, output_dir, config):
     output_dir.mkdir(parents=True, exist_ok=True)
     results = {}
 
+    case_dirs = sorted(d for d in cases_dir.iterdir() if d.is_dir())
+
+    # A selected case the loop below will never visit — its workspace is
+    # gone, or is no longer a directory — would otherwise leave no manifest
+    # entry, and `score.py::_require_no_collection_loss` reads that silence
+    # as "nothing lost": the case is judged on an empty directory, and a
+    # judge that errors drops it from the mean (#321). Record it as lost,
+    # like a case directory that cannot be opened, so it counts as
+    # incomplete instead of thinning the denominator.
+    enumerated = {d.name for d in case_dirs}
+    for case_id in _selected_case_ids(workspace):
+        if case_id not in enumerated:
+            _note_lost(results, output_dir, case_id, case_id)
+
     ws_fd = os.open(workspace, _ROOT_FLAGS)
     try:
-        for case_dir in sorted(d for d in cases_dir.iterdir() if d.is_dir()):
+        for case_dir in case_dirs:
             case_id = case_dir.name
             # The case directory is the source root, and it is agent-written
             # too: `is_dir()` follows symlinks, so `cases/<id> -> /outside`
@@ -526,7 +568,7 @@ def _collect_per_case(workspace, output_dir, config):
 
     for case_id, info in sorted(results.items()):
         counts = ", ".join(f"{k}={v}" for k, v in info.items())
-        print(f"  {case_id}: {counts}")
+        print(f"  {escape_log_text(case_id)}: {escape_log_text(counts)}")
 
     if not results:
         print("WARNING: no artifacts collected", file=sys.stderr)
