@@ -193,9 +193,12 @@ def main():
                 or project_root.resolve().is_relative_to(run_path.resolve())):
             print(f"  SKIPPED (dangerous): {run_dir}", file=sys.stderr)
             refused.append(str(run_dir))
-        else:
+        elif run_path.exists():
             shutil.rmtree(run_path)
             print(f"  cleaned: {run_dir}")
+        else:
+            # Already removed with an enclosing state directory (e.g. tmp/).
+            print(f"  cleaned: {run_dir} (removed with enclosing directory)")
 
     # A refused target still holds stale artifacts; don't report CLEAN.
     if refused:

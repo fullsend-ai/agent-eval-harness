@@ -117,7 +117,7 @@ python3 ${CLAUDE_SKILL_DIR}/../../scripts/discover.py
 - **Multiple configs found**: present the list and ask the user which eval to optimize
 - **No configs found**: suggest running `/eval-analyze` first
 
-After selecting a config, resolve each run directory with `python3 ${CLAUDE_SKILL_DIR}/../../scripts/discover.py --config <config> --run-id <id>`. The `$AGENT_EVAL_RUNS_DIR/<eval-name>/<id>` paths below are that directory; don't derive `<eval-name>` yourself.
+Get run directories (the `<eval-name>/<id>` paths below) from `discover.py --config <config> --run-id <id>`.
 
 ```bash
 mkdir -p tmp

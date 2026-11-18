@@ -224,6 +224,20 @@ def test_preflight_never_cleans_the_project_itself(tmp_path, runs):
     assert cfg.is_file()
 
 
+def test_preflight_cleans_a_run_inside_a_state_directory(tmp_path, runs):
+    project = tmp_path / "proj"
+    run = project / "tmp" / "r1"
+    run.mkdir(parents=True)
+    (run / "summary.yaml").write_text("judges: {}\n")
+    cfg = _config(project, _SKILL_AND_NAME)
+    proc = _run(SCRIPTS / "preflight.py", "--config", cfg, "--run-dir", run,
+                "--clean", "--force", cwd=project)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "Traceback" not in proc.stderr
+    assert proc.stdout.rstrip().endswith("CLEAN")
+    assert not run.exists()
+
+
 def _render_params(eval_params):
     sys.path.insert(0, str(SCRIPTS))
     try:
