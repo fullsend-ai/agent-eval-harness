@@ -32,7 +32,7 @@ flowchart TD
         FS -->|files| RD[("run dir")]
         RD --> MAP["mapping CLI<br/>(reads run dir only)"]
         MAP --> RF["run_result.json + stdout.log"]
-        RF --> UP["upload slice:<br/>results files + case workspace"]
+        RF --> UP["upload slice:<br/>results files + hook/step evidence + case workspace"]
     end
     UP --> AGG
     subgraph AGG ["Aggregate job (if: always)"]
@@ -68,9 +68,12 @@ Some hooks don't port: a hook that mutates a shared in-process workspace, or tha
   - `subagents/` when events are collected (merged into `events.json`; a harness directory, so never an `outputs` match or a modified file).
 
   The assembler keeps `.git`, the modified and new files, and `subagents/` when it rebuilds `<workspace>/cases/<id>/`; a parity test covers tracked edits and new files outside the output paths.
+- the harness-generated evidence that `execute.py` writes into the case's results directory, separate from the executed workspace, and that `score.py` reads from `runs/<suite>/<run_id>/cases/<id>/`. Neither `collect.py` nor the assembler can regenerate it:
+  - `hook_outputs.yaml` (the case's merged hook `data`, global from the plan job overlaid by `before_each`/`after_each`), which populates `outputs.hook_outputs` for hook-data judges. The case job writes it, because it is the job that holds the merged data.
+  - `steps/<step-id>/stdout.log` (and `stderr.log` when present) for each executed step of a multi-step case, from which `score.py` builds step-scoped conversation and events.
 - nothing else is needed for `case_order.yaml`: the plan job writes it once and publishes it alongside the matrix and run-id.
 
-Before it invokes the collector, the assembler reconstructs a workspace tree: `<workspace>/cases/<id>/` from each case's workspace slice, and `<workspace>/case_order.yaml` from the plan job's copy. It then calls `collect.py --workspace <workspace>` with no change to the collector. A selected case whose slice is missing keeps its entry in `case_order.yaml` with no workspace directory under `cases/`, so the collector records it as lost evidence (as it does today for a missing case workspace) instead of dropping it. If the slice upload turns out to be too large or too sensitive to ship, the alternative is a different collection stage that reads the configured output paths from per-case artifacts directly. That would be a collector change, to be decided in its own ADR, and not an unchanged collector.
+Before it invokes the collector, the assembler reconstructs a workspace tree: `<workspace>/cases/<id>/` from each case's workspace slice, and `<workspace>/case_order.yaml` from the plan job's copy. It also restores each case's results-directory evidence (`hook_outputs.yaml`, `steps/`) under `runs/<suite>/<run_id>/cases/<id>/`, unmodified, so the scorer reads it where it does today. Two parity cases cover this: a hook-data judge and a step-scoped judge, each producing the same result from assembled slices as from the in-process path. The assembler then calls `collect.py --workspace <workspace>` with no change to the collector. A selected case whose slice is missing keeps its entry in `case_order.yaml` with no workspace directory under `cases/`, so the collector records it as lost evidence (as it does today for a missing case workspace) instead of dropping it. If the slice upload turns out to be too large or too sensitive to ship, the alternative is a different collection stage that reads the configured output paths from per-case artifacts directly. That would be a collector change, to be decided in its own ADR, and not an unchanged collector.
 
 ### Provenance
 
