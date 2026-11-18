@@ -5244,12 +5244,14 @@ class PairwiseResult:
 
 def compare_runs(run_a_dir, run_b_dir, config, case_ids,
                  prompt=None, prompt_file=None, model=None,
-                 provider_options=None, verdict=None):
+                 provider_options=None, verdict=None, parallelism=None):
     """Compare two runs using position-swapped LLM judge.
 
     `provider_options` is the pairwise judge's `JudgeConfig.provider_options`
     (routing/fallbacks/max_tokens for an `openrouter:/` model); `verdict` the
     spec 015 transport policy (defaults to `models.judge_verdict`).
+    `parallelism` is the max cases compared concurrently (see
+    `_judge_parallelism`).
     """
     comparison_prompt = prompt
     if not comparison_prompt and prompt_file:
@@ -5340,7 +5342,7 @@ def compare_runs(run_a_dir, run_b_dir, config, case_ids,
             result.error = f"BA failed: {err}"
         return result
 
-    parallelism = min(len(case_ids), os.cpu_count() or 4)
+    parallelism = _judge_parallelism(parallelism, config, len(case_ids))
     results = []
     completed = 0
     lock = threading.Lock()
@@ -6468,6 +6470,7 @@ def cmd_pairwise(args):
             provider_options=(pairwise_jc.provider_options
                               if pairwise_jc else None),
             verdict=(pairwise_jc.verdict or None) if pairwise_jc else None,
+            parallelism=getattr(args, "parallelism", None),
         )
         if "error" in r:
             print(f"ERROR: {r['error']}", file=sys.stderr)
@@ -6575,6 +6578,10 @@ def main():
     pw_p.add_argument("--samples", type=int, default=None,
                       help="Override per-judge samples config: run the comparison "
                            "N times and record verdict stability")
+    pw_p.add_argument("--parallelism", type=int, default=None,
+                      help="Max cases judged concurrently (default: eval.yaml "
+                           "execution.parallelism, else CPU count; capped at "
+                           "the number of cases)")
 
     # regression
     reg_p = subparsers.add_parser("regression", help="Threshold checks")

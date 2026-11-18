@@ -132,3 +132,53 @@ def test_cli_flag_reaches_case_judging(tmp_path, monkeypatch):
         except SystemExit as e:
             assert not e.code
     assert spy.max_workers[0] == 7
+
+
+def _pairwise_workers(config, tmp_path, n_cases, **kwargs):
+    case_ids = [f"case-{i:03d}" for i in range(n_cases)]
+    for side in ("a", "b"):
+        for cid in case_ids:
+            (tmp_path / side / "cases" / cid).mkdir(parents=True)
+    spy = _Spy()
+    with patch("score.ThreadPoolExecutor", spy), \
+            patch("score._get_anthropic_client", return_value=object()):
+        result = sc.compare_runs(tmp_path / "a", tmp_path / "b", config,
+                                 case_ids, model="anthropic:/judge", **kwargs)
+    assert "error" not in result, result
+    assert spy.max_workers, "compare_runs did not create a pool"
+    return spy.max_workers[0]
+
+
+def test_configured_parallelism_reaches_pairwise(tmp_path):
+    assert _pairwise_workers(_config(15), tmp_path, 20) == 15
+
+
+def test_explicit_parallelism_overrides_config_in_pairwise(tmp_path):
+    assert _pairwise_workers(_config(15), tmp_path, 20, parallelism=6) == 6
+
+
+def test_pairwise_parallelism_is_capped_at_case_count(tmp_path):
+    assert _pairwise_workers(_config(15), tmp_path, 4) == 4
+
+
+def test_pairwise_cli_flag_reaches_compare_runs(tmp_path, monkeypatch):
+    config_path = tmp_path / "eval.yaml"
+    config_path.write_text(
+        "name: t\nexecution: {mode: case, parallelism: 15}\n"
+        "models: {judge: 'anthropic:/judge'}\n"
+        "judges:\n  - name: ok\n    check: \"return (True, 'ok')\"\n")
+    runs = tmp_path / "runs"
+    _cases(runs / "t" / "run-a" / "cases", 20)
+    (runs / "t" / "run-b").mkdir(parents=True)
+    monkeypatch.setenv("AGENT_EVAL_RUNS_DIR", str(runs))
+    monkeypatch.setattr(sys, "argv", [
+        "score.py", "pairwise", "--run-id", "run-a", "--baseline", "run-b",
+        "--config", str(config_path), "--parallelism", "7"])
+    spy = _Spy()
+    with patch("score.ThreadPoolExecutor", spy), \
+            patch("score._get_anthropic_client", return_value=object()):
+        try:
+            sc.main()
+        except SystemExit as e:
+            assert not e.code
+    assert spy.max_workers[0] == 7
