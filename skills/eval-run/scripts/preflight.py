@@ -155,6 +155,14 @@ def main():
         print(f"\n{total} stale files from previous run(s).")
         sys.exit(1)
 
+    # shutil.rmtree refuses a symlinked directory; fail up front, before any
+    # state directory has been cleaned, rather than with a traceback halfway.
+    if run_exists and (project_root / run_dir).is_symlink():
+        print(f"ERROR: {run_dir} is a symlink; refusing to clean it. Pass the "
+              f"real directory as --run-dir (or remove the link by hand).",
+              file=sys.stderr)
+        sys.exit(1)
+
     # Confirm before cleaning — require --force in non-interactive mode
     targets = sorted(dirty.keys())
     if run_exists:

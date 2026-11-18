@@ -159,7 +159,7 @@ python3 ${CLAUDE_SKILL_DIR}/scripts/execute.py \
   [--skill <skill_name>] \
   [--skill-args "<skill arguments>"] \
   --model <model> \
-  --run-id <id> \
+  --run-dir <run-dir> \
   [--agent <runner>] \
   [--subagent-model <model>] \
   [--mlflow-experiment <name>] \

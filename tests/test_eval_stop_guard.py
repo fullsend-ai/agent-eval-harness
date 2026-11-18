@@ -382,6 +382,8 @@ def test_pidfile_write_precedes_heavy_imports():
 @pytest.mark.parametrize("argv,expected", [
     (["--output", "RUNDIR", "--config", "x.yaml"], True),
     (["--config", "x.yaml", "--output=RUNDIR"], True),
+    (["--run-dir", "RUNDIR", "--config", "x.yaml"], True),
+    (["--config", "x.yaml", "--run-dir=RUNDIR"], True),
     (["--config", "x.yaml"], False),          # no --output -> no write
     (["--output"], False),                    # dangling flag -> no crash
 ])

@@ -141,9 +141,11 @@ def _early_pidfile(argv):
 
     ``--run-dir``/``--output`` is scraped by hand rather than via argparse so
     the write does not wait on the parser, the config load, or the imports
-    below. Best effort: on any miss (including the default, config-resolved run
-    directory) ``main()`` still calls ``_write_pidfile`` once the run directory
-    is resolved, so the guard degrades to a slightly later write, never to none.
+    below. SKILL.md passes the harness-resolved ``<run-dir>`` as ``--run-dir``
+    so this path is the normal one. Best effort: when only ``--config`` +
+    ``--run-id`` are given (a config-resolved run directory) there is nothing to
+    scrape, and ``main()`` calls ``_write_pidfile`` once the run directory is
+    resolved, so the guard degrades to a slightly later write, never to none.
     """
     out = None
     for i, token in enumerate(argv):
@@ -454,9 +456,10 @@ def main():
     # viewer). The real stdout/stderr streams still receive everything.
     _setup_console_log(output_dir)
 
-    # Fallback for the Stop-guard pidfile: normally already written by
-    # _early_pidfile() before the imports at the top of this module. No-op
-    # unless that scrape missed (e.g. an --output form it didn't recognise).
+    # Fallback for the Stop-guard pidfile: already written by _early_pidfile()
+    # before the imports at the top of this module when --run-dir/--output was
+    # passed (SKILL.md does). Otherwise (config-resolved run directory) this is
+    # the first write, after the imports and config load.
     _write_pidfile(output_dir)
 
     # Resolve skill args: CLI override > config > empty

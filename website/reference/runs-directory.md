@@ -24,7 +24,11 @@ export AGENT_EVAL_RUNS_DIR=eval/runs   # default
     the path yourself — print it with
     `python3 scripts/discover.py --config <config> --run-id <id>`, or choose it
     outright with `--run-dir` (its basename is the run id; a conflicting `--run-id`
-    is an error). `report.html`, `run_result.json`, and `cases/` are siblings inside
+    is an error). On `execute.py` and `collect.py`, `--output` remains accepted as an
+    alias of `--run-dir` and is no longer required; the run id is then the directory's
+    basename. `run_result.json` `eval_params` records `skill` only for skill-mode runs
+    (prompt-mode and multi-step runs omit it), so consumers should treat it as
+    optional. `report.html`, `run_result.json`, and `cases/` are siblings inside
     the run directory.
 
 !!! note "Optimization rollouts live in a parallel root"

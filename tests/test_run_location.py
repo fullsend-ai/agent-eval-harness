@@ -183,6 +183,19 @@ def test_eval_run_skill_md_never_builds_a_run_path():
     assert json.dumps("discover.py --config <config> --run-id <id>")[1:-1] in text
 
 
+def test_eval_run_skill_md_launches_execute_with_run_dir():
+    """The default launch must hand execute.py the resolved --run-dir.
+
+    Only an explicit --run-dir/--output lets execute.py write its Stop-guard
+    pidfile before the heavy imports; --config + --run-id alone would leave the
+    startup window unprotected.
+    """
+    text = (ROOT / "skills" / "eval-run" / "SKILL.md").read_text()
+    block = text.split("scripts/execute.py", 1)[1].split("```", 1)[0]
+    assert "--run-dir <run-dir>" in block
+    assert "--run-id" not in block
+
+
 def test_preflight_checks_the_resolved_directory(tmp_path, runs):
     cfg = _config(tmp_path, _SKILL_AND_NAME)
     run = runs / "plugin:foo" / "r1"
@@ -236,6 +249,26 @@ def test_preflight_cleans_a_run_inside_a_state_directory(tmp_path, runs):
     assert "Traceback" not in proc.stderr
     assert proc.stdout.rstrip().endswith("CLEAN")
     assert not run.exists()
+
+
+def test_preflight_refuses_to_clean_a_symlinked_run_dir(tmp_path, runs):
+    project = tmp_path / "proj"
+    real = tmp_path / "real" / "r1"
+    real.mkdir(parents=True)
+    (real / "summary.yaml").write_text("judges: {}\n")
+    project.mkdir()
+    link = project / "r1"
+    link.symlink_to(real, target_is_directory=True)
+    state = project / "tmp"
+    state.mkdir()
+    (state / "stale.txt").write_text("x")
+    cfg = _config(project, _SKILL_AND_NAME)
+    proc = _run(SCRIPTS / "preflight.py", "--config", cfg, "--run-dir", link,
+                "--clean", "--force", cwd=project)
+    assert proc.returncode == 1 and "symlink" in proc.stderr
+    assert "Traceback" not in proc.stderr
+    assert (real / "summary.yaml").exists()
+    assert (state / "stale.txt").exists()  # nothing cleaned before refusing
 
 
 def _render_params(eval_params):
