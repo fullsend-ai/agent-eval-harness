@@ -55,6 +55,7 @@ with the right fields from them alone? Builtin generation prompts for it live in
 agent_eval/              # Python package (config, runner, state)
   config.py              # EvalConfig from eval.yaml (+ resolve_workspace_source)
   state.py               # Shared state persistence (key-value store)
+  run_location.py        # The one run-dir resolver (--config + --run-id, or --run-dir)
   workspace_provisioning.py # Materialize shared {dest,source} workspace.files (local + Harbor + S3 export)
   agent/
     base.py              # EvalRunner ABC + RunResult

@@ -15,10 +15,17 @@ export AGENT_EVAL_RUNS_DIR=eval/runs   # default
 ```
 
 !!! note "Scoping by eval name"
-    When a config declares a `name`, scripts resolve the base as
-    `$AGENT_EVAL_RUNS_DIR/<eval-name>/<run-id>/`. With no name the run sits directly
-    under the base. Either way, `report.html`, `run_result.json`, and `cases/` are
-    siblings inside the run directory.
+    A run lives at `$AGENT_EVAL_RUNS_DIR/<eval-name>/<run-id>/`. `<eval-name>` is the
+    skill under test (`execution.skill`) when there is one, so a config with both
+    `skill: plugin:foo` and `name: foo-eval` runs under `plugin:foo/`; otherwise the
+    config `name`, then the config's directory or file name. Every eval-run script
+    (`execute.py`, `collect.py`, `score.py`, `report.py`) resolves it from `--config` +
+    `--run-id` with one shared resolver (`agent_eval/run_location.py`), so never build
+    the path yourself — print it with
+    `python3 scripts/discover.py --config <config> --run-id <id>`, or choose it
+    outright with `--run-dir` (its basename is the run id; a conflicting `--run-id`
+    is an error). `report.html`, `run_result.json`, and `cases/` are siblings inside
+    the run directory.
 
 !!! note "Optimization rollouts live in a parallel root"
     A [cap-evolve campaign](../guides/optimize-capevolve.md) writes one ordinary run

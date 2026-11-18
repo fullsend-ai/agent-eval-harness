@@ -44,6 +44,7 @@ from agent_eval.config import (
     _validate_path_segment,
 )
 from agent_eval.run_location import RunLocationError, resolve_run_dir
+from agent_eval.run_location import runs_root as _runs_base
 from agent_eval.judge_status import (ERROR, FAIL, SKIP, classify_judge_result,
                                      judge_score_ranges)
 from agent_eval.prompt_backends import (
@@ -71,7 +72,7 @@ if not _TEMPLATE_LOGGER.handlers:
 
 def _get_runs_dir(eval_name: str = ""):
     """Get runs directory from env or default, optionally scoped by eval name."""
-    base = Path(os.environ.get("AGENT_EVAL_RUNS_DIR", "eval/runs"))
+    base = _runs_base()
     if eval_name:
         if not _is_valid_eval_name(eval_name):
             raise ValueError(f"Invalid eval name for path: {eval_name!r}")
@@ -6211,7 +6212,9 @@ def _run_location(args, config):
         if not run_dir.is_dir():
             print(f"ERROR: --run-dir is not a directory: {run_dir}", file=sys.stderr)
             sys.exit(1)
-    return run_dir.parent, run_id
+        return run_dir.parent, run_id
+    # == run_dir.parent: _get_runs_dir builds on the same runs_root().
+    return _get_runs_dir(config.eval_name()), run_id
 
 
 def format_case_failures(per_case, score_ranges):
@@ -6408,12 +6411,13 @@ def cmd_judges(args):
 
 def cmd_pairwise(args):
     config = EvalConfig.from_yaml(args.config)
-    runs_dir = _get_runs_dir(config.eval_name())
+    runs_dir, args.run_id = _run_location(args, config)
     case_dirs = _get_case_dirs(args.run_id, runs_dir)
     case_ids = [d.name for d in case_dirs]
 
     run_dir = runs_dir / args.run_id
-    baseline_dir = runs_dir / args.baseline
+    # Like report.py: the baseline is an ordinary run even under --run-dir.
+    baseline_dir = _get_runs_dir(config.eval_name()) / args.baseline
 
     if not baseline_dir.exists():
         print(f"Baseline not found: {baseline_dir}", file=sys.stderr)
@@ -6486,7 +6490,7 @@ def cmd_pairwise(args):
 
 def cmd_regression(args):
     config = EvalConfig.from_yaml(args.config)
-    runs_dir = _get_runs_dir(config.eval_name())
+    runs_dir, args.run_id = _run_location(args, config)
     summary_path = runs_dir / args.run_id / "summary.yaml"
     if not summary_path.exists():
         print(f"No summary found. Run judges first.", file=sys.stderr)
@@ -6498,7 +6502,7 @@ def cmd_regression(args):
     current_agg = summary.get("judges", {})
     baseline_agg = None
     if args.baseline:
-        baseline_path = runs_dir / args.baseline / "summary.yaml"
+        baseline_path = _get_runs_dir(config.eval_name()) / args.baseline / "summary.yaml"
         if baseline_path.exists():
             with open(baseline_path) as f:
                 baseline_agg = (yaml.safe_load(f) or {}).get("judges", {})
@@ -6549,7 +6553,11 @@ def main():
 
     # pairwise
     pw_p = subparsers.add_parser("pairwise", help="Pairwise comparison")
-    pw_p.add_argument("--run-id", required=True)
+    pw_where = pw_p.add_mutually_exclusive_group(required=True)
+    pw_where.add_argument("--run-id", help="Run under $AGENT_EVAL_RUNS_DIR/<eval-name>/")
+    pw_where.add_argument("--run-dir", help="The run directory itself (its basename is the "
+                                            "run id); --baseline still resolves under "
+                                            "$AGENT_EVAL_RUNS_DIR/<eval-name>/")
     pw_p.add_argument("--baseline", required=True)
     pw_p.add_argument("--config", required=True)
     pw_p.add_argument("--judge", default=None,
@@ -6564,7 +6572,11 @@ def main():
 
     # regression
     reg_p = subparsers.add_parser("regression", help="Threshold checks")
-    reg_p.add_argument("--run-id", required=True)
+    reg_where = reg_p.add_mutually_exclusive_group(required=True)
+    reg_where.add_argument("--run-id", help="Run under $AGENT_EVAL_RUNS_DIR/<eval-name>/")
+    reg_where.add_argument("--run-dir", help="The run directory itself (its basename is the "
+                                             "run id); --baseline still resolves under "
+                                             "$AGENT_EVAL_RUNS_DIR/<eval-name>/")
     reg_p.add_argument("--config", required=True)
     reg_p.add_argument("--baseline", default=None)
 

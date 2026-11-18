@@ -25,12 +25,13 @@ Usage:
 import agent_eval._bootstrap  # noqa: F401 — auto-activate venv
 
 import argparse
-import os
 import shutil
 import sys
 from pathlib import Path
 
 from agent_eval.config import EvalConfig, _validate_path_segment
+from agent_eval.run_location import RunLocationError, resolve_run_dir
+from agent_eval.run_location import runs_root as _runs_base
 
 
 # State directories that skills write to between runs
@@ -67,7 +68,12 @@ def main():
     parser.add_argument("--force", action="store_true",
                         help="Skip confirmation prompt (for non-interactive use)")
     parser.add_argument("--run-id", default=None,
-                        help="Also check if eval/runs/<id> already exists")
+                        help="Also check if the run directory "
+                             "($AGENT_EVAL_RUNS_DIR/<eval_name>/<id>) already exists")
+    parser.add_argument("--run-dir", default=None,
+                        help="Check this run directory instead (its basename is the run "
+                             "id; a conflicting --run-id is an error). A --baseline "
+                             "still resolves under $AGENT_EVAL_RUNS_DIR/<eval_name>/.")
     parser.add_argument("--baseline", default=None,
                         help="Verify the given baseline run-id exists before continuing")
     args = parser.parse_args()
@@ -80,8 +86,16 @@ def main():
 
     config = EvalConfig.from_yaml(args.config)
     project_root = Path.cwd()
-    runs_base = Path(os.environ.get("AGENT_EVAL_RUNS_DIR", "eval/runs"))
-    runs_dir = runs_base / config.eval_name()
+    runs_dir = _runs_base() / config.eval_name()
+    # The run directory comes from the resolver every eval-run script shares,
+    # so preflight checks exactly the directory execute.py will write.
+    run_dir = None
+    if args.run_id or args.run_dir:
+        try:
+            run_dir, args.run_id = resolve_run_dir(config, args.run_id, args.run_dir)
+        except RunLocationError as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            sys.exit(1)
 
     # 0. Baseline existence — fail fast before any expensive setup
     if args.baseline:
@@ -114,7 +128,7 @@ def main():
     # 2. Previous run output
     run_exists = False
     if args.run_id:
-        run_path = project_root / runs_dir / args.run_id
+        run_path = project_root / run_dir
         if run_path.exists() and any(run_path.iterdir()):
             run_exists = True
 
@@ -133,9 +147,9 @@ def main():
         print(f"  {label}: {count} files — {', '.join(examples)}{suffix}")
 
     if run_exists:
-        run_path = project_root / runs_dir / args.run_id
+        run_path = project_root / run_dir
         run_files = _find_files(run_path)
-        print(f"  {runs_dir}/{args.run_id}: {len(run_files)} files (previous run)")
+        print(f"  {run_dir}: {len(run_files)} files (previous run)")
 
     if not args.clean:
         print(f"\n{total} stale files from previous run(s).")
@@ -144,7 +158,7 @@ def main():
     # Confirm before cleaning — require --force in non-interactive mode
     targets = sorted(dirty.keys())
     if run_exists:
-        targets.append(f"{runs_dir}/{args.run_id}")
+        targets.append(f"{run_dir}")
     print(f"\nWill clean: {', '.join(targets)}")
     if not args.force:
         if not sys.stdin.isatty():
@@ -170,10 +184,15 @@ def main():
         print(f"  cleaned: {label}")
 
     if run_exists and args.run_id:
-        run_path = project_root / runs_dir / args.run_id
-        if not _is_dangerous_path(run_path):
+        run_path = project_root / run_dir
+        # An explicit --run-dir can name anything; never remove the project
+        # (or a directory containing it) along with the run.
+        if (_is_dangerous_path(run_path)
+                or project_root.resolve().is_relative_to(run_path.resolve())):
+            print(f"  SKIPPED (dangerous): {run_dir}", file=sys.stderr)
+        else:
             shutil.rmtree(run_path)
-            print(f"  cleaned: {runs_dir}/{args.run_id}")
+            print(f"  cleaned: {run_dir}")
 
     print("CLEAN")
 

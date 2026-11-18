@@ -181,3 +181,42 @@ def test_eval_run_skill_md_never_builds_a_run_path():
     assert "<eval-name>" not in text
     assert "read its `skill` field" not in text
     assert json.dumps("discover.py --config <config> --run-id <id>")[1:-1] in text
+
+
+def test_preflight_checks_the_resolved_directory(tmp_path, runs):
+    cfg = _config(tmp_path, _SKILL_AND_NAME)
+    run = runs / "plugin:foo" / "r1"
+    run.mkdir(parents=True)
+    (run / "summary.yaml").write_text("{}\n")
+    proc = _run(SCRIPTS / "preflight.py", "--config", cfg, "--run-id", "r1", cwd=tmp_path)
+    assert proc.returncode == 1 and "DIRTY" in proc.stdout, proc.stderr
+    elsewhere = tmp_path / "ci" / "r1"
+    proc = _run(SCRIPTS / "preflight.py", "--config", cfg, "--run-dir", elsewhere,
+                cwd=tmp_path)
+    assert proc.returncode == 0 and "CLEAN" in proc.stdout, proc.stderr
+    proc = _run(SCRIPTS / "preflight.py", "--config", cfg, "--run-id", "r2",
+                "--run-dir", elsewhere, cwd=tmp_path)
+    assert proc.returncode != 0 and "conflicts" in proc.stderr
+
+
+def test_regression_accepts_run_dir(tmp_path, runs):
+    cfg = _config(tmp_path, _SKILL_AND_NAME)
+    run = tmp_path / "ci" / "r1"
+    run.mkdir(parents=True)
+    (run / "summary.yaml").write_text("judges: {}\n")
+    proc = _run(SCRIPTS / "score.py", "regression", "--config", cfg, "--run-dir", run,
+                cwd=tmp_path)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    missing = _run(SCRIPTS / "score.py", "regression", "--config", cfg, "--run-id", "r1",
+                   cwd=tmp_path)
+    assert missing.returncode != 0
+
+
+def test_preflight_never_cleans_the_project_itself(tmp_path, runs):
+    project = tmp_path / "proj"
+    project.mkdir()
+    cfg = _config(project, _SKILL_AND_NAME)
+    proc = _run(SCRIPTS / "preflight.py", "--config", cfg, "--run-dir", ".",
+                "--clean", "--force", cwd=project)
+    assert "SKIPPED (dangerous)" in proc.stderr, proc.stdout + proc.stderr
+    assert cfg.is_file()

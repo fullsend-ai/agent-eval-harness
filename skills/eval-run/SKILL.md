@@ -55,7 +55,7 @@ Never build a run directory path yourself. The scripts resolve it from `--config
 python3 ${CLAUDE_SKILL_DIR}/../../scripts/discover.py --config <config> --run-id <id>
 ```
 
-It prints one path; call it `<run-dir>` below. If `--run-dir <path>` was passed to `/eval-run`, `<run-dir>` is that path, and you pass `--run-dir <path>` in place of `--run-id <id>` to `execute.py`, `collect.py`, `score.py judges` and `report.py` (the run id is its basename).
+It prints one path; call it `<run-dir>` below. If `--run-dir <path>` was passed to `/eval-run`, `<run-dir>` is that path, and you pass `--run-dir <path>` in place of `--run-id <id>` to `preflight.py`, `execute.py`, `collect.py`, `score.py` (`judges`, `pairwise`, `regression`) and `report.py` (the run id is its basename; a `--baseline` is still an ordinary run under the default runs directory).
 
 Check if the resolved config file exists:
 
@@ -100,15 +100,15 @@ Before setting up the workspace, verify the project's artifact directories are c
 ```bash
 python3 ${CLAUDE_SKILL_DIR}/scripts/preflight.py \
   --config <config> \
-  [--run-id <id>] \
+  --run-id <id> \
   [--baseline <baseline-id>]
 ```
 
-The script checks `tmp/` state files, whether `<run-dir>` already has results from a previous run, and (if `--baseline` is given) that the baseline run-id exists next to it.
+The script checks `tmp/` state files, whether `<run-dir>` already has results from a previous run, and (if `--baseline` is given) that the baseline run-id exists for this config.
 
 - **`CLEAN`**: proceed to workspace setup.
 - **`DIRTY`**: report the findings and ask the user to choose — *force clean* (`preflight.py --clean --force`, then proceed), *change run-id* (append a suffix like `-opus-v2`, then re-run preflight with `--clean` on the new id to avoid overwriting prior results), or *abort* for manual cleanup.
-- **`MISSING_BASELINE` (exit 2)**: the `--baseline` run-id wasn't found next to `<run-dir>`. The script lists nearby run-ids — confirm the correct one with the user before retrying.
+- **`MISSING_BASELINE` (exit 2)**: the `--baseline` run-id wasn't found among this config's runs. The script lists nearby run-ids — confirm the correct one with the user before retrying.
 
 ## Step 3: Prepare Workspace
 

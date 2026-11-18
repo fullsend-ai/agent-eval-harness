@@ -29,7 +29,7 @@ modes:
 
 You must keep polling until execution completes. Poll every 2–3 minutes with
 `tail -20 <output_file>` (the path the Bash tool returned) or
-`tail -20 <output_dir>/console.log` (the run dir passed via `--output`) — never a
+`tail -20 <output_dir>/console.log` (the run dir, printed by `discover.py --config <config> --run-id <id>`) — never a
 self-created redirect. Polling keeps the session active and prevents the idle
 timeout from firing.
 
@@ -76,7 +76,7 @@ Report issues with the relevant output lines rather than waiting for completion.
 Check `run_result.json` for execution metadata:
 
 ```bash
-cat $AGENT_EVAL_RUNS_DIR/<eval-name>/<id>/run_result.json
+cat <run-dir>/run_result.json
 ```
 
 Key fields: `exit_code`, `duration_s`, `wall_clock_s` (lower when parallelism is
