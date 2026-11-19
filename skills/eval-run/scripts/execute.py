@@ -43,12 +43,13 @@ from pathlib import Path
 # argparse/config load, because the window this closes is a race: the
 # orchestrator can launch us with run_in_background and end its turn
 # immediately, and the Stop guard hook can only block that teardown once
-# execute.pid exists. Every millisecond before the write is a millisecond the
+# its pidfile exists. Every millisecond before the write is a millisecond the
 # guard is blind — and module import is the dominant cost (~25 ms warm, far
 # more on a cold container), so waiting until main() would leave the guard
 # weakest at exactly the moment it is needed most.
 
 _PIDFILE_WRITTEN = False
+_PIDFILE_PATH = None
 
 
 def _process_create_time(pid):
@@ -89,28 +90,40 @@ def _process_create_time(pid):
     return None
 
 
+def _pidfile_name(pid):
+    """Per-executor pidfile name, e.g. ``execute.12345.pid``.
+
+    One file per executor rather than a shared ``execute.pid``: run dirs get
+    reused, and two executors pointed at the same ``--output`` would otherwise
+    overwrite each other's marker — and whichever exited first would delete the
+    marker of the one still running, blinding the Stop guard to it (#337).
+    """
+    return "execute.%d.pid" % pid
+
+
 def _write_pidfile(output_dir):
-    """Write ``<output_dir>/execute.pid`` so the Stop guard hook can tell this
-    executor is still alive.
+    """Write ``<output_dir>/execute.<pid>.pid`` so the Stop guard hook can tell
+    this executor is still alive.
 
     The hook blocks the orchestrator from ending its turn (which would tear down
     the session and kill this process before ``run_result.json`` is written)
-    while an ``execute.pid`` names a live process with no result beside it. The
-    file records the pid plus a process-creation marker so a reused pid can't be
-    mistaken for this run, and is removed at exit.
+    while a pidfile names a live process. The file records the pid plus a
+    process-creation marker so a reused pid can't be mistaken for this run, and
+    is removed once this executor has written its run-level ``run_result.json``
+    (``_release_pidfile``) or, failing that, at exit.
 
     Idempotent: only the first call writes, so the early call below and the
     fallback in ``main()`` never double-register the cleanup.
     """
-    global _PIDFILE_WRITTEN
+    global _PIDFILE_WRITTEN, _PIDFILE_PATH
     if _PIDFILE_WRITTEN:
         return
     pid = os.getpid()
-    pidfile = Path(output_dir) / "execute.pid"
+    pidfile = Path(output_dir) / _pidfile_name(pid)
     try:
         # O_NOFOLLOW: the guard reads this path with no-follow semantics, so the
-        # writer must match. Otherwise a symlink pre-planted at execute.pid by
-        # anyone with write access to the runs tree would be followed, letting
+        # writer must match. Otherwise a symlink pre-planted at the pidfile path
+        # by anyone with write access to the runs tree would be followed, letting
         # this process truncate an arbitrary file it can write (CWE-59).
         flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
         fd = os.open(pidfile, flags, 0o600)
@@ -119,22 +132,30 @@ def _write_pidfile(output_dir):
     except OSError:
         return  # non-fatal: guard just won't see this run
     _PIDFILE_WRITTEN = True
+    _PIDFILE_PATH = pidfile
+    atexit.register(_release_pidfile)
 
-    def _remove():
-        # Only reap our own pidfile. Run dirs get reused, so a straggler from a
-        # previous attempt dying late must not delete the live pidfile of the
-        # run that replaced it — that would blind the guard to an active run.
-        try:
-            with open(pidfile, encoding="utf-8") as fh:
-                if json.load(fh).get("pid") != pid:
-                    return
-        except (OSError, ValueError):
-            return
-        try:
-            os.remove(pidfile)
-        except OSError:
-            pass
-    atexit.register(_remove)
+
+def _release_pidfile():
+    """Remove this executor's pidfile, if it wrote one. Safe to call twice.
+
+    Called as soon as the run-level ``run_result.json`` is written, so the guard
+    stops blocking exactly when this executor's result exists. The guard cannot
+    infer that from the result's mtime itself: concurrent executors in a reused
+    run dir share one ``run_result.json``, so a result written by one says
+    nothing about whether another is done. Also registered with ``atexit``.
+
+    The name embeds our own pid, so the file is ours to delete: no other live
+    process can hold that name, and a concurrent executor's marker is untouched.
+    """
+    global _PIDFILE_PATH
+    pidfile, _PIDFILE_PATH = _PIDFILE_PATH, None
+    if pidfile is None:
+        return
+    try:
+        os.remove(pidfile)
+    except OSError:
+        pass
 
 
 def _early_pidfile(argv):
@@ -2260,6 +2281,7 @@ def _execute_per_case(args, config, runner, runner_cls,
         run_meta["cost_usd_estimate"] = estimate_total
     # run_result write-site 7: case-mode aggregate
     run_meta = write_run_result(output_dir / "run_result.json", run_meta)
+    _release_pidfile()  # our result exists: the Stop guard may stand down
     run_meta = _finish_provider_run(run_meta)
     run_meta, worst_exit = _finalize_strict(output_dir / "run_result.json", run_meta, worst_exit)
     total_cost = run_meta.get("cost_usd")
@@ -2392,6 +2414,7 @@ def _save_result(result, args, output_dir, runner, model, eval_params=None):
     run_result_path = output_dir / "run_result.json"
     # run_result write-site 8: batch mode result
     run_meta = write_run_result(run_result_path, run_meta)
+    _release_pidfile()  # our result exists: the Stop guard may stand down
     run_meta = _finish_provider_run(run_meta)
     run_meta, exit_code = _finalize_strict(run_result_path, run_meta, result.exit_code)
 

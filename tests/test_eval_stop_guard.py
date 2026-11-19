@@ -1,7 +1,8 @@
 """Tests for the Stop guard hook (scripts/eval_stop_guard.py).
 
 The hook is stdlib-only and detects a live eval executor from the
-``execute.pid`` file that execute.py writes, so these tests use a real
+``execute.<pid>.pid`` file that execute.py writes (or the legacy shared
+``execute.pid``, which ``_make_run`` writes), so these tests use a real
 subprocess as the "live executor" rather than mocking process liveness.
 """
 import ast
@@ -392,13 +393,151 @@ def test_early_pidfile_argv_scrape(tmp_path, monkeypatch, argv, expected):
     import execute
 
     monkeypatch.setattr(execute, "_PIDFILE_WRITTEN", False)
+    monkeypatch.setattr(execute, "_PIDFILE_PATH", None)
     target = tmp_path / "rundir"
     argv = [a.replace("RUNDIR", str(target)) for a in argv]
 
     execute._early_pidfile(argv)
-    assert (target / "execute.pid").exists() is expected
+    pidfile = target / f"execute.{os.getpid()}.pid"
+    assert pidfile.exists() is expected
     if expected:
-        assert json.loads((target / "execute.pid").read_text())["pid"] == os.getpid()
+        assert json.loads(pidfile.read_text())["pid"] == os.getpid()
+
+
+# ── Overlapping executors in one reused run dir (#337) ─────────────────────
+
+@pytest.fixture
+def live_proc_b():
+    """A second live process, standing in for an overlapping executor."""
+    p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+    try:
+        yield p
+    finally:
+        p.terminate()
+        try:
+            p.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            p.kill()
+
+
+def _start_executor(execute, monkeypatch, run_dir, pid):
+    """Run execute.py's real pidfile write as the executor with ``pid``.
+
+    Each executor is its own process with its own module globals; this resets
+    them and fakes ``os.getpid`` so one test process can play several
+    executors. Returns the pidfile path, as the stand-in for that executor's
+    ``_PIDFILE_PATH``.
+    """
+    monkeypatch.setattr(execute, "_PIDFILE_WRITTEN", False)
+    monkeypatch.setattr(execute, "_PIDFILE_PATH", None)
+    monkeypatch.setattr(execute.os, "getpid", lambda: pid)
+    execute._write_pidfile(run_dir)
+    path = execute._PIDFILE_PATH
+    assert path is not None and path.exists()
+    return path
+
+
+def _finish_executor(execute, monkeypatch, run_dir, pidfile):
+    """What an executor does on completion: write its run-level result, then
+    release its own pidfile."""
+    (run_dir / "run_result.json").write_text("{}")
+    monkeypatch.setattr(execute, "_PIDFILE_PATH", pidfile)
+    execute._release_pidfile()
+
+
+@pytest.fixture
+def two_executors(tmp_path, monkeypatch, live_proc, live_proc_b):
+    """Executors A and B, both live, registered in the same run dir."""
+    import execute
+
+    runs = tmp_path / "eval" / "runs"
+    run_dir = runs / "my-eval" / "run-1"
+    run_dir.mkdir(parents=True)
+    monkeypatch.setenv("AGENT_EVAL_RUNS_DIR", str(runs))
+    a = _start_executor(execute, monkeypatch, run_dir, live_proc.pid)
+    b = _start_executor(execute, monkeypatch, run_dir, live_proc_b.pid)
+    assert a != b, "each executor must get its own pidfile"
+    assert guard._live_eval_runs(str(tmp_path)) == [str(run_dir)]
+    return execute, run_dir, a, b
+
+
+def test_overlapping_executor_exit_keeps_other_live(tmp_path, monkeypatch,
+                                                    two_executors, live_proc_b):
+    """B starts after A in the same run dir and finishes first. Its result and
+    its cleanup must not hide A, which is still running."""
+    execute, run_dir, a, b = two_executors
+
+    _finish_executor(execute, monkeypatch, run_dir, b)
+    live_proc_b.terminate()
+    live_proc_b.wait(timeout=5)
+    assert not b.exists()
+    assert a.exists(), "B's cleanup removed A's pidfile"
+    # run_result.json (B's) is newer than A's pidfile, yet A is not done.
+    assert guard._live_eval_runs(str(tmp_path)) == [str(run_dir)]
+
+    _finish_executor(execute, monkeypatch, run_dir, a)
+    assert guard._live_eval_runs(str(tmp_path)) == []
+
+
+def test_overlapping_executor_first_exit_keeps_later_live(tmp_path, monkeypatch,
+                                                          two_executors, live_proc):
+    """The mirror case: A finishes first while B is still running."""
+    execute, run_dir, a, b = two_executors
+
+    _finish_executor(execute, monkeypatch, run_dir, a)
+    live_proc.terminate()
+    live_proc.wait(timeout=5)
+    assert b.exists()
+    assert guard._live_eval_runs(str(tmp_path)) == [str(run_dir)]
+
+    _finish_executor(execute, monkeypatch, run_dir, b)
+    assert guard._live_eval_runs(str(tmp_path)) == []
+
+
+def test_overlapping_executor_killed_without_cleanup(tmp_path, monkeypatch,
+                                                     two_executors, live_proc,
+                                                     live_proc_b):
+    """A killed executor leaves its pidfile behind; its dead pid must neither
+    hide the survivor nor keep the run live once both are gone."""
+    execute, run_dir, a, b = two_executors
+
+    live_proc_b.kill()
+    live_proc_b.wait(timeout=5)
+    assert b.exists()
+    assert guard._live_eval_runs(str(tmp_path)) == [str(run_dir)]
+
+    live_proc.kill()
+    live_proc.wait(timeout=5)
+    assert guard._live_eval_runs(str(tmp_path)) == []
+
+
+def test_pidfile_write_leaves_legacy_marker_alone(tmp_path, monkeypatch,
+                                                  live_proc, live_proc_b):
+    """A new executor in a dir an older executor (legacy execute.pid) is still
+    using must not overwrite or delete that marker."""
+    import execute
+
+    runs = tmp_path / "eval" / "runs"
+    ct = guard._process_create_time(live_proc.pid)
+    run_dir = _make_run(runs, "run-1", live_proc.pid, ct)
+    legacy = run_dir / "execute.pid"
+    before = legacy.read_text()
+    monkeypatch.setenv("AGENT_EVAL_RUNS_DIR", str(runs))
+
+    b = _start_executor(execute, monkeypatch, run_dir, live_proc_b.pid)
+    _finish_executor(execute, monkeypatch, run_dir, b)
+    assert not b.exists()
+    assert legacy.read_text() == before
+
+
+def test_release_pidfile_idempotent(tmp_path, monkeypatch):
+    """Released early after the result write, and again by atexit."""
+    import execute
+
+    pidfile = _start_executor(execute, monkeypatch, tmp_path, os.getpid())
+    execute._release_pidfile()
+    assert not pidfile.exists()
+    execute._release_pidfile()  # atexit's second call: no error
 
 
 def _func_ast(path, name):

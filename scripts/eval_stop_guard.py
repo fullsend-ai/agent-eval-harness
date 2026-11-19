@@ -34,17 +34,21 @@ meant to prevent.
 Instead the harness owns ``execute.py``, so we use a first-party signal that is
 CLI-version-proof and self-scoping:
 
-  * ``execute.py`` writes ``<output_dir>/execute.pid`` (pid + an OS process
-    creation marker) before it does anything else — ahead of its own imports,
-    argument parsing and config load, since the guard is blind until that file
-    exists and the racing orchestrator ends its turn immediately after launch —
-    and removes it at exit.
+  * ``execute.py`` writes ``<output_dir>/execute.<pid>.pid`` (pid + an OS
+    process creation marker) before it does anything else — ahead of its own
+    imports, argument parsing and config load, since the guard is blind until
+    that file exists and the racing orchestrator ends its turn immediately after
+    launch — and removes it once it has written its run-level
+    ``run_result.json`` (or at exit). One file per executor, so two executors
+    sharing a reused run dir can't overwrite or delete each other's marker.
   * this hook scans ``$AGENT_EVAL_RUNS_DIR`` (default ``eval/runs``) under the
-    session cwd for ``execute.pid`` files, and treats a run as *live* when the
-    recorded pid is still alive (``os.kill(pid, 0)``), the creation marker still
-    matches (defeats pid reuse), and no ``run_result.json`` sits beside it yet.
+    session cwd for those pidfiles, and treats a run as *live* when any of them
+    names a pid that is still alive (``os.kill(pid, 0)``) whose creation marker
+    still matches (defeats pid reuse). The legacy shared ``execute.pid`` written
+    by older executors is still honoured, with its original rule that a
+    ``run_result.json`` newer than the pidfile means the run has finished.
 
-Because only ``execute.py`` writes ``execute.pid``, the guard is inherently
+Because only ``execute.py`` writes these pidfiles, the guard is inherently
 scoped to evals: a backgrounded dev server or a deliberately-backgrounded agent
 is never mistaken for one, so it is not blocked.
 
@@ -113,6 +117,11 @@ STATE_DIRNAME = "agent-eval-stop-guard"
 # Comfortably longer than any eval (the CI step caps at 3h).
 MAX_PIDFILE_AGE_S = 24 * 3600
 _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+# execute.py writes one ``execute.<pid>.pid`` per executor; older versions wrote
+# a single shared ``execute.pid``, still recognised so a mid-upgrade run is
+# guarded too.
+PIDFILE_GLOB = "execute.[0-9]*.pid"
+LEGACY_PIDFILE = "execute.pid"
 
 # Sentinel: no durable first-block timestamp exists and one cannot be written.
 # Distinct from a real timestamp so main() can fail open instead of treating a
@@ -252,7 +261,7 @@ def _open_read_nofollow(path):
 # ── Live-executor detection ──────────────────────────────────────────────
 
 def _run_output_roots(cwd):
-    """Runs directories to scan for ``execute.pid`` (existing dirs, de-duped)."""
+    """Runs directories to scan for pidfiles (existing dirs, de-duped)."""
     base = cwd or os.getcwd()
     candidates = []
     env = os.environ.get("AGENT_EVAL_RUNS_DIR")
@@ -288,9 +297,10 @@ def _read_pidfile(path):
 def _pidfile_candidates(root):
     """Pidfile paths under ``root``, found with bounded-depth globs.
 
-    Pidfiles only ever live at ``<runs>/<eval-name>/<run-id>/execute.pid``, so a
-    handful of fixed-depth patterns covers every layout. A ``**`` recursive glob
-    would instead walk the whole runs tree on *every* Stop — including the
+    Pidfiles only ever live at ``<runs>/<eval-name>/<run-id>/`` — one
+    ``execute.<pid>.pid`` per executor, or the legacy shared ``execute.pid`` —
+    so a handful of fixed-depth patterns covers every layout. A ``**`` recursive
+    glob would instead walk the whole runs tree on *every* Stop — including the
     subagent transcripts and collected artifacts under each run, which reach
     six figures of files on a busy tree (measured: 1,859 files → 64 ms recursive
     vs 0.6 ms bounded).
@@ -301,22 +311,23 @@ def _pidfile_candidates(root):
     # read as a pattern, match nothing, and silently disable the guard —
     # ``isdir`` on the root passes, so nothing else would flag it.
     safe_root = glob.escape(root)
-    for pattern in ("execute.pid", "*/execute.pid", "*/*/execute.pid",
-                    "*/*/*/execute.pid"):
-        try:
-            matches.extend(glob.glob(os.path.join(safe_root, pattern)))
-        except OSError:
-            continue
+    for depth in ("", "*/", "*/*/", "*/*/*/"):
+        for name in (LEGACY_PIDFILE, PIDFILE_GLOB):
+            try:
+                matches.extend(glob.glob(os.path.join(safe_root, depth + name)))
+            except OSError:
+                continue
     return matches
 
 
 def _live_eval_runs(cwd):
     """Return the output dirs of eval executors that are still alive.
 
-    An executor counts as live when its ``execute.pid`` names a process that is
-    still running, whose creation marker still matches (not a reused pid), and
-    which has not yet written ``run_result.json`` beside the pidfile. Any error
-    on a given pidfile just skips it — the guard fails open, never closed.
+    A run dir counts as live when *any* of its pidfiles names a process that is
+    still running and whose creation marker still matches (not a reused pid).
+    Several executors may share one reused run dir, each with its own
+    ``execute.<pid>.pid``; it stays live until the last of them is done. Any
+    error on a given pidfile just skips it — the guard fails open, never closed.
     """
     live = []
     seen = set()
@@ -336,24 +347,34 @@ def _live_eval_runs(cwd):
             if not _valid_pid(pid):
                 continue
             run_dir = os.path.dirname(pidfile)
-            # "Finished" means a result written by *this* executor. Run dirs get
-            # reused (the default run-id is date+model, so a same-day retry
-            # lands in the same directory), and a result left by the previous
-            # attempt would otherwise mark the new run finished the moment it
-            # starts — the guard would wave through the very kill it exists to
-            # stop, and the stale result would be reported as the retry's.
-            # A result older than the pidfile therefore predates this executor.
-            try:
-                result_mtime = os.path.getmtime(
-                    os.path.join(run_dir, "run_result.json"))
-            except OSError:
-                result_mtime = None
+            if run_dir in live:
+                continue  # already known live via another executor's pidfile
             try:
                 pid_mtime = os.path.getmtime(pidfile)
             except OSError:
                 continue
-            if result_mtime is not None and result_mtime >= pid_mtime:
-                continue  # run already finished
+            # A per-executor pidfile is removed by its executor as soon as that
+            # executor's run_result.json is written, so its presence alone means
+            # "not finished". It must NOT be second-guessed by run_result.json:
+            # concurrent executors in a reused run dir share that one file, so
+            # a result written by whichever finished first would otherwise mark
+            # the others finished while they are still running.
+            #
+            # The legacy shared execute.pid (older executors) has no such early
+            # removal, so keep its rule: "finished" means a result written by
+            # *this* executor. Run dirs get reused (the default run-id is
+            # date+model, so a same-day retry lands in the same directory), and
+            # a result left by the previous attempt would otherwise mark the new
+            # run finished the moment it starts. A result older than the pidfile
+            # therefore predates this executor.
+            if os.path.basename(pidfile) == LEGACY_PIDFILE:
+                try:
+                    result_mtime = os.path.getmtime(
+                        os.path.join(run_dir, "run_result.json"))
+                except OSError:
+                    result_mtime = None
+                if result_mtime is not None and result_mtime >= pid_mtime:
+                    continue  # run already finished
             # Staleness backstop. The create_time check below is the primary
             # pid-reuse defense, but it is inert where no marker is obtainable
             # (no /proc and not darwin), leaving a reused pid able to block
