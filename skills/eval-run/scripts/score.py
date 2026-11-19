@@ -3671,12 +3671,28 @@ def _judges_read_files(judges):
     return False
 
 
-def score_cases(judges, case_dirs, config, run_id=None, samples_override=None, runs_dir=None):
+def _judge_parallelism(parallelism, config, n_cases):
+    """How many cases to judge concurrently.
+
+    The run's case parallelism limit: `parallelism` (CLI `--parallelism`) wins,
+    then `execution.parallelism`, then the CPU count. Always capped at the
+    number of cases and at least 1. Judges within one case stay sequential.
+    """
+    if parallelism is None:
+        parallelism = getattr(getattr(config, "execution", None), "parallelism", None)
+    if parallelism is None:
+        parallelism = os.cpu_count() or 4
+    return max(1, min(n_cases, int(parallelism)))
+
+
+def score_cases(judges, case_dirs, config, run_id=None, samples_override=None, runs_dir=None,
+                parallelism=None):
     """Score all cases with all judges in parallel.
 
     Each judge's sample count comes from its config (`JudgeConfig.samples`);
     `samples_override` (from CLI `--samples`) wins when set. Only stochastic
     (LLM) judges are sampled; deterministic judges always run once.
+    Cases are judged concurrently up to `_judge_parallelism` workers.
     """
     if not case_dirs:
         return {"per_case": {}, "unmeasured": {},
@@ -3689,7 +3705,7 @@ def score_cases(judges, case_dirs, config, run_id=None, samples_override=None, r
                   for name, *_ in judges}
     _reset_tool_choice_fallbacks()
     _reset_verdict_state()
-    parallelism = min(len(case_dirs), os.cpu_count() or 4)
+    parallelism = _judge_parallelism(parallelism, config, len(case_dirs))
     lock = threading.Lock()
     completed = 0
 
@@ -5228,12 +5244,14 @@ class PairwiseResult:
 
 def compare_runs(run_a_dir, run_b_dir, config, case_ids,
                  prompt=None, prompt_file=None, model=None,
-                 provider_options=None, verdict=None):
+                 provider_options=None, verdict=None, parallelism=None):
     """Compare two runs using position-swapped LLM judge.
 
     `provider_options` is the pairwise judge's `JudgeConfig.provider_options`
     (routing/fallbacks/max_tokens for an `openrouter:/` model); `verdict` the
     spec 015 transport policy (defaults to `models.judge_verdict`).
+    `parallelism` is the max cases compared concurrently (see
+    `_judge_parallelism`).
     """
     comparison_prompt = prompt
     if not comparison_prompt and prompt_file:
@@ -5324,7 +5342,7 @@ def compare_runs(run_a_dir, run_b_dir, config, case_ids,
             result.error = f"BA failed: {err}"
         return result
 
-    parallelism = min(len(case_ids), os.cpu_count() or 4)
+    parallelism = _judge_parallelism(parallelism, config, len(case_ids))
     results = []
     completed = 0
     lock = threading.Lock()
@@ -6295,7 +6313,8 @@ def cmd_judges(args):
     # $AGENT_EVAL_RUNS_DIR/<eval>/, and load_case_record reads the run-level
     # run_result.json (exit_code, cost, hooks, ...) from runs_dir / run_id.
     judge_results = score_cases(judges, case_dirs, config, run_id=args.run_id,
-                                samples_override=samples_override, runs_dir=runs_dir)
+                                samples_override=samples_override, runs_dir=runs_dir,
+                                parallelism=getattr(args, "parallelism", None))
 
     for name, agg in judge_results.get("aggregated", {}).items():
         mean = agg.get("mean")
@@ -6451,6 +6470,7 @@ def cmd_pairwise(args):
             provider_options=(pairwise_jc.provider_options
                               if pairwise_jc else None),
             verdict=(pairwise_jc.verdict or None) if pairwise_jc else None,
+            parallelism=getattr(args, "parallelism", None),
         )
         if "error" in r:
             print(f"ERROR: {r['error']}", file=sys.stderr)
@@ -6535,6 +6555,10 @@ def main():
                             "judge N times per case; median (score) / majority "
                             "(bool) becomes the value, spread recorded for "
                             "stability reporting")
+    jdg_p.add_argument("--parallelism", type=int, default=None,
+                       help="Max cases judged concurrently (default: eval.yaml "
+                            "execution.parallelism, else CPU count; capped at "
+                            "the number of cases)")
     jdg_p.add_argument("--workspace", default=None,
                        help="Workspace path (for before_scoring hook env vars)")
     jdg_p.add_argument("--model", default=None,
@@ -6554,6 +6578,10 @@ def main():
     pw_p.add_argument("--samples", type=int, default=None,
                       help="Override per-judge samples config: run the comparison "
                            "N times and record verdict stability")
+    pw_p.add_argument("--parallelism", type=int, default=None,
+                      help="Max cases judged concurrently (default: eval.yaml "
+                           "execution.parallelism, else CPU count; capped at "
+                           "the number of cases)")
 
     # regression
     reg_p = subparsers.add_parser("regression", help="Threshold checks")

@@ -69,8 +69,9 @@ models:
 ```
 
 !!! warning "`parallelism` and per-case hooks don't apply in batch mode"
-    `execution.parallelism` runs *cases* concurrently — it only takes effect in case
-    mode. `hooks.before_each` / `hooks.after_each` are per-case and are **ignored in
+    `execution.parallelism` runs *cases* concurrently — execution only takes effect in
+    case mode (batch mode is a single invocation), though it still caps how many cases
+    are judged concurrently during scoring. `hooks.before_each` / `hooks.after_each` are per-case and are **ignored in
     batch mode** (a load-time warning is emitted); use `before_all` / `after_all`
     instead. `dataset.workspace.files` is also ignored — batch mode uses a single
     shared workspace, not one per case.

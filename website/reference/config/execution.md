@@ -29,7 +29,7 @@ execution:
 | `arguments` | string | `""` | Template resolved per case from `input.yaml`. See [Templating](#argument-templating). |
 | `timeout` | int \| null | `null` → **3600** | Per-invocation wall-clock timeout in seconds. |
 | `max_budget_usd` | float \| null | `null` → **100.0** | Per-invocation cost cap. |
-| `parallelism` | int \| null | `null` → **1** | Max concurrent case executions (case mode only). |
+| `parallelism` | int \| null | `null` → **1** | Max concurrent case executions (case mode only). Also caps how many cases are judged at once (`null` → CPU count there). |
 | `env` | map | `{}` | Env vars injected into each workspace's `.claude/settings.json`. See [env](#injecting-environment-variables). |
 | `project_hooks` | bool | `true` | Append the project's `.claude/settings.json` `hooks` to each workspace's settings. See [project hooks](#carrying-the-projects-hooks). |
 | `symlinks` | list of names | `[]` | Additional top-level project entries, files or directories, to link into each staged workspace in addition to the defaults. See [staging extra project entries](#staging-extra-project-entries). |
@@ -336,9 +336,16 @@ These errors are raised at **config load time** (`EvalConfig.from_yaml`), not mi
 
 ## Gotchas
 
-- **`parallelism` is case-mode only.** Batch mode is a single invocation, so there is
-  nothing to parallelize. With [`runner.workspace_mode: repo`](runner.md) parallelism is
+- **Case *execution* parallelism is case-mode only.** Batch mode is a single invocation, so there is
+  nothing to parallelize there. With [`runner.workspace_mode: repo`](runner.md) parallelism is
   forced to `1` (all cases share the repo checkout).
+- **`parallelism` also applies to judging.** The `--parallelism` flag (else
+  `execution.parallelism`, else the CPU count) sets how many cases are judged at once,
+  capped at the number of cases; judges within a case run sequentially. A higher value
+  sends more simultaneous requests to the judge provider and may hit its rate limits —
+  it does not reduce the number of judge calls. Conversely, a config that sets a low
+  `execution.parallelism` to pace case *execution* now paces judging at the same rate;
+  pass `score.py judges --parallelism <n>` to decouple the two.
 - **Per-case hooks need case/prompt mode.** `hooks.before_each` / `after_each` are
   ignored in batch mode (a warning is emitted); use `before_all` / `after_all` there. See
   [hooks](hooks.md).

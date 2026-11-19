@@ -138,17 +138,19 @@ Three guardrails bound each invocation. In `case` mode "per-invocation" means
 | `execution.timeout` | `--timeout` | `3600` (s) | Subprocess wall-clock timeout |
 | `CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS` | env / `runner.env` | `600000` (ms) | How long the CLI waits for background tasks after the final turn before killing them — killed tasks fail the case (exit 1) even though the CLI exits 0 |
 | `execution.max_budget_usd` | `--max-budget` | `100.0` | Cost cap per invocation |
-| `execution.parallelism` | `--parallelism` | `1` (sequential) | Concurrent cases (case mode only) |
+| `execution.parallelism` | `--parallelism` | `1` (sequential) for execution; CPU count for judging | Concurrent cases for execution (case mode only) and for judging |
 
 Precedence is **CLI flag → config → built-in default**, resolved with explicit
 `None` checks so a deliberate `0` is preserved (e.g. `--timeout 0` or
 `max_budget_usd: 0` are honored, not replaced by the default).
 
 !!! note "Parallelism specifics"
-    Parallelism only applies in `case` mode and is capped at the number of cases
-    (`min(parallelism, len(cases))`). `runner.workspace_mode: repo` (in-repo)
-    forces `parallelism=1` — all cases share one repo root, so concurrent writes
-    would corrupt state.
+    Concurrent case *execution* only applies in `case` mode and is capped at the
+    number of cases (`min(parallelism, len(cases))`). `runner.workspace_mode: repo`
+    (in-repo) forces `parallelism=1` — all cases share one repo root, so concurrent
+    writes would corrupt state. `execution.parallelism` / `--parallelism` also cap
+    how many cases are judged concurrently during scoring, in both `case` and
+    `batch` mode.
 
 ## Environment injection
 
