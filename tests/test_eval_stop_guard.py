@@ -639,13 +639,147 @@ def test_second_executor_process_exits_nonzero_before_touching_run_dir(
 
 
 def test_release_pidfile_idempotent(tmp_path, monkeypatch):
-    """Released early after the result write, and again by atexit."""
+    """Released explicitly, and again by atexit."""
     import execute
 
     pidfile = _start_executor(execute, monkeypatch, tmp_path, os.getpid())
     execute._release_pidfile()
     assert not pidfile.exists()
     execute._release_pidfile()  # atexit's second call: no error
+
+
+# ── Review hardening (#338) ────────────────────────────────────────────────
+
+def test_peer_probe_never_signals_on_windows(
+        tmp_path, monkeypatch, live_proc, live_proc_b):
+    """On win32 ``os.kill(pid, 0)`` is TerminateProcess: the peer scan must not
+    call it, so a second executor can never kill the first."""
+    import execute
+
+    ct = guard._process_create_time(live_proc.pid)
+    (tmp_path / f"execute.{live_proc.pid}.pid").write_text(
+        json.dumps({"pid": live_proc.pid, "create_time": ct}))
+
+    def boom(*a, **k):
+        raise AssertionError("os.kill must not be called on win32")
+
+    # Scoped so the fixtures' teardown (which signals the children) runs
+    # unpatched.
+    with monkeypatch.context() as m:
+        m.setattr(execute.sys, "platform", "win32")
+        m.setattr(execute.os, "kill", boom)
+        assert execute._live_peer_executor(tmp_path, live_proc_b.pid) is None
+    assert live_proc.poll() is None
+
+
+def test_marker_held_until_exit_not_result_write(
+        tmp_path, monkeypatch, live_proc, live_proc_b):
+    """Finalization after ``run_result.json`` is written (reconcile, strict
+    rewrite, after_all) still owns the run dir: a second executor is rejected
+    until the process exits and atexit releases the marker."""
+    import types
+    import execute
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    a = _start_executor(execute, monkeypatch, run_dir, live_proc.pid)
+    seen = {}
+
+    def finish(run_meta):
+        seen["peer"] = execute._live_peer_executor(run_dir, live_proc_b.pid)
+        seen["marker"] = a.exists()
+        return run_meta
+
+    def write_result(path, meta):
+        Path(path).write_text(json.dumps(meta))
+        return meta
+
+    monkeypatch.setattr(execute, "write_run_result", write_result)
+    monkeypatch.setattr(execute, "_finish_provider_run", finish)
+    monkeypatch.setattr(execute, "_finalize_strict",
+                        lambda path, meta, code: (meta, code))
+    monkeypatch.setattr(execute, "_with_runner_provenance",
+                        lambda params, runner, texts: {})
+    result = types.SimpleNamespace(
+        stdout="", stderr="", exit_code=0, duration_s=1.0, token_usage=None,
+        cost_usd=None, per_model_usage=None, num_turns=None,
+        per_model_turns=None, permission_denials=None, resolved_model=None,
+        models_used=None, message_ids=None, generation_ids=None,
+        cost_source=None, error_class=None, budget=None)
+    args = types.SimpleNamespace(workspace=str(tmp_path / "ws"))
+    runner = types.SimpleNamespace(name="x")
+    execute._save_result(result, args, run_dir, runner, "m")
+
+    assert seen["marker"] is True
+    assert seen["peer"] is not None and seen["peer"][0] == live_proc.pid
+    assert a.exists()
+
+
+def test_fifo_marker_does_not_hang_startup(tmp_path, monkeypatch):
+    """A FIFO planted at a marker name is skipped, not blocked on."""
+    import signal
+    import execute
+
+    if not hasattr(os, "mkfifo") or not hasattr(signal, "SIGALRM"):
+        pytest.skip("needs mkfifo and SIGALRM")
+    os.mkfifo(tmp_path / "execute.4242.pid")
+    signal.signal(signal.SIGALRM, lambda *a: pytest.fail("startup hung on FIFO"))
+    signal.alarm(10)
+    try:
+        assert execute._live_peer_executor(tmp_path, os.getpid()) is None
+    finally:
+        signal.alarm(0)
+
+
+def test_oversized_marker_is_not_read_whole(tmp_path, monkeypatch, live_proc):
+    """The read is capped, so a huge planted marker cannot be a live peer."""
+    import execute
+
+    (tmp_path / f"execute.{live_proc.pid}.pid").write_text(
+        '{"pid": %d, "pad": "%s"}' % (live_proc.pid, "x" * 100_000))
+    assert execute._live_peer_executor(tmp_path, os.getpid()) is None
+
+
+def test_marker_name_must_match_recorded_pid(tmp_path, live_proc):
+    """``execute.999.pid`` claiming another live pid is not an executor marker."""
+    import execute
+
+    ct = guard._process_create_time(live_proc.pid)
+    (tmp_path / "execute.999.pid").write_text(
+        json.dumps({"pid": live_proc.pid, "create_time": ct}))
+    assert execute._live_peer_executor(tmp_path, os.getpid()) is None
+
+
+def test_marker_without_create_time_is_not_authoritative(tmp_path, live_proc):
+    """Where a creation marker is obtainable, a marker lacking one (e.g. a
+    planted ``{"pid": 1}``) cannot block an executor start."""
+    import execute
+
+    if execute._process_create_time(live_proc.pid) is None:
+        pytest.skip("no process creation marker on this platform")
+    (tmp_path / f"execute.{live_proc.pid}.pid").write_text(
+        json.dumps({"pid": live_proc.pid}))
+    assert execute._live_peer_executor(tmp_path, os.getpid()) is None
+
+
+def test_marker_published_atomically(tmp_path, monkeypatch):
+    """The marker appears via ``os.replace`` of a complete temp file, and no
+    temp file is left behind."""
+    import execute
+
+    replaced = []
+    real_replace = os.replace
+
+    def spy(src, dst):
+        replaced.append((Path(src).read_text(), Path(dst).name))
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(execute.os, "replace", spy)
+    pidfile = _start_executor(execute, monkeypatch, tmp_path, os.getpid())
+    assert len(replaced) == 1
+    body, dst = replaced[0]
+    assert dst == pidfile.name and json.loads(body)["pid"] == os.getpid()
+    assert [p.name for p in tmp_path.iterdir()] == [pidfile.name]
 
 
 def _func_ast(path, name):

@@ -33,6 +33,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -50,6 +51,8 @@ from pathlib import Path
 
 _PIDFILE_WRITTEN = False
 _PIDFILE_PATH = None
+# A marker is a few dozen bytes of JSON; never read more than this from one.
+_PIDFILE_MAX_BYTES = 4096
 
 
 def _process_create_time(pid):
@@ -118,6 +121,12 @@ def _live_peer_executor(output_dir, own_pid, before=None):
     the first check at the same moment — exactly one of them (the earlier
     marker) keeps the directory.
     """
+    # No safe liveness probe here: CPython maps ``os.kill(pid, 0)`` on Windows to
+    # ``TerminateProcess``, so probing a peer would kill it. The Stop guard
+    # disables itself on win32 for the same reason, so there is nothing to
+    # protect and nothing to probe.
+    if sys.platform == "win32":
+        return None
     try:
         names = sorted(os.listdir(output_dir))
     except OSError:
@@ -130,11 +139,16 @@ def _live_peer_executor(output_dir, own_pid, before=None):
             continue
         path = Path(output_dir) / name
         try:
-            fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-            with os.fdopen(fd, encoding="utf-8") as fh:
-                info = json.load(fh)
+            # O_NONBLOCK so a FIFO planted at a marker name cannot hang startup;
+            # then insist on a regular file and cap the read.
+            fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                         | getattr(os, "O_NONBLOCK", 0))
+            with os.fdopen(fd, "rb") as fh:
+                st = os.fstat(fh.fileno())
+                if not stat.S_ISREG(st.st_mode):
+                    continue
+                info = json.loads(fh.read(_PIDFILE_MAX_BYTES).decode("utf-8"))
             pid = info["pid"]
-            st = os.stat(path)
         except (OSError, ValueError, TypeError, KeyError):
             continue
         # Same plausibility rule as the guard: os.kill treats pid <= 0 as a
@@ -142,6 +156,10 @@ def _live_peer_executor(output_dir, own_pid, before=None):
         if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
             continue
         if pid == own_pid:
+            continue
+        # A per-executor marker is named for its pid; one that disagrees with
+        # its own contents is not something this script wrote.
+        if not legacy and name != _pidfile_name(pid):
             continue
         if before is not None and (st.st_mtime_ns, pid) >= before:
             continue
@@ -161,9 +179,12 @@ def _live_peer_executor(output_dir, own_pid, before=None):
             continue
         recorded = info.get("create_time")
         current = _process_create_time(pid)
-        if (recorded is not None and current is not None
-                and str(recorded) != str(current)):
-            continue
+        if current is not None:
+            # Where a creation marker is obtainable, every marker this script
+            # writes carries one; a marker without it (or with a different one)
+            # cannot vouch that this is the process that wrote it.
+            if recorded is None or str(recorded) != str(current):
+                continue
         return pid, path
     return None
 
@@ -196,8 +217,9 @@ def _write_pidfile(output_dir):
     the session and kill this process before ``run_result.json`` is written)
     while a pidfile names a live process. The file records the pid plus a
     process-creation marker so a reused pid can't be mistaken for this run, and
-    is removed once this executor has written its run-level ``run_result.json``
-    (``_release_pidfile``) or, failing that, at exit.
+    is removed when this executor exits (``_release_pidfile``, registered with
+    ``atexit``), i.e. only after reconciliation, strict-mode rewrites and
+    ``after_all`` hooks have finished.
 
     Idempotent: only the first call writes, so the early call below and the
     fallback in ``main()`` never double-register the cleanup.
@@ -210,16 +232,29 @@ def _write_pidfile(output_dir):
     if peer is not None:
         _reject_busy_run_dir(output_dir, peer[0])
     pidfile = Path(output_dir) / _pidfile_name(pid)
+    # Publish atomically: write a temp file (a name no probe or guard glob
+    # matches), then ``os.replace`` it into place, so a concurrent probe never
+    # sees a partially written marker.
+    tmp = Path(output_dir) / (".%s.tmp" % _pidfile_name(pid))
     try:
-        # O_NOFOLLOW: the guard reads this path with no-follow semantics, so the
-        # writer must match. Otherwise a symlink pre-planted at the pidfile path
+        # O_NOFOLLOW + O_EXCL: the guard reads the pidfile with no-follow
+        # semantics, so the writer must match. Otherwise a symlink pre-planted
         # by anyone with write access to the runs tree would be followed, letting
         # this process truncate an arbitrary file it can write (CWE-59).
-        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
-        fd = os.open(pidfile, flags, 0o600)
+        try:
+            os.remove(tmp)  # leftover from a crashed predecessor with this pid
+        except OSError:
+            pass
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(tmp, flags, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump({"pid": pid, "create_time": _process_create_time(pid)}, fh)
+        os.replace(tmp, pidfile)
     except OSError:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
         return  # non-fatal: guard just won't see this run
     # Two executors can both pass the check above before either has written.
     # Now that our marker is visible, the one with the earlier marker keeps the
@@ -244,11 +279,13 @@ def _write_pidfile(output_dir):
 def _release_pidfile():
     """Remove this executor's pidfile, if it wrote one. Safe to call twice.
 
-    Called as soon as the run-level ``run_result.json`` is written, so the guard
-    stops blocking exactly when this executor's result exists. The guard cannot
-    infer that from the result's mtime itself: concurrent executors in a reused
-    run dir share one ``run_result.json``, so a result written by one says
-    nothing about whether another is done. Also registered with ``atexit``.
+    Registered with ``atexit`` and deliberately *not* called when
+    ``run_result.json`` is first written: provider reconciliation, strict-mode
+    rewrites of that file, batch input copies and ``after_all`` hooks all run
+    after it, and dropping the marker earlier would let a second executor into
+    the run dir while this one can still write results and artifacts. The guard
+    cannot infer completion from the result's mtime either: concurrent executors
+    in a reused run dir share one ``run_result.json``.
 
     The name embeds our own pid, so the file is ours to delete: no other live
     process can hold that name, and a concurrent executor's marker is untouched.
@@ -2389,7 +2426,6 @@ def _execute_per_case(args, config, runner, runner_cls,
         run_meta["cost_usd_estimate"] = estimate_total
     # run_result write-site 7: case-mode aggregate
     run_meta = write_run_result(output_dir / "run_result.json", run_meta)
-    _release_pidfile()  # our result exists: the Stop guard may stand down
     run_meta = _finish_provider_run(run_meta)
     run_meta, worst_exit = _finalize_strict(output_dir / "run_result.json", run_meta, worst_exit)
     total_cost = run_meta.get("cost_usd")
@@ -2522,7 +2558,6 @@ def _save_result(result, args, output_dir, runner, model, eval_params=None):
     run_result_path = output_dir / "run_result.json"
     # run_result write-site 8: batch mode result
     run_meta = write_run_result(run_result_path, run_meta)
-    _release_pidfile()  # our result exists: the Stop guard may stand down
     run_meta = _finish_provider_run(run_meta)
     run_meta, exit_code = _finalize_strict(run_result_path, run_meta, result.exit_code)
 

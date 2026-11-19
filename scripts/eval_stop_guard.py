@@ -38,8 +38,8 @@ CLI-version-proof and self-scoping:
     process creation marker) before it does anything else — ahead of its own
     imports, argument parsing and config load, since the guard is blind until
     that file exists and the racing orchestrator ends its turn immediately after
-    launch — and removes it once it has written its run-level
-    ``run_result.json`` (or at exit). One file per executor, so an executor can
+    launch — and removes it when it exits, after all of its post-result
+    finalization. One file per executor, so an executor can
     only ever remove its own marker. ``execute.py`` also refuses to start in a
     run dir where another live executor's marker exists, so two live executors
     do not normally share one run dir (their results would collide); the guard
@@ -356,15 +356,15 @@ def _live_eval_runs(cwd):
                 pid_mtime = os.path.getmtime(pidfile)
             except OSError:
                 continue
-            # A per-executor pidfile is removed by its executor as soon as that
-            # executor's run_result.json is written, so its presence alone means
-            # "not finished". It must NOT be second-guessed by run_result.json:
+            # A per-executor pidfile is removed by its executor when it exits,
+            # so its presence alone means "not finished". It must NOT be
+            # second-guessed by run_result.json:
             # concurrent executors in a reused run dir share that one file, so
             # a result written by whichever finished first would otherwise mark
             # the others finished while they are still running.
             #
-            # The legacy shared execute.pid (older executors) has no such early
-            # removal, so keep its rule: "finished" means a result written by
+            # The legacy shared execute.pid (older executors) is not removed
+            # per executor, so keep its rule: "finished" means a result written by
             # *this* executor. Run dirs get reused (the default run-id is
             # date+model, so a same-day retry lands in the same directory), and
             # a result left by the previous attempt would otherwise mark the new
