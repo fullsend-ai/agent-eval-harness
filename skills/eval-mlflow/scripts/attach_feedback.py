@@ -28,7 +28,6 @@ Usage:
 import agent_eval._bootstrap  # noqa: F401 — auto-activate venv
 
 import argparse
-import os
 import sys
 from pathlib import Path
 
@@ -41,7 +40,8 @@ except ImportError:
           file=sys.stderr)
     sys.exit(0)
 
-from agent_eval.config import EvalConfig, _validate_path_segment
+from agent_eval.config import EvalConfig
+from agent_eval.run_location import RunLocationError, resolve_run_dir
 from agent_eval.mlflow.experiment import log_feedback, resolve_tracking_uri
 from agent_eval.mlflow.traces import find_run_traces
 
@@ -64,14 +64,14 @@ def main():
 
     config = EvalConfig.from_yaml(args.config)
     mlflow.set_tracking_uri(resolve_tracking_uri(config))
-    if args.run_dir:
-        run_dir = Path(args.run_dir).resolve()
-        args.run_id = run_dir.name
-    else:
-        # Validate run_id to prevent path traversal (CWE-22)
-        args.run_id = _validate_path_segment(args.run_id, "--run-id")
-        runs_base = Path(os.environ.get("AGENT_EVAL_RUNS_DIR", "eval/runs"))
-        run_dir = runs_base / config.eval_name() / args.run_id
+    # The shared resolver: an explicit --run-dir is authoritative (its basename
+    # is the run id); only --run-id falls back to the default location.
+    try:
+        run_dir, args.run_id = resolve_run_dir(config, args.run_id, args.run_dir)
+    except RunLocationError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(1)
+    run_dir = run_dir.resolve()
 
     experiment_name = config.mlflow.experiment or config.name
 

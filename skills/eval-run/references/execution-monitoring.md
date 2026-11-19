@@ -99,11 +99,12 @@ partially completed without failing.
 
 ## Passing `--run-dir`
 
-If `--run-dir <path>` was passed to `/eval-run`, `<run-dir>` is that path, and
-you pass `--run-dir <path>` in place of `--run-id <id>` to `preflight.py`,
-`execute.py`, `collect.py`, `score.py` (`judges`, `pairwise`, `regression`) and
-`report.py`. The run id is the basename of the path. A `--baseline` is still an
-ordinary run under the default runs directory.
+`<run-dir>` is the user's `--run-dir <path>` when one was passed (no discovery),
+else the `discover.py` output. Pass `--run-dir <run-dir>` in place of
+`--run-id <id>` to `preflight.py`, `execute.py`, `collect.py`, `score.py`
+(`judges`, `pairwise`, `regression`), `report.py` and `/eval-mlflow`
+(`log_results.py`, `attach_feedback.py`). The run id is the basename of the path.
+A `--baseline` is still an ordinary run under the default runs directory.
 
 ## CLI flag fallbacks
 

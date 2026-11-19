@@ -47,16 +47,6 @@ python3 ${CLAUDE_SKILL_DIR}/../../scripts/discover.py
 - **Multiple configs found**: present the list and ask the user which to run
 - **No configs found**: proceed to the bootstrap flow below
 
-### Run Directory
-
-Never build a run directory path yourself. Get it from the harness:
-
-```bash
-python3 ${CLAUDE_SKILL_DIR}/../../scripts/discover.py --config <config> --run-id <id>
-```
-
-Its output is `<run-dir>` below. For `--run-dir`, see [`references/execution-monitoring.md`](references/execution-monitoring.md).
-
 Check if the resolved config file exists:
 
 ```bash
@@ -68,6 +58,16 @@ test -f <config> && echo "CONFIG_EXISTS" || echo "NO_CONFIG"
 Once config exists, read it to understand the eval setup (skill under test, runner, dataset, outputs, judges, models, tool interception). Scripts read the same config; just warn the user about anything missing or surprising.
 
 `inputs.tools` is claude-code-only (others reject it at load). If the skill uses AskUserQuestion or external APIs, verify the handlers cover them — an unintercepted tool can hang headless execution.
+
+### Run Directory
+
+Only once the config exists (after any bootstrap above). If `--run-dir` was supplied it is authoritative: `<run-dir>` is that path and `<id>` its basename — do not run discovery. Otherwise never build the path yourself; get it from the harness:
+
+```bash
+python3 ${CLAUDE_SKILL_DIR}/../../scripts/discover.py --config <config> --run-id <id>
+```
+
+Its output is `<run-dir>`. Pass `--run-dir <run-dir>` (not `--run-id`) to the scripts below; see [`references/execution-monitoring.md`](references/execution-monitoring.md).
 
 Persist parsed flags:
 
@@ -100,7 +100,7 @@ Before setting up the workspace, verify the project's artifact directories are c
 ```bash
 python3 ${CLAUDE_SKILL_DIR}/scripts/preflight.py \
   --config <config> \
-  --run-id <id> \
+  --run-dir <run-dir> \
   [--baseline <baseline-id>]
 ```
 
@@ -181,7 +181,7 @@ Distribute workspace outputs into per-case directories so judges can score each 
 python3 ${CLAUDE_SKILL_DIR}/scripts/collect.py \
   --config <config> \
   --workspace <workspace_path> \
-  --run-id <id>
+  --run-dir <run-dir>
 ```
 
 Read the collection summary (JSON file — read it with `cat` or `jq`, not `state.py`):
@@ -200,7 +200,7 @@ If `--no-llm-judges` was specified, skip judges that make LLM API calls (prompt,
 
 ```bash
 python3 ${CLAUDE_SKILL_DIR}/scripts/score.py judges \
-  --run-id <id> \
+  --run-dir <run-dir> \
   --config <config> \
   --workspace <workspace_path> \
   --model <model> \
@@ -215,7 +215,7 @@ If `--baseline` was specified, also run pairwise comparison:
 
 ```bash
 python3 ${CLAUDE_SKILL_DIR}/scripts/score.py pairwise \
-  --run-id <id> \
+  --run-dir <run-dir> \
   --baseline <baseline_id> \
   --config <config>
 ```
@@ -238,7 +238,7 @@ Read the summary and analyze the results. Read `${CLAUDE_SKILL_DIR}/prompts/anal
 
 ```bash
 python3 ${CLAUDE_SKILL_DIR}/scripts/report.py \
-  --run-id <id> \
+  --run-dir <run-dir> \
   --config <config> \
   [--baseline <baseline_id>] \
   --open
@@ -258,7 +258,7 @@ Suggest next steps (include `--config <config>` if a non-default config was used
 If `mlflow.experiment` is configured in eval.yaml:
 
 ```text
-Use the Skill tool to invoke /eval-mlflow --action log-results --run-id <id> --config <config>
+Use the Skill tool to invoke /eval-mlflow --action log-results --run-dir <run-dir> --config <config>
 ```
 
 ## Harbor runner (`--runner harbor`)

@@ -292,3 +292,62 @@ def test_report_shows_the_skill_invocation_when_recorded(tmp_path):
     html = _render_params({"skill": "plugin:foo", "skill_args": "--x 1"})
     assert "/plugin:foo --x 1" in html
     assert "Skill Args" in html
+
+
+def _skill_md():
+    return (ROOT / "skills" / "eval-run" / "SKILL.md").read_text()
+
+
+def test_explicit_run_dir_is_authoritative_in_eval_run_skill_md():
+    """--run-dir wins outright: discovery only runs when no override is given."""
+    text = _skill_md()
+    section = text.split("### Run Directory", 1)[1].split("Persist parsed flags", 1)[0]
+    assert "authoritative" in section
+    assert "do not run discovery" in section
+    assert "Otherwise" in section and "discover.py" in section
+
+
+def test_eval_run_resolves_run_dir_only_after_config_exists():
+    """The run directory needs the config, so it comes after the bootstrap."""
+    text = _skill_md()
+    assert (text.index("bootstrap via `/eval-analyze`")
+            < text.index("### Run Directory")
+            < text.index("Persist parsed flags"))
+
+
+def test_eval_run_hands_the_run_dir_to_every_later_script():
+    text = _skill_md()
+    for script in ("preflight.py", "collect.py", "report.py"):
+        block = text.split(f"scripts/{script}", 1)[1].split("```", 1)[0]
+        assert "--run-dir <run-dir>" in block, script
+        assert "--run-id" not in block, script
+    for sub in ("judges", "pairwise"):
+        block = text.split(f"scripts/score.py {sub}", 1)[1].split("```", 1)[0]
+        assert "--run-dir <run-dir>" in block, sub
+        assert "--run-id" not in block, sub
+    assert "/eval-mlflow --action log-results --run-dir <run-dir>" in text
+
+
+def test_eval_mlflow_skill_documents_run_dir():
+    text = (ROOT / "skills" / "eval-mlflow" / "SKILL.md").read_text()
+    assert "| `--run-dir <path>`" in text
+    assert text.count("<run-selector>") >= 3
+
+
+@pytest.mark.parametrize("script", ["log_results.py", "attach_feedback.py"])
+def test_mlflow_scripts_resolve_through_the_shared_resolver(script):
+    src = (ROOT / "skills" / "eval-mlflow" / "scripts" / script).read_text()
+    assert "resolve_run_dir(config, args.run_id, args.run_dir)" in src
+    assert "os.environ" not in src
+
+
+def test_log_results_uses_the_explicit_run_dir(tmp_path, runs):
+    pytest.importorskip("mlflow")
+    cfg = _config(tmp_path, _SKILL_AND_NAME)
+    elsewhere = tmp_path / "elsewhere" / "my-run"
+    elsewhere.mkdir(parents=True)
+    proc = _run(ROOT / "skills" / "eval-mlflow" / "scripts" / "log_results.py",
+                "--config", cfg, "--run-dir", elsewhere, cwd=tmp_path)
+    out = proc.stdout + proc.stderr
+    assert str(elsewhere.resolve()) in out
+    assert str(runs) not in out
