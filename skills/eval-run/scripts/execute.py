@@ -101,9 +101,96 @@ def _pidfile_name(pid):
     return "execute.%d.pid" % pid
 
 
+def _live_peer_executor(output_dir, own_pid, before=None):
+    """Return ``(pid, pidfile)`` of another live executor using ``output_dir``,
+    or ``None``.
+
+    Looks at this directory only (never a tree walk) for per-executor
+    ``execute.<pid>.pid`` markers and the legacy shared ``execute.pid``. A
+    marker counts when it names a different pid that is still alive and whose
+    creation marker still matches (not a reused pid), and is younger than the
+    Stop guard's 24h abandonment limit. The legacy marker keeps the guard's rule
+    that a ``run_result.json`` at least as new as the marker means it finished.
+    Any unreadable marker is skipped.
+
+    ``before`` is a ``(mtime_ns, pid)`` key: when given, only peers whose marker
+    sorts earlier count. That is the tie-break for two executors that both pass
+    the first check at the same moment — exactly one of them (the earlier
+    marker) keeps the directory.
+    """
+    try:
+        names = sorted(os.listdir(output_dir))
+    except OSError:
+        return None
+    now = time.time()
+    for name in names:
+        legacy = name == "execute.pid"
+        if not legacy and not (name.startswith("execute.") and name.endswith(".pid")
+                               and name[len("execute."):-len(".pid")].isdigit()):
+            continue
+        path = Path(output_dir) / name
+        try:
+            fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            with os.fdopen(fd, encoding="utf-8") as fh:
+                info = json.load(fh)
+            pid = info["pid"]
+            st = os.stat(path)
+        except (OSError, ValueError, TypeError, KeyError):
+            continue
+        # Same plausibility rule as the guard: os.kill treats pid <= 0 as a
+        # broadcast, and a JSON ``true`` is an int equal to pid 1.
+        if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+            continue
+        if pid == own_pid:
+            continue
+        if before is not None and (st.st_mtime_ns, pid) >= before:
+            continue
+        if now - st.st_mtime > 24 * 3600:
+            continue
+        if legacy:
+            try:
+                if os.path.getmtime(Path(output_dir) / "run_result.json") >= st.st_mtime:
+                    continue
+            except OSError:
+                pass
+        try:
+            os.kill(pid, 0)
+        except PermissionError:
+            pass  # exists, owned by another user
+        except OSError:
+            continue
+        recorded = info.get("create_time")
+        current = _process_create_time(pid)
+        if (recorded is not None and current is not None
+                and str(recorded) != str(current)):
+            continue
+        return pid, path
+    return None
+
+
+def _reject_busy_run_dir(output_dir, pid):
+    """Exit instead of sharing ``output_dir`` with another running executor.
+
+    Executors in one run dir also share ``run_result.json`` and every collected
+    artifact, so they would overwrite each other's results. The first executor
+    keeps the directory and its Stop-guard marker; this one touches nothing.
+    """
+    print(
+        "ERROR: run directory %s is already in use by a running executor "
+        "(pid %d). Two executors must not share a run directory because their "
+        "results and artifacts would overwrite each other. Choose a different "
+        "--output (or --run-id), or wait for the first executor to finish."
+        % (output_dir, pid),
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+
 def _write_pidfile(output_dir):
     """Write ``<output_dir>/execute.<pid>.pid`` so the Stop guard hook can tell
-    this executor is still alive.
+    this executor is still alive — unless another live executor already owns
+    ``output_dir``, in which case this one exits (``_reject_busy_run_dir``)
+    without writing anything, leaving the first executor's marker untouched.
 
     The hook blocks the orchestrator from ending its turn (which would tear down
     the session and kill this process before ``run_result.json`` is written)
@@ -119,6 +206,9 @@ def _write_pidfile(output_dir):
     if _PIDFILE_WRITTEN:
         return
     pid = os.getpid()
+    peer = _live_peer_executor(output_dir, pid)
+    if peer is not None:
+        _reject_busy_run_dir(output_dir, peer[0])
     pidfile = Path(output_dir) / _pidfile_name(pid)
     try:
         # O_NOFOLLOW: the guard reads this path with no-follow semantics, so the
@@ -131,6 +221,21 @@ def _write_pidfile(output_dir):
             json.dump({"pid": pid, "create_time": _process_create_time(pid)}, fh)
     except OSError:
         return  # non-fatal: guard just won't see this run
+    # Two executors can both pass the check above before either has written.
+    # Now that our marker is visible, the one with the earlier marker keeps the
+    # directory and the other backs out, removing only its own file.
+    try:
+        key = (os.stat(pidfile).st_mtime_ns, pid)
+    except OSError:
+        key = None
+    if key is not None:
+        peer = _live_peer_executor(output_dir, pid, before=key)
+        if peer is not None:
+            try:
+                os.remove(pidfile)
+            except OSError:
+                pass
+            _reject_busy_run_dir(output_dir, peer[0])
     _PIDFILE_WRITTEN = True
     _PIDFILE_PATH = pidfile
     atexit.register(_release_pidfile)
@@ -502,16 +607,19 @@ def main():
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # Fallback for the Stop-guard pidfile: already written by _early_pidfile()
+    # before the imports at the top of this module when --run-dir/--output was
+    # passed (SKILL.md does). Otherwise (config-resolved run directory, or an
+    # --output form the scrape didn't recognise) this is the first write,
+    # after the imports and config load.
+    # Runs before anything else writes into output_dir: if another live
+    # executor owns the directory this exits without touching it.
+    _write_pidfile(output_dir)
+
     # Mirror all console output to <output_dir>/console.log so callers never
     # need to redirect stdout with '>' (which blanks the background-command
     # viewer). The real stdout/stderr streams still receive everything.
     _setup_console_log(output_dir)
-
-    # Fallback for the Stop-guard pidfile: already written by _early_pidfile()
-    # before the imports at the top of this module when --run-dir/--output was
-    # passed (SKILL.md does). Otherwise (config-resolved run directory) this is
-    # the first write, after the imports and config load.
-    _write_pidfile(output_dir)
 
     # Resolve skill args: CLI override > config > empty
     # Treat empty/whitespace-only strings as unset (normalize before fallback)

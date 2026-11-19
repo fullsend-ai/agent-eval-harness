@@ -446,8 +446,8 @@ def _finish_executor(execute, monkeypatch, run_dir, pidfile):
 
 
 @pytest.fixture
-def two_executors(tmp_path, monkeypatch, live_proc, live_proc_b):
-    """Executors A and B, both live, registered in the same run dir."""
+def running_executor(tmp_path, monkeypatch, live_proc):
+    """Executor A, live, owning a run dir."""
     import execute
 
     runs = tmp_path / "eval" / "runs"
@@ -455,66 +455,90 @@ def two_executors(tmp_path, monkeypatch, live_proc, live_proc_b):
     run_dir.mkdir(parents=True)
     monkeypatch.setenv("AGENT_EVAL_RUNS_DIR", str(runs))
     a = _start_executor(execute, monkeypatch, run_dir, live_proc.pid)
+    assert guard._live_eval_runs(str(tmp_path)) == [str(run_dir)]
+    return execute, run_dir, a
+
+
+def test_second_executor_rejected_in_active_run_dir(
+        tmp_path, monkeypatch, capsys, running_executor, live_proc_b):
+    """B targets a run dir A is still running in: B is refused, writes no
+    marker, and A stays protected by the Stop guard throughout."""
+    execute, run_dir, a = running_executor
+    a_before = a.read_text()
+
+    with pytest.raises(SystemExit) as exc:
+        _start_executor(execute, monkeypatch, run_dir, live_proc_b.pid)
+    assert exc.value.code not in (0, None)
+    err = capsys.readouterr().err
+    assert str(run_dir) in err and "already in use" in err
+    assert not (run_dir / f"execute.{live_proc_b.pid}.pid").exists()
+    assert execute._PIDFILE_PATH is None  # nothing for B's atexit to release
+    assert sorted(p.name for p in run_dir.iterdir()) == [a.name]
+    assert a.read_text() == a_before
+    assert guard._live_eval_runs(str(tmp_path)) == [str(run_dir)]
+
+    # B's exit path (release) must not touch A's marker either.
+    execute._release_pidfile()
+    assert a.exists()
+    assert guard._live_eval_runs(str(tmp_path)) == [str(run_dir)]
+
+    # A finishes normally: only then does the guard stand down.
+    _finish_executor(execute, monkeypatch, run_dir, a)
+    assert guard._live_eval_runs(str(tmp_path)) == []
+
+
+def test_run_dir_reusable_after_first_executor_finishes(
+        tmp_path, monkeypatch, running_executor, live_proc, live_proc_b):
+    """Rejection is only for a *live* executor: once A has released its marker
+    (result written), a new executor may use the dir."""
+    execute, run_dir, a = running_executor
+
+    _finish_executor(execute, monkeypatch, run_dir, a)
     b = _start_executor(execute, monkeypatch, run_dir, live_proc_b.pid)
-    assert a != b, "each executor must get its own pidfile"
-    assert guard._live_eval_runs(str(tmp_path)) == [str(run_dir)]
-    return execute, run_dir, a, b
-
-
-def test_overlapping_executor_exit_keeps_other_live(tmp_path, monkeypatch,
-                                                    two_executors, live_proc_b):
-    """B starts after A in the same run dir and finishes first. Its result and
-    its cleanup must not hide A, which is still running."""
-    execute, run_dir, a, b = two_executors
-
-    _finish_executor(execute, monkeypatch, run_dir, b)
-    live_proc_b.terminate()
-    live_proc_b.wait(timeout=5)
-    assert not b.exists()
-    assert a.exists(), "B's cleanup removed A's pidfile"
-    # run_result.json (B's) is newer than A's pidfile, yet A is not done.
-    assert guard._live_eval_runs(str(tmp_path)) == [str(run_dir)]
-
-    _finish_executor(execute, monkeypatch, run_dir, a)
-    assert guard._live_eval_runs(str(tmp_path)) == []
-
-
-def test_overlapping_executor_first_exit_keeps_later_live(tmp_path, monkeypatch,
-                                                          two_executors, live_proc):
-    """The mirror case: A finishes first while B is still running."""
-    execute, run_dir, a, b = two_executors
-
-    _finish_executor(execute, monkeypatch, run_dir, a)
-    live_proc.terminate()
-    live_proc.wait(timeout=5)
     assert b.exists()
     assert guard._live_eval_runs(str(tmp_path)) == [str(run_dir)]
 
-    _finish_executor(execute, monkeypatch, run_dir, b)
-    assert guard._live_eval_runs(str(tmp_path)) == []
 
-
-def test_overlapping_executor_killed_without_cleanup(tmp_path, monkeypatch,
-                                                     two_executors, live_proc,
-                                                     live_proc_b):
-    """A killed executor leaves its pidfile behind; its dead pid must neither
-    hide the survivor nor keep the run live once both are gone."""
-    execute, run_dir, a, b = two_executors
-
-    live_proc_b.kill()
-    live_proc_b.wait(timeout=5)
-    assert b.exists()
-    assert guard._live_eval_runs(str(tmp_path)) == [str(run_dir)]
+def test_killed_executor_does_not_block_new_executor(
+        tmp_path, monkeypatch, running_executor, live_proc, live_proc_b):
+    """A killed executor leaves its marker behind; that dead pid must neither
+    block a retry in the same dir nor keep the run live."""
+    execute, run_dir, a = running_executor
 
     live_proc.kill()
     live_proc.wait(timeout=5)
+    assert a.exists()
     assert guard._live_eval_runs(str(tmp_path)) == []
 
+    b = _start_executor(execute, monkeypatch, run_dir, live_proc_b.pid)
+    assert guard._live_eval_runs(str(tmp_path)) == [str(run_dir)]
+    live_proc_b.kill()
+    live_proc_b.wait(timeout=5)
+    assert guard._live_eval_runs(str(tmp_path)) == []
+    assert b.exists()
 
-def test_pidfile_write_leaves_legacy_marker_alone(tmp_path, monkeypatch,
-                                                  live_proc, live_proc_b):
-    """A new executor in a dir an older executor (legacy execute.pid) is still
-    using must not overwrite or delete that marker."""
+
+def test_reused_pid_marker_does_not_block_new_executor(
+        tmp_path, monkeypatch, live_proc, live_proc_b):
+    """A stale marker whose pid now belongs to an unrelated process (creation
+    marker differs) is not a live executor."""
+    import execute
+
+    if guard._process_create_time(live_proc.pid) is None:
+        pytest.skip("no process creation marker on this platform")
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / f"execute.{live_proc.pid}.pid").write_text(
+        json.dumps({"pid": live_proc.pid, "create_time": "bogus"}))
+
+    b = _start_executor(execute, monkeypatch, run_dir, live_proc_b.pid)
+    assert b.exists()
+
+
+def test_new_executor_rejected_by_live_legacy_marker(
+        tmp_path, monkeypatch, capsys, live_proc, live_proc_b):
+    """A running older executor (legacy shared execute.pid) also owns the dir:
+    the new executor is refused and the legacy marker is left untouched."""
     import execute
 
     runs = tmp_path / "eval" / "runs"
@@ -524,10 +548,94 @@ def test_pidfile_write_leaves_legacy_marker_alone(tmp_path, monkeypatch,
     before = legacy.read_text()
     monkeypatch.setenv("AGENT_EVAL_RUNS_DIR", str(runs))
 
-    b = _start_executor(execute, monkeypatch, run_dir, live_proc_b.pid)
-    _finish_executor(execute, monkeypatch, run_dir, b)
-    assert not b.exists()
+    with pytest.raises(SystemExit):
+        _start_executor(execute, monkeypatch, run_dir, live_proc_b.pid)
+    assert "already in use" in capsys.readouterr().err
     assert legacy.read_text() == before
+    assert [p.name for p in run_dir.iterdir()] == ["execute.pid"]
+    assert guard._live_eval_runs(str(tmp_path)) == [str(run_dir)]
+
+
+def test_legacy_marker_with_newer_result_does_not_block(
+        tmp_path, monkeypatch, live_proc, live_proc_b):
+    """Same finished-run rule as the guard for the legacy marker: a result at
+    least as new as it means that executor is done."""
+    import execute
+
+    runs = tmp_path / "eval" / "runs"
+    ct = guard._process_create_time(live_proc.pid)
+    run_dir = _make_run(runs, "run-1", live_proc.pid, ct, with_result=True)
+    monkeypatch.setenv("AGENT_EVAL_RUNS_DIR", str(runs))
+
+    b = _start_executor(execute, monkeypatch, run_dir, live_proc_b.pid)
+    assert b.exists()
+
+
+def test_simultaneous_start_leaves_one_owner(
+        tmp_path, monkeypatch, capsys, running_executor, live_proc_b):
+    """B passes its first check just before A's marker lands. Once both markers
+    exist the later one backs out, removing only its own file."""
+    execute, run_dir, a = running_executor
+    real = execute._live_peer_executor
+    calls = []
+
+    def blind_first_check(*args, **kwargs):
+        calls.append(kwargs.get("before"))
+        return None if len(calls) == 1 else real(*args, **kwargs)
+
+    monkeypatch.setattr(execute, "_live_peer_executor", blind_first_check)
+    old = time.time() - 10
+    os.utime(a, (old, old))  # A's marker is the earlier one
+
+    with pytest.raises(SystemExit):
+        _start_executor(execute, monkeypatch, run_dir, live_proc_b.pid)
+    assert len(calls) == 2 and calls[1] is not None
+    assert "already in use" in capsys.readouterr().err
+    assert [p.name for p in run_dir.iterdir()] == [a.name]
+    assert guard._live_eval_runs(str(tmp_path)) == [str(run_dir)]
+
+
+def test_simultaneous_start_earlier_marker_keeps_dir(
+        tmp_path, monkeypatch, running_executor, live_proc_b):
+    """The mirror of the race: an executor whose marker is the earlier one is
+    not displaced by a peer whose marker is later."""
+    execute, run_dir, a = running_executor
+    real = execute._live_peer_executor
+    calls = []
+
+    def blind_first_check(*args, **kwargs):
+        calls.append(kwargs.get("before"))
+        return None if len(calls) == 1 else real(*args, **kwargs)
+
+    monkeypatch.setattr(execute, "_live_peer_executor", blind_first_check)
+    future = time.time() + 60
+    os.utime(a, (future, future))  # the peer's marker is the later one
+
+    b = _start_executor(execute, monkeypatch, run_dir, live_proc_b.pid)
+    assert len(calls) == 2
+    assert b.exists() and a.exists()
+
+
+def test_second_executor_process_exits_nonzero_before_touching_run_dir(
+        tmp_path, live_proc):
+    """End to end: a real second ``execute.py`` process aimed at a run dir with
+    a live executor exits non-zero with an explanation, and leaves the dir's
+    contents exactly as the first executor had them."""
+    run_dir = tmp_path / "eval" / "runs" / "my-eval" / "run-1"
+    run_dir.mkdir(parents=True)
+    ct = guard._process_create_time(live_proc.pid)
+    marker = run_dir / f"execute.{live_proc.pid}.pid"
+    marker.write_text(json.dumps({"pid": live_proc.pid, "create_time": ct}))
+    before = marker.read_text()
+
+    proc = subprocess.run(
+        [sys.executable, str(EXECUTE_PATH), "--output", str(run_dir)],
+        capture_output=True, text=True, timeout=60, cwd=tmp_path,
+    )
+    assert proc.returncode != 0
+    assert "already in use" in proc.stderr
+    assert [p.name for p in run_dir.iterdir()] == [marker.name]
+    assert marker.read_text() == before
 
 
 def test_release_pidfile_idempotent(tmp_path, monkeypatch):

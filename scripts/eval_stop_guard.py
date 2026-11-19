@@ -39,8 +39,11 @@ CLI-version-proof and self-scoping:
     imports, argument parsing and config load, since the guard is blind until
     that file exists and the racing orchestrator ends its turn immediately after
     launch — and removes it once it has written its run-level
-    ``run_result.json`` (or at exit). One file per executor, so two executors
-    sharing a reused run dir can't overwrite or delete each other's marker.
+    ``run_result.json`` (or at exit). One file per executor, so an executor can
+    only ever remove its own marker. ``execute.py`` also refuses to start in a
+    run dir where another live executor's marker exists, so two live executors
+    do not normally share one run dir (their results would collide); the guard
+    still tolerates several markers, e.g. from a mid-upgrade older executor.
   * this hook scans ``$AGENT_EVAL_RUNS_DIR`` (default ``eval/runs``) under the
     session cwd for those pidfiles, and treats a run as *live* when any of them
     names a pid that is still alive (``os.kill(pid, 0)``) whose creation marker
