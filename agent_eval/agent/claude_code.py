@@ -45,6 +45,12 @@ _PLUGIN_OPTIONAL_FILES = (".mcp.json",)
 # Bulk plugin discovery never reads — keeps the staged copy small.
 _PLUGIN_IGNORE = shutil.ignore_patterns(".git", "node_modules", "__pycache__")
 
+# Per-run settings overlay names, shared with collect.py's `_HARNESS_FILES`
+# (a rename here must keep the stale-copy exclusion in the collector in
+# step, or a hard-killed run's overlay leaks into collected evidence).
+EVAL_SETTINGS_OVERLAY = ".eval-overlay.json"
+EVAL_PERMISSIONS_OVERLAY = ".eval-permissions.json"
+
 
 def _plugin_ignore(plugin: Path):
     """copytree ignore callback: bulk dirs, plus any symlink whose resolved
@@ -729,7 +735,8 @@ class ClaudeCodeRunner(EvalRunner):
         """
         base = Path(settings_path) if settings_path and Path(settings_path).exists() else None
         target_dir = base.parent if base is not None else Path(workspace)
-        overlay = target_dir / (".eval-overlay.json" if plan is not None else ".eval-permissions.json")
+        overlay = target_dir / (EVAL_SETTINGS_OVERLAY if plan is not None
+                                else EVAL_PERMISSIONS_OVERLAY)
         settings_config: dict = {}
         if base is not None:
             try:
