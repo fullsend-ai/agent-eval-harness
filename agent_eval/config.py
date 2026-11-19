@@ -738,6 +738,9 @@ class ExecutionConfig:
     Constraints:
     - timeout: subprocess wall-clock timeout in seconds (None = harness default).
     - max_budget_usd: per-invocation cost cap (None = no cap).
+    - judge_parallelism: how many cases are judged at once, independent of
+      ``parallelism`` (None = inherit ``parallelism``). ``score.py judges
+      --parallelism`` still wins.
 
     Environment:
     - env: extra environment variables injected into each case workspace's
@@ -771,6 +774,7 @@ class ExecutionConfig:
     timeout: Optional[int] = None
     max_budget_usd: Optional[float] = None
     parallelism: Optional[int] = None
+    judge_parallelism: Optional[int] = None
     env: dict = field(default_factory=dict)
     project_hooks: bool = True
     # Extra top-level project entries linked into each staged workspace, on
@@ -2396,6 +2400,7 @@ class EvalConfig:
             timeout=exec_raw.get("timeout"),
             max_budget_usd=exec_raw.get("max_budget_usd"),
             parallelism=exec_raw.get("parallelism"),
+            judge_parallelism=exec_raw.get("judge_parallelism"),
             env=exec_raw.get("env") or {},
             project_hooks=exec_raw.get("project_hooks", True),
             # Default to [] only when absent/null; any other value goes through

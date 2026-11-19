@@ -1,8 +1,9 @@
 """Case judging honours the run's case parallelism limit (issue #323).
 
 `score_cases` judges cases concurrently. Its worker count comes from
-`score.py judges --parallelism`, then `execution.parallelism`, then the CPU
-count, and is always capped at the number of cases.
+`score.py judges --parallelism`, then `execution.judge_parallelism` (issue
+#329), then `execution.parallelism`, then the CPU count, and is always capped
+at the number of cases.
 """
 
 import sys
@@ -20,9 +21,10 @@ import score as sc  # noqa: E402
 from agent_eval.config import EvalConfig, JudgeConfig  # noqa: E402
 
 
-def _config(parallelism=None):
+def _config(parallelism=None, judge_parallelism=None):
     config = EvalConfig(name="t", skill="t")
     config.execution.parallelism = parallelism
+    config.execution.judge_parallelism = judge_parallelism
     config.judges = [JudgeConfig(name="ok", check="return (True, 'ok')")]
     return config
 
@@ -80,6 +82,56 @@ def test_parallelism_is_capped_at_case_count(tmp_path):
 def test_explicit_parallelism_overrides_config(tmp_path):
     workers, _ = _workers(_config(15), _cases(tmp_path, 20), parallelism=6)
     assert workers == 6
+
+
+def test_judge_parallelism_overrides_execution_parallelism(tmp_path):
+    workers, _ = _workers(_config(2, judge_parallelism=12), _cases(tmp_path, 20))
+    assert workers == 12
+
+
+def test_judge_parallelism_overrides_cpu_default(tmp_path):
+    with patch("score.os.cpu_count", return_value=3):
+        workers, _ = _workers(_config(judge_parallelism=9), _cases(tmp_path, 20))
+    assert workers == 9
+
+
+def test_judge_parallelism_is_capped_at_case_count(tmp_path):
+    workers, _ = _workers(_config(2, judge_parallelism=12), _cases(tmp_path, 4))
+    assert workers == 4
+
+
+def test_explicit_parallelism_overrides_judge_parallelism(tmp_path):
+    workers, _ = _workers(_config(2, judge_parallelism=12), _cases(tmp_path, 20),
+                          parallelism=6)
+    assert workers == 6
+
+
+def test_config_only_caller_picks_up_judge_parallelism(tmp_path):
+    """A caller passing only the loaded config (EvalHub, Harbor, the Python
+    API) gets `execution.judge_parallelism` from eval.yaml."""
+    config_path = tmp_path / "eval.yaml"
+    config_path.write_text(
+        "name: t\nexecution: {mode: case, parallelism: 2, judge_parallelism: 11}\n"
+        "judges:\n  - name: ok\n    check: \"return (True, 'ok')\"\n")
+    config = EvalConfig.from_yaml(config_path)
+    assert config.execution.judge_parallelism == 11
+    assert config.execution.parallelism == 2
+    workers, result = _workers(config, _cases(tmp_path / "cases", 20))
+    assert workers == 11
+    assert result["aggregated"]["ok"]["pass_rate"] == 1.0
+
+
+def test_judge_parallelism_defaults_to_none(tmp_path):
+    config_path = tmp_path / "eval.yaml"
+    config_path.write_text("name: t\nexecution: {mode: case, parallelism: 5}\n")
+    config = EvalConfig.from_yaml(config_path)
+    assert config.execution.judge_parallelism is None
+    workers, _ = _workers(config, _cases(tmp_path / "cases", 20))
+    assert workers == 5
+
+
+def test_judge_parallelism_reaches_pairwise(tmp_path):
+    assert _pairwise_workers(_config(2, judge_parallelism=12), tmp_path, 20) == 12
 
 
 @pytest.mark.parametrize("value", [0, -2])
