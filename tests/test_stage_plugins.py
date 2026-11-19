@@ -581,3 +581,8 @@ class TestCollectIgnoresStagedPlugins:
             "a stale settings overlay must never surface as agent-modified "
             "evidence")
         assert ".eval-permissions.json" not in rels
+        # The names are shared with the runner, so a rename cannot drift.
+        from agent_eval.agent.claude_code import (
+            EVAL_PERMISSIONS_OVERLAY, EVAL_SETTINGS_OVERLAY)
+        assert EVAL_SETTINGS_OVERLAY in collect._HARNESS_FILES
+        assert EVAL_PERMISSIONS_OVERLAY in collect._HARNESS_FILES

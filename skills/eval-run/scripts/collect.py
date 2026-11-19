@@ -27,6 +27,9 @@ from pathlib import Path
 
 import yaml
 
+from agent_eval.agent.claude_code import (
+    EVAL_PERMISSIONS_OVERLAY, EVAL_SETTINGS_OVERLAY,
+)
 from agent_eval.config import EvalConfig
 from agent_eval.events import (
     DEFAULT_RESULT_CAP, parse_stream_events, merge_subagent_transcripts,
@@ -40,7 +43,7 @@ _HARNESS_DIRS = {
 _HARNESS_FILES = {
     "output/stdout.log", "output/stderr.log",
     "run_result.json", "batch.yaml", "case_order.yaml",
-    ".eval-overlay.json", ".eval-permissions.json",
+    EVAL_SETTINGS_OVERLAY, EVAL_PERMISSIONS_OVERLAY,
 }
 
 # Every open beneath an agent-written root goes through these flags.
