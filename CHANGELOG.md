@@ -1,3 +1,10 @@
+## [1.66.3](https://github.com/fullsend-ai/agent-eval-harness/compare/v1.66.2...v1.66.3) (2026-11-19)
+
+
+### Bug Fixes
+
+* **eval-run:** exclude runner settings overlays from modified-file collection ([51fa7fb](https://github.com/fullsend-ai/agent-eval-harness/commit/51fa7fb277104a9723813ff9e5d155ba7b43c65c))
+
 ## [1.66.2](https://github.com/fullsend-ai/agent-eval-harness/compare/v1.66.1...v1.66.2) (2026-11-18)
 
 
