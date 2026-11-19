@@ -39,6 +39,11 @@ import sys
 import time
 from pathlib import Path
 
+try:  # POSIX only; where absent the marker scan below is the sole ownership check
+    import fcntl
+except ImportError:  # pragma: no cover - Windows
+    fcntl = None
+
 # ── Stop-guard pidfile ───────────────────────────────────────────────────
 # Defined and invoked *before* the heavy agent_eval imports below, and before
 # argparse/config load, because the window this closes is a race: the
@@ -51,6 +56,10 @@ from pathlib import Path
 
 _PIDFILE_WRITTEN = False
 _PIDFILE_PATH = None
+# Open run-directory lock fds, keyed by the pidfile path published under them.
+_RUN_DIR_LOCKS = {}
+# Lock file taking exclusive ownership of a run directory (see ``_lock_run_dir``).
+_LOCK_NAME = ".execute.lock"
 # A marker is a few dozen bytes of JSON; never read more than this from one.
 _PIDFILE_MAX_BYTES = 4096
 
@@ -104,7 +113,7 @@ def _pidfile_name(pid):
     return "execute.%d.pid" % pid
 
 
-def _live_peer_executor(output_dir, own_pid, before=None):
+def _live_peer_executor(output_dir, own_pid):
     """Return ``(pid, pidfile)`` of another live executor using ``output_dir``,
     or ``None``.
 
@@ -116,10 +125,9 @@ def _live_peer_executor(output_dir, own_pid, before=None):
     that a ``run_result.json`` at least as new as the marker means it finished.
     Any unreadable marker is skipped.
 
-    ``before`` is a ``(mtime_ns, pid)`` key: when given, only peers whose marker
-    sorts earlier count. That is the tie-break for two executors that both pass
-    the first check at the same moment — exactly one of them (the earlier
-    marker) keeps the directory.
+    This is a best-effort view for diagnostics and for executors that predate
+    the run-directory lock; ownership between current executors is decided by
+    ``_lock_run_dir``, not by comparing independently published markers.
     """
     # No safe liveness probe here: CPython maps ``os.kill(pid, 0)`` on Windows to
     # ``TerminateProcess``, so probing a peer would kill it. The Stop guard
@@ -161,8 +169,6 @@ def _live_peer_executor(output_dir, own_pid, before=None):
         # its own contents is not something this script wrote.
         if not legacy and name != _pidfile_name(pid):
             continue
-        if before is not None and (st.st_mtime_ns, pid) >= before:
-            continue
         if now - st.st_mtime > 24 * 3600:
             continue
         if legacy:
@@ -189,22 +195,65 @@ def _live_peer_executor(output_dir, own_pid, before=None):
     return None
 
 
-def _reject_busy_run_dir(output_dir, pid):
+def _reject_busy_run_dir(output_dir, pid=None):
     """Exit instead of sharing ``output_dir`` with another running executor.
 
     Executors in one run dir also share ``run_result.json`` and every collected
     artifact, so they would overwrite each other's results. The first executor
     keeps the directory and its Stop-guard marker; this one touches nothing.
+    ``pid`` is the owner when known (the lock holder's pid is not recorded).
     """
     print(
-        "ERROR: run directory %s is already in use by a running executor "
-        "(pid %d). Two executors must not share a run directory because their "
+        "ERROR: run directory %s is already in use by a running executor%s. "
+        "Two executors must not share a run directory because their "
         "results and artifacts would overwrite each other. Choose a different "
         "--output (or --run-id), or wait for the first executor to finish."
-        % (output_dir, pid),
+        % (output_dir, " (pid %d)" % pid if pid is not None else ""),
         file=sys.stderr,
     )
     sys.exit(1)
+
+
+def _lock_run_dir(output_dir):
+    """Take exclusive ownership of ``output_dir``; return the lock fd.
+
+    A nonblocking ``flock`` on ``<output_dir>/.execute.lock``, held for the
+    life of the process (the kernel drops it on any exit, including SIGKILL, so
+    a crashed executor never leaves the directory locked). Unlike inferring an
+    owner from independently published markers, acquisition is atomic: of two
+    executors starting at once, exactly one gets the lock, however their marker
+    writes interleave. Calls ``_reject_busy_run_dir`` when another executor
+    holds it.
+
+    Returns ``None`` when no lock can be taken (no ``fcntl``, the lock file
+    cannot be opened or is not a regular file, or the filesystem refuses
+    ``flock``); ownership then rests on the marker scan alone. The fd is not
+    inheritable, so subprocesses the executor spawns never hold the lock.
+    The lock file is left in place on release: unlinking it would let a late
+    opener lock a different inode.
+    """
+    if fcntl is None:
+        return None
+    path = Path(output_dir) / _LOCK_NAME
+    try:
+        # O_NONBLOCK so a FIFO planted at the lock name cannot hang startup.
+        fd = os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+                     | getattr(os, "O_NONBLOCK", 0), 0o600)
+    except OSError:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            os.close(fd)
+            return None
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(fd)
+        peer = _live_peer_executor(output_dir, os.getpid())
+        _reject_busy_run_dir(output_dir, peer[0] if peer else None)
+    except OSError:
+        os.close(fd)
+        return None
+    return fd
 
 
 def _write_pidfile(output_dir):
@@ -228,8 +277,13 @@ def _write_pidfile(output_dir):
     if _PIDFILE_WRITTEN:
         return
     pid = os.getpid()
+    # Ownership is decided by the lock, taken before anything is published. The
+    # marker scan still runs for executors that predate the lock.
+    lock_fd = _lock_run_dir(output_dir)
     peer = _live_peer_executor(output_dir, pid)
     if peer is not None:
+        if lock_fd is not None:
+            os.close(lock_fd)
         _reject_busy_run_dir(output_dir, peer[0])
     pidfile = Path(output_dir) / _pidfile_name(pid)
     # Publish atomically: write a temp file (a name no probe or guard glob
@@ -255,29 +309,19 @@ def _write_pidfile(output_dir):
             os.remove(tmp)
         except OSError:
             pass
+        if lock_fd is not None:
+            os.close(lock_fd)
         return  # non-fatal: guard just won't see this run
-    # Two executors can both pass the check above before either has written.
-    # Now that our marker is visible, the one with the earlier marker keeps the
-    # directory and the other backs out, removing only its own file.
-    try:
-        key = (os.stat(pidfile).st_mtime_ns, pid)
-    except OSError:
-        key = None
-    if key is not None:
-        peer = _live_peer_executor(output_dir, pid, before=key)
-        if peer is not None:
-            try:
-                os.remove(pidfile)
-            except OSError:
-                pass
-            _reject_busy_run_dir(output_dir, peer[0])
+    if lock_fd is not None:
+        _RUN_DIR_LOCKS[pidfile] = lock_fd
     _PIDFILE_WRITTEN = True
     _PIDFILE_PATH = pidfile
     atexit.register(_release_pidfile)
 
 
 def _release_pidfile():
-    """Remove this executor's pidfile, if it wrote one. Safe to call twice.
+    """Remove this executor's pidfile and drop its run-directory lock, if it
+    wrote them. Safe to call twice.
 
     Registered with ``atexit`` and deliberately *not* called when
     ``run_result.json`` is first written: provider reconciliation, strict-mode
@@ -298,6 +342,14 @@ def _release_pidfile():
         os.remove(pidfile)
     except OSError:
         pass
+    # Release the lock last, so the directory is never unowned while the marker
+    # is still visible.
+    lock_fd = _RUN_DIR_LOCKS.pop(pidfile, None)
+    if lock_fd is not None:
+        try:
+            os.close(lock_fd)
+        except OSError:
+            pass
 
 
 def _early_pidfile(argv):
