@@ -1525,24 +1525,7 @@ def _run_single_case(runner, skill_name, case_id, case_ws, output_dir,
             if f.is_file() and not f.is_symlink() and f.suffix == ".jsonl":
                 shutil.copy2(f, out_subagents / f.name)
 
-    case_result = {
-        "exit_code": result.exit_code,
-        "duration_s": round(result.duration_s, 1),
-        "token_usage": result.token_usage,
-        "cost_usd": result.cost_usd,
-        "num_turns": result.num_turns,
-        "per_model_usage": result.per_model_usage,
-        "per_model_turns": result.per_model_turns,
-        # Denials happen in the runner's stream but were never persisted:
-        # a real run's only denial (a workspace-escape attempt) survived
-        # solely in raw stdout.log, invisible to every downstream reader.
-        "permission_denials": result.permission_denials or [],
-        "message_ids": result.message_ids or [],
-        "generation_ids": result.generation_ids or [],
-        "cost_source": result.cost_source,
-        "error_class": result.error_class,
-        "budget": result.budget,
-    }
+    case_result = result.to_case_result()
     _apply_hook_results(case_result, hook_results, output_dir)
     # run_result write-site 3: case mode, per-case result
     case_result = write_run_result(case_output / "run_result.json", case_result)
