@@ -45,7 +45,7 @@ Run-dir resolution always goes through [#325](https://github.com/fullsend-ai/age
 
 ### Plan
 
-`plan` resolves refs, runs `before_all`, enumerates the selected cases, mints the run ID, and writes a plan file (run ID, case list, resolved refs). Nonsecret `before_all` env/data travel with the plan to case jobs; secrets go through the platform's secret mechanism, never plan artifacts. Slices and fetched logs are access-protected; the console is unfiltered and platform masking is not guaranteed.
+`plan` resolves refs, mints the run ID, and resolves the run and workspace paths before running `before_all` with that ID. It enumerates the selected cases and writes a plan file (run ID, case list, resolved refs). Nonsecret `before_all` env/data travel with the plan to case jobs; secrets go through the platform's secret mechanism, never plan artifacts. Slices and fetched logs are access-protected; the console is unfiltered, as in production.
 
 ### Case
 
