@@ -304,6 +304,9 @@ def test_explicit_run_dir_is_authoritative_in_eval_run_skill_md():
     section = text.split("### Run Directory", 1)[1].split("Persist parsed flags", 1)[0]
     assert "authoritative" in section
     assert "do not run discovery" in section
+    assert "`--run-id`" in section and "differs from that basename" in section
+    assert "stop with an error" in section
+    assert "`--run-dir` alone is valid" in section
     assert "Otherwise" in section and "discover.py" in section
 
 

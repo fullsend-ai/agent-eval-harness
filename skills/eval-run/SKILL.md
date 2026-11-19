@@ -61,7 +61,7 @@ Once config exists, read it to understand the eval setup (skill under test, runn
 
 ### Run Directory
 
-Only once the config exists (after any bootstrap above). If `--run-dir` was supplied it is authoritative: `<run-dir>` is that path and `<id>` its basename — do not run discovery. Otherwise never build the path yourself; get it from the harness:
+Only once the config exists (after any bootstrap above). If `--run-dir` was supplied it is authoritative: `<run-dir>` is that path and `<id>` its basename — do not run discovery. If `--run-id` was also supplied explicitly and differs from that basename, stop with an error; `--run-dir` alone is valid. Otherwise never build the path yourself; get it from the harness:
 
 ```bash
 python3 ${CLAUDE_SKILL_DIR}/../../scripts/discover.py --config <config> --run-id <id>
