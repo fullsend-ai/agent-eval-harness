@@ -1,3 +1,10 @@
+# [1.67.0](https://github.com/fullsend-ai/agent-eval-harness/compare/v1.66.3...v1.67.0) (2026-11-19)
+
+
+### Features
+
+* **score:** apply case parallelism to judging ([#324](https://github.com/fullsend-ai/agent-eval-harness/issues/324)) ([f736709](https://github.com/fullsend-ai/agent-eval-harness/commit/f736709dcc827c46dacf5ee2526864ac4aba25dc)), closes [#323](https://github.com/fullsend-ai/agent-eval-harness/issues/323)
+
 ## [1.66.3](https://github.com/fullsend-ai/agent-eval-harness/compare/v1.66.2...v1.66.3) (2026-11-19)
 
 

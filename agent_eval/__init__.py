@@ -1,3 +1,3 @@
 """Agent Eval Harness — generic evaluation framework for Claude Code skills."""
 
-__version__ = "1.66.3"
+__version__ = "1.67.0"
