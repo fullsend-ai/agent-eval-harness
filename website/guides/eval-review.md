@@ -25,7 +25,8 @@ it: *"how did my skill do"*, *"what failed"*, *"look at the eval results"*,
 
 | Flag | Required | Default | Description |
 | --- | --- | --- | --- |
-| `--run-id <id>` | **yes** | — | Which eval run to review |
+| `--run-id <id>` | one of `--run-id`/`--run-dir` | — | Which eval run to review, under the default runs directory |
+| `--run-dir <path>` | one of `--run-id`/`--run-dir` | — | The run directory itself; authoritative when given (its basename is the run id). `/eval-run` hands this to review, which reads and writes `review.yaml` there |
 | `--config <path>` | no | auto-discover | Path to the eval config |
 | `--cases <name> [<name> ...]` | no | all | Exact case directory names to review |
 

@@ -18,10 +18,15 @@ Stdlib only, and no ``agent_eval.config`` import: callers pass the config.
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 
 DEFAULT_RUNS_DIR = "eval/runs"
+
+# The run-id rule workspace.py enforces; an explicit --run-dir basename is the
+# run id, so it must satisfy it up front rather than fail mid-run.
+RUN_ID_PATTERN = re.compile(r"[A-Za-z0-9._-]+")
 
 
 class RunLocationError(ValueError):
@@ -61,6 +66,10 @@ def resolve_run_dir(config, run_id: str | None = None,
         path = Path(run_dir)
         name = path.resolve().name
         _check_component(name, "run directory basename")
+        if not RUN_ID_PATTERN.fullmatch(name):
+            raise RunLocationError(
+                f"invalid --run-dir basename {name!r}: the basename is the run id "
+                f"and must match [A-Za-z0-9._-]+")
         if run_id and run_id != name:
             raise RunLocationError(
                 f"--run-id {run_id!r} conflicts with --run-dir {str(run_dir)!r} "

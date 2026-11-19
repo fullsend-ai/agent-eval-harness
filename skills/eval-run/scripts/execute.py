@@ -31,6 +31,7 @@ import atexit
 import copy
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -159,6 +160,11 @@ def _early_pidfile(argv):
         return
     try:
         directory = Path(out)
+        # An invalid run id is rejected by main() (run_location.RUN_ID_PATTERN,
+        # not imported here to keep this write ahead of the agent_eval imports);
+        # do not create its directory.
+        if not re.fullmatch(r"[A-Za-z0-9._-]+", directory.resolve().name):
+            return
         directory.mkdir(parents=True, exist_ok=True)
         _write_pidfile(directory)
         _warn_if_unscannable(directory)

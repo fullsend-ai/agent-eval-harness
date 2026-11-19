@@ -354,3 +354,60 @@ def test_log_results_uses_the_explicit_run_dir(tmp_path, runs):
     out = proc.stdout + proc.stderr
     assert str(elsewhere.resolve()) in out
     assert str(runs) not in out
+
+
+@pytest.mark.parametrize("bad", ["my run", "run:1", "run#1", "résumé", "a$b"])
+def test_run_dir_basename_must_be_a_valid_run_id(tmp_path, runs, bad):
+    """The basename is the run id, so workspace.py's rule applies up front."""
+    config = EvalConfig.from_yaml(_config(tmp_path, _SKILL_AND_NAME))
+    with pytest.raises(RunLocationError, match=r"\[A-Za-z0-9\._-\]"):
+        resolve_run_dir(config, None, tmp_path / "ci" / bad)
+
+
+@pytest.mark.parametrize("script,extra", [
+    ("execute.py", ["--workspace", "ws", "--model", "m"]),
+    ("preflight.py", []),
+])
+def test_scripts_reject_an_invalid_run_dir_basename(tmp_path, runs, script, extra):
+    cfg = _config(tmp_path, _SKILL_AND_NAME)
+    proc = _run(SCRIPTS / script, "--config", cfg, *extra,
+                "--run-dir", tmp_path / "bad name", cwd=tmp_path)
+    assert proc.returncode != 0
+    assert "must match [A-Za-z0-9._-]+" in proc.stderr
+    assert not (tmp_path / "bad name").exists()
+
+
+def _review_md():
+    return (ROOT / "skills" / "eval-review" / "SKILL.md").read_text()
+
+
+def test_eval_review_accepts_an_authoritative_run_dir():
+    text = _review_md()
+    assert "| `--run-dir <path>`" in text
+    section = text.split("### Run Directory", 1)[1].split("## Step 1", 1)[0]
+    assert "authoritative" in section
+    assert "do not run discovery" in section
+    assert "differs from that basename" in section
+    assert "stop with an error" in section
+    assert "discover.py" in section
+
+
+def test_eval_review_reads_and_writes_inside_the_run_dir():
+    text = _review_md()
+    assert "$AGENT_EVAL_RUNS_DIR/<eval-name>" not in text
+    assert "Write `<run-dir>/review.yaml`" in text
+    assert "<run-dir>/summary.yaml" in text
+    assert "--run-dir <run-dir> --action push-feedback" in text
+
+
+def test_eval_run_hands_the_run_dir_to_eval_review():
+    text = _skill_md()
+    assert "/eval-review --run-dir <run-dir>" in text
+    assert "/eval-review --run-id" not in text
+
+
+def test_run_id_rule_matches_workspace_and_early_pidfile():
+    """One run-id rule: the resolver, workspace.py and execute.py's early write."""
+    from agent_eval.run_location import RUN_ID_PATTERN
+    for script in ("workspace.py", "execute.py"):
+        assert f'r"{RUN_ID_PATTERN.pattern}"' in (SCRIPTS / script).read_text(), script

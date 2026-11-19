@@ -13,7 +13,8 @@ You are an interactive reviewer. You present evaluation results to the user, col
 
 | Argument | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `--run-id <id>` | **yes** | — | Which eval run to review |
+| `--run-id <id>` | one of `--run-id`/`--run-dir` | — | Which eval run to review, under the default runs directory |
+| `--run-dir <path>` | one of `--run-id`/`--run-dir` | — | The run directory itself; authoritative when given (its basename is the run id). `/eval-run` passes this |
 | `--config <path>` | no | auto-discover | Path to eval config |
 | `--cases <name> [<name> ...]` | no | all | Exact case directory names to review |
 
@@ -29,23 +30,25 @@ python3 ${CLAUDE_SKILL_DIR}/../../scripts/discover.py
 - **Multiple configs found**: present the list and ask the user which eval's results to review
 - **No configs found**: error, suggest running `/eval-analyze` first
 
-After selecting a config, get the run directory with `python3 ${CLAUDE_SKILL_DIR}/../../scripts/discover.py --config <config> --run-id <id>`. The `$AGENT_EVAL_RUNS_DIR/<eval-name>/<id>` paths below are that directory; don't derive `<eval-name>` yourself.
+### Run Directory
+
+If `--run-dir` was supplied it is authoritative: `<run-dir>` is that path and `<id>` its basename — do not run discovery. If `--run-id` was also supplied and differs from that basename, stop with an error. Otherwise, after selecting a config, get `<run-dir>` with `python3 ${CLAUDE_SKILL_DIR}/../../scripts/discover.py --config <config> --run-id <id>`; don't derive `<eval-name>` yourself. Every run path below is under `<run-dir>`, and review feedback is read from and written to `<run-dir>/review.yaml`.
 
 ## Step 1: Load Results
 
 Read the scoring summary and per-case results:
 
 ```bash
-python3 ${CLAUDE_SKILL_DIR}/scripts/agent_eval/state.py read $AGENT_EVAL_RUNS_DIR/<eval-name>/<id>/summary.yaml
+python3 ${CLAUDE_SKILL_DIR}/scripts/agent_eval/state.py read <run-dir>/summary.yaml
 ```
 
 Also read eval.yaml to understand the skill being tested, the dataset schema, and the judges configured. Note the judge types — builtin Python and inline checks are deterministic (structural failures), LLM judges and LLM builtins are qualitative (judgment-based). The `judge_type` field is available in results.
 
 ## Step 2: Present Overview
 
-If `$AGENT_EVAL_RUNS_DIR/<eval-name>/<id>/analysis.md` exists, read it — it contains the automated analysis from `/eval-run` with recommendations, failure patterns, and root causes. Present its key recommendation to the user as context before starting the case walkthrough.
+If `<run-dir>/analysis.md` exists, read it — it contains the automated analysis from `/eval-run` with recommendations, failure patterns, and root causes. Present its key recommendation to the user as context before starting the case walkthrough.
 
-If an HTML report exists at `$AGENT_EVAL_RUNS_DIR/<eval-name>/<id>/report.html`, mention it. If the user just ran `/eval-run` (which opens the report automatically), they've likely already seen it — skip the overview and ask which cases they want to discuss.
+If an HTML report exists at `<run-dir>/report.html`, mention it. If the user just ran `/eval-run` (which opens the report automatically), they've likely already seen it — skip the overview and ask which cases they want to discuss.
 
 Show a high-level summary:
 - Overall pass rates per judge
@@ -60,7 +63,7 @@ For each case the user wants to review, present:
 
 1. **Judge scores** — which judges passed/failed, with rationale. Note the judge type (builtin/check/llm/code) for context.
 2. **Pairwise results** — if a baseline comparison was run, show which version won for this case and the comparison rationale.
-3. **Output summary** — read the key output files from `$AGENT_EVAL_RUNS_DIR/<eval-name>/<id>/cases/<case>/` and summarize what the skill produced. Don't dump full file contents — describe what's there and let the user ask to see specifics.
+3. **Output summary** — read the key output files from `<run-dir>/cases/<case>/` and summarize what the skill produced. Don't dump full file contents — describe what's there and let the user ask to see specifics.
 4. **Ask for feedback** — "How does this look? Anything the judges missed?"
 
 Collect the user's feedback for each case. Keep notes on what they flagged — these are the signals that judges can't capture.
@@ -71,7 +74,7 @@ If the user says "looks fine" or gives no feedback, move on. Empty feedback mean
 
 If execution transcripts exist, delegate analysis to an Agent — transcripts can be very large and should not be loaded into your context directly.
 
-Check `run_result.json` for `execution_mode`. In `case` mode, each case has its own transcript at `$AGENT_EVAL_RUNS_DIR/<eval-name>/<id>/cases/<case>/stdout.log`. In `batch` mode, there's one at `$AGENT_EVAL_RUNS_DIR/<eval-name>/<id>/stdout.log`. Analyze the transcript(s) for the cases the user reviewed.
+Check `run_result.json` for `execution_mode`. In `case` mode, each case has its own transcript at `<run-dir>/cases/<case>/stdout.log`. In `batch` mode, there's one at `<run-dir>/stdout.log`. Analyze the transcript(s) for the cases the user reviewed.
 
 Spawn an Agent to read the relevant stdout.log and report:
 - Did the skill try multiple approaches before succeeding? (instructions may be unclear)
@@ -86,7 +89,7 @@ Report relevant transcript findings to the user alongside their case feedback �
 
 Persist the collected feedback so it survives beyond this conversation and can be used by `/eval-optimize` and `/eval-mlflow`.
 
-Write `$AGENT_EVAL_RUNS_DIR/<eval-name>/<id>/review.yaml` with this structure:
+Write `<run-dir>/review.yaml` with this structure:
 
 ```yaml
 run_id: "<id>"
@@ -132,7 +135,7 @@ After applying approved changes, suggest (include `--config <config>` if a non-d
 - `/eval-run --model <model> --baseline <run-id>` to re-run and compare
 - `/eval-optimize --model <model>` if they want automated iteration from here
 - `/eval-dataset` to add cases if the feedback revealed coverage gaps (augments the existing dataset)
-- `/eval-mlflow --run-id <run-id> --action push-feedback` to push review feedback to MLflow traces
+- `/eval-mlflow --run-dir <run-dir> --action push-feedback` to push review feedback to MLflow traces
 
 ## Rules
 

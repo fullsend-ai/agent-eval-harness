@@ -20,7 +20,7 @@ Parse `$ARGUMENTS`:
 | `--subagent-model <model>` | no | `models.subagent` → falls back to skill model | Model for subagents (e.g., `claude-sonnet-4-6` while main is `claude-opus-4-7`) |
 | `--skill <name>` | no | from config | Override the skill to test |
 | `--run-id <id>` | no | `YYYY-MM-DD-<model>` | Identifier for this run |
-| `--run-dir <path>` | no | resolved from config + run id | Put the run in exactly this directory; its basename is the run id |
+| `--run-dir <path>` | no | resolved from config + run id | Put the run in exactly this directory; its basename is the run id and must match `[A-Za-z0-9._-]+` |
 | `--cases <id> [<id> ...]` | no | all cases | Exact case IDs to run |
 | `--baseline <run-id>` | no | — | Previous run to compare against |
 | `--no-llm-judges` | no | false | Skip LLM judges (prompt, prompt_file, LLM builtins, agent). Run deterministic judges (check, Python builtins, external code). |
@@ -249,7 +249,7 @@ Tell the user the report is at `<run-dir>/report.html`.
 **If `--gold` flag**: After scoring, copy collected artifacts to dataset case dirs as reference files. Report which cases were saved.
 
 Suggest next steps (include `--config <config>` if a non-default config was used):
-- `/eval-review --run-id <id>` for interactive human review of the results
+- `/eval-review --run-dir <run-dir>` (plus `--config <config>` if non-default) for interactive human review of the results
 - `/eval-optimize --model <model>` for automated improvement based on failures
 - `/eval-mlflow --run-id <id>` to log results to MLflow
 
