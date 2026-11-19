@@ -29,6 +29,7 @@ import agent_eval._bootstrap  # noqa: F401 — auto-activate venv
 import argparse
 import atexit
 import copy
+import errno
 import json
 import os
 import re
@@ -39,10 +40,14 @@ import sys
 import time
 from pathlib import Path
 
-try:  # POSIX only; where absent the marker scan below is the sole ownership check
+try:  # POSIX: ``flock`` owns the run directory (see ``_lock_run_dir``)
     import fcntl
 except ImportError:  # pragma: no cover - Windows
     fcntl = None
+try:  # Windows: byte-range lock, the same process-held ownership primitive
+    import msvcrt
+except ImportError:  # POSIX
+    msvcrt = None
 
 # ── Stop-guard pidfile ───────────────────────────────────────────────────
 # Defined and invoked *before* the heavy agent_eval imports below, and before
@@ -127,7 +132,10 @@ def _live_peer_executor(output_dir, own_pid):
 
     This is a best-effort view for diagnostics and for executors that predate
     the run-directory lock; ownership between current executors is decided by
-    ``_lock_run_dir``, not by comparing independently published markers.
+    ``_lock_run_dir``, not by comparing independently published markers. A
+    marker that cannot be inspected (unreadable, malformed, not a regular file)
+    is skipped on purpose: failing closed on it would let any stray file block
+    a run directory permanently, and the lock is the authority anyway.
     """
     # No safe liveness probe here: CPython maps ``os.kill(pid, 0)`` on Windows to
     # ``TerminateProcess``, so probing a peer would kill it. The Stop guard
@@ -214,45 +222,82 @@ def _reject_busy_run_dir(output_dir, pid=None):
     sys.exit(1)
 
 
+def _refuse_unowned_run_dir(output_dir, why):
+    """Exit because exclusive ownership of ``output_dir`` cannot be established.
+
+    Fail closed: an executor that cannot prove it is the only one in the run
+    directory could overwrite (or be overwritten by) another's results and
+    would be invisible to the Stop guard.
+    """
+    print(
+        "ERROR: cannot take exclusive ownership of run directory %s (%s). "
+        "Refusing to run: without it a second executor could share the "
+        "directory and overwrite results. Check that the directory is "
+        "writable and on a filesystem that supports file locking, that "
+        "%s there is a regular file, or choose a different --output."
+        % (output_dir, why, _LOCK_NAME),
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+
+def _try_lock_nb(fd):
+    """Nonblocking exclusive lock on ``fd``: ``True`` if taken, ``False`` if
+    another process holds it. Raises ``OSError`` when locking is unsupported."""
+    if fcntl is not None:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return False
+        return True
+    if msvcrt is not None:  # pragma: no cover - Windows
+        try:
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        except OSError as exc:
+            if exc.errno in (errno.EACCES, errno.EDEADLK):
+                return False
+            raise
+        return True
+    raise OSError("no file-locking primitive on this platform")
+
+
 def _lock_run_dir(output_dir):
     """Take exclusive ownership of ``output_dir``; return the lock fd.
 
-    A nonblocking ``flock`` on ``<output_dir>/.execute.lock``, held for the
-    life of the process (the kernel drops it on any exit, including SIGKILL, so
-    a crashed executor never leaves the directory locked). Unlike inferring an
-    owner from independently published markers, acquisition is atomic: of two
-    executors starting at once, exactly one gets the lock, however their marker
-    writes interleave. Calls ``_reject_busy_run_dir`` when another executor
-    holds it.
+    A nonblocking process-held lock (``flock``; ``msvcrt.locking`` on Windows)
+    on ``<output_dir>/.execute.lock``, held for the life of the process (the
+    kernel drops it on any exit, including SIGKILL, so a crashed executor never
+    leaves the directory locked). Unlike inferring an owner from independently
+    published markers, acquisition is atomic: of two executors starting at once,
+    exactly one gets the lock, however their marker writes interleave.
 
-    Returns ``None`` when no lock can be taken (no ``fcntl``, the lock file
-    cannot be opened or is not a regular file, or the filesystem refuses
-    ``flock``); ownership then rests on the marker scan alone. The fd is not
-    inheritable, so subprocesses the executor spawns never hold the lock.
-    The lock file is left in place on release: unlinking it would let a late
-    opener lock a different inode.
+    Fails closed: calls ``_reject_busy_run_dir`` when another executor holds the
+    lock, and ``_refuse_unowned_run_dir`` when no lock can be taken at all (the
+    lock file cannot be opened or is not a regular file, no locking primitive
+    exists, or the filesystem refuses the lock). The fd is not inheritable, so
+    subprocesses the executor spawns never hold the lock. The lock file is left
+    in place on release: unlinking it would let a late opener lock a different
+    inode.
     """
-    if fcntl is None:
-        return None
     path = Path(output_dir) / _LOCK_NAME
     try:
         # O_NONBLOCK so a FIFO planted at the lock name cannot hang startup.
         fd = os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
                      | getattr(os, "O_NONBLOCK", 0), 0o600)
-    except OSError:
-        return None
+    except OSError as exc:
+        _refuse_unowned_run_dir(output_dir, "cannot open lock file: %s" % exc)
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             os.close(fd)
-            return None
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
+            _refuse_unowned_run_dir(output_dir, "lock file is not a regular file")
+        acquired = _try_lock_nb(fd)
+    except OSError as exc:
+        os.close(fd)
+        _refuse_unowned_run_dir(output_dir, "cannot lock: %s" % exc)
+    if not acquired:
         os.close(fd)
         peer = _live_peer_executor(output_dir, os.getpid())
         _reject_busy_run_dir(output_dir, peer[0] if peer else None)
-    except OSError:
-        os.close(fd)
-        return None
     return fd
 
 
@@ -270,6 +315,11 @@ def _write_pidfile(output_dir):
     ``atexit``), i.e. only after reconciliation, strict-mode rewrites and
     ``after_all`` hooks have finished.
 
+    Fails closed: an executor that cannot take the run-directory lock, or cannot
+    publish its marker (leaving it invisible to the Stop guard), exits instead
+    of running unprotected. The lock is held from acquisition to process exit
+    and never given up on this path except immediately before that exit.
+
     Idempotent: only the first call writes, so the early call below and the
     fallback in ``main()`` never double-register the cleanup.
     """
@@ -282,8 +332,7 @@ def _write_pidfile(output_dir):
     lock_fd = _lock_run_dir(output_dir)
     peer = _live_peer_executor(output_dir, pid)
     if peer is not None:
-        if lock_fd is not None:
-            os.close(lock_fd)
+        os.close(lock_fd)
         _reject_busy_run_dir(output_dir, peer[0])
     pidfile = Path(output_dir) / _pidfile_name(pid)
     # Publish atomically: write a temp file (a name no probe or guard glob
@@ -304,16 +353,22 @@ def _write_pidfile(output_dir):
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump({"pid": pid, "create_time": _process_create_time(pid)}, fh)
         os.replace(tmp, pidfile)
-    except OSError:
+    except OSError as exc:
         try:
             os.remove(tmp)
         except OSError:
             pass
-        if lock_fd is not None:
-            os.close(lock_fd)
-        return  # non-fatal: guard just won't see this run
-    if lock_fd is not None:
-        _RUN_DIR_LOCKS[pidfile] = lock_fd
+        print(
+            "ERROR: cannot publish the Stop-guard marker %s: %s. Refusing to "
+            "run unprotected: the Stop guard could not see this executor and "
+            "its results would have no ownership guard." % (pidfile, exc),
+            file=sys.stderr,
+        )
+        # Dropped only now, as the process exits, so no other executor can be
+        # admitted and then run alongside one that carried on.
+        os.close(lock_fd)
+        sys.exit(1)
+    _RUN_DIR_LOCKS[pidfile] = lock_fd
     _PIDFILE_WRITTEN = True
     _PIDFILE_PATH = pidfile
     atexit.register(_release_pidfile)

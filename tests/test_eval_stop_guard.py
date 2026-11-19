@@ -640,15 +640,144 @@ def test_lock_dropped_when_holder_is_killed(tmp_path, monkeypatch, live_proc_b):
         holder.stdout.close()
 
 
-def test_marker_scan_still_guards_when_lock_unavailable(
-        tmp_path, monkeypatch, running_executor, live_proc_b):
-    """Where no lock can be taken (no ``fcntl``), the marker scan alone still
-    refuses a second executor."""
-    execute, run_dir, a = running_executor
+def _assert_refused_unowned(execute, monkeypatch, capsys, run_dir, pid):
+    """Starting an executor in ``run_dir`` exits non-zero, explains that
+    ownership could not be established, and publishes no marker."""
+    with pytest.raises(SystemExit) as exc:
+        _start_executor(execute, monkeypatch, run_dir, pid)
+    assert exc.value.code not in (0, None)
+    assert "exclusive ownership" in capsys.readouterr().err
+    assert not list(run_dir.glob("execute.*.pid"))
+    assert not list(run_dir.glob(".execute.*.tmp"))
+    assert execute._PIDFILE_PATH is None
+
+
+def test_refuses_to_run_when_no_locking_primitive(
+        tmp_path, monkeypatch, capsys):
+    """No ``fcntl``/``msvcrt``: ownership cannot be established, so the
+    executor refuses to run rather than falling back to the racy marker scan."""
+    import execute
+
     monkeypatch.setattr(execute, "fcntl", None)
+    monkeypatch.setattr(execute, "msvcrt", None)
+    _assert_refused_unowned(execute, monkeypatch, capsys, tmp_path, os.getpid())
+
+
+def test_refuses_to_run_when_filesystem_refuses_lock(
+        tmp_path, monkeypatch, capsys):
+    """``flock`` failing with anything but contention (e.g. ENOLCK on a
+    filesystem without lock support) fails closed."""
+    import errno
+    import execute
+
+    def no_locks(fd, op):
+        raise OSError(errno.ENOLCK, "No locks available")
+
+    monkeypatch.setattr(execute.fcntl, "flock", no_locks)
+    _assert_refused_unowned(execute, monkeypatch, capsys, tmp_path, os.getpid())
+
+
+def test_refuses_to_run_when_lock_path_is_a_symlink(
+        tmp_path, monkeypatch, capsys):
+    """A symlink planted at the lock name is never followed; startup refuses."""
+    import execute
+
+    target = tmp_path / "elsewhere"
+    target.write_text("keep")
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / ".execute.lock").symlink_to(target)
+    _assert_refused_unowned(execute, monkeypatch, capsys, run_dir, os.getpid())
+    assert target.read_text() == "keep"
+
+
+def test_refuses_to_run_when_lock_path_is_a_fifo(
+        tmp_path, monkeypatch, capsys):
+    """A FIFO at the lock name neither hangs startup nor is accepted."""
+    import signal
+    import execute
+
+    if not hasattr(os, "mkfifo") or not hasattr(signal, "SIGALRM"):
+        pytest.skip("needs mkfifo and SIGALRM")
+    os.mkfifo(tmp_path / ".execute.lock")
+    signal.signal(signal.SIGALRM, lambda *a: pytest.fail("startup hung on FIFO"))
+    signal.alarm(10)
+    try:
+        _assert_refused_unowned(execute, monkeypatch, capsys, tmp_path,
+                                os.getpid())
+    finally:
+        signal.alarm(0)
+
+
+def test_refuses_to_run_when_lock_file_not_openable(
+        tmp_path, monkeypatch, capsys):
+    """A lock path that cannot be opened (here, a directory) fails closed."""
+    import execute
+
+    (tmp_path / ".execute.lock").mkdir()
+    _assert_refused_unowned(execute, monkeypatch, capsys, tmp_path, os.getpid())
+
+
+def test_simultaneous_start_without_lock_support_admits_nobody_extra(
+        tmp_path, monkeypatch, capsys, live_proc, live_proc_b):
+    """The race the old fallback allowed: A and B start together with locking
+    unavailable. Neither is admitted, so there is never a pair sharing the dir."""
+    import execute
+
+    monkeypatch.setattr(execute, "fcntl", None)
+    monkeypatch.setattr(execute, "msvcrt", None)
     with pytest.raises(SystemExit):
-        _start_executor(execute, monkeypatch, run_dir, live_proc_b.pid)
-    assert _entries(run_dir) == [a.name]
+        _start_executor(execute, monkeypatch, tmp_path, live_proc.pid)
+    with pytest.raises(SystemExit):
+        _start_executor(execute, monkeypatch, tmp_path, live_proc_b.pid)
+    assert not list(tmp_path.glob("execute.*.pid"))
+
+
+def test_marker_publication_failure_aborts_and_keeps_dir_owned(
+        tmp_path, monkeypatch, capsys, live_proc, live_proc_b):
+    """If the marker cannot be published (here, a directory sits at the marker
+    name), startup aborts with the underlying error instead of returning to
+    ``main()`` — which would retry with the lock released in between and, on a
+    second failure, run with neither lock nor marker."""
+    import execute
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / f"execute.{live_proc.pid}.pid").mkdir()
+
+    with pytest.raises(SystemExit) as exc:
+        _start_executor(execute, monkeypatch, run_dir, live_proc.pid)
+    assert exc.value.code not in (0, None)
+    err = capsys.readouterr().err
+    assert "cannot publish" in err and "Refusing to run" in err
+    assert execute._PIDFILE_PATH is None
+    assert not list(run_dir.glob(".execute.*.tmp"))
+    # The aborted executor left no marker and its lock goes with it, so the
+    # directory is free for the next (single) executor.
+    (run_dir / f"execute.{live_proc.pid}.pid").rmdir()
+    b = _start_executor(execute, monkeypatch, run_dir, live_proc_b.pid)
+    assert b.exists()
+
+
+def test_publication_failure_process_exits_nonzero(tmp_path):
+    """End to end: a real executor whose marker path is blocked exits non-zero
+    instead of continuing without a marker or a lock."""
+    run_dir = tmp_path / "eval" / "runs" / "e" / "r"
+    run_dir.mkdir(parents=True)
+    # Any marker name this process could pick is its own pid, unknown up front;
+    # make every temp/marker write fail by removing write permission instead.
+    run_dir.chmod(0o500)
+    try:
+        if os.access(run_dir, os.W_OK):
+            pytest.skip("directory permissions not enforced (running as root)")
+        proc = subprocess.run(
+            [sys.executable, str(EXECUTE_PATH), "--output", str(run_dir)],
+            capture_output=True, text=True, timeout=60, cwd=tmp_path,
+        )
+    finally:
+        run_dir.chmod(0o700)
+    assert proc.returncode != 0
+    assert "Refusing to run" in proc.stderr
 
 
 def test_second_executor_process_exits_nonzero_before_touching_run_dir(
