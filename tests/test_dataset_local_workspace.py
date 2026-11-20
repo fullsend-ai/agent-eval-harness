@@ -25,12 +25,16 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from agent_eval.agent.base import RunResult  # noqa: E402
 from agent_eval.agent.fullsend import FullsendRunner, materialize_symlinks  # noqa: E402
 from agent_eval.config import EvalConfig  # noqa: E402
 from agent_eval.harbor.run import _podman_project_hide_paths  # noqa: E402
 from agent_eval.workspace_provisioning import (  # noqa: E402
+    STAGING_MARKER,
+    STAGING_VERSION,
     dataset_protected_paths,
     materialize_shared_files,
+    staged_workspace_error,
 )
 import workspace  # noqa: E402  (skills/eval-run/scripts via conftest)
 
@@ -118,24 +122,105 @@ class TestFullsendSharedFiles:
         assert not (case_ws / "demo" / "evals" / "cases").exists()
         assert _bash_finds_key(case_ws) == ""
 
-    def test_upload_drops_a_real_copy_staged_by_another_route(
-            self, tmp_path, monkeypatch):
-        # A runner built without config knowledge of how the tree was staged:
-        # the upload boundary itself removes byte-identical dataset copies.
-        project, config = _project(tmp_path, monkeypatch, runner="fullsend")
-        case_ws = tmp_path / "ws"
-        copied = case_ws / "copied" / "evals"
-        copied.mkdir(parents=True)
-        shutil.copytree(project / DATASET, copied / "cases")
-        (case_ws / "keep.txt").write_text("not an answer key\n")
-        runner = FullsendRunner.from_config(config)
 
-        runner._drop_dataset_copies(case_ws)
+
+class TestStagedWorkspaceRecord:
+    """The fullsend runner takes only workspaces staged with the dataset
+    filtered out; it never inspects their content."""
+
+    @staticmethod
+    def _execute(config, ws, monkeypatch):
+        launched = []
+        runner = FullsendRunner(
+            "a", protected_paths=dataset_protected_paths(config))
+        monkeypatch.setattr(
+            runner, "_launch",
+            lambda *a, **k: launched.append(a) or RunResult(
+                exit_code=0, stdout="", stderr="", duration_s=0.0))
+        result = runner.execute(
+            "demo", "", ws, "m", settings_path=None, timeout_s=5)
+        return result, launched
+
+    @pytest.mark.parametrize("runner", ["claude-code", "codex", "fullsend"])
+    def test_staged_case_workspace_is_accepted_for_any_declared_runner(
+            self, tmp_path, monkeypatch, runner):
+        # ``--agent fullsend`` and a fullsend pipeline step get the workspace
+        # staged for whichever runner the config declares.
+        project, config = _project(
+            tmp_path, monkeypatch, runner=runner, shared=SHARED)
+        case_ws = _stage(tmp_path, project, config)
+
+        result, launched = self._execute(config, case_ws, monkeypatch)
+
+        assert result.exit_code == 0 and len(launched) == 1
+
+    def test_batch_workspace_is_stamped_too(self, tmp_path, monkeypatch):
+        project, _config = _project(tmp_path, monkeypatch, runner="fullsend")
+        cfg_path = project / "eval.yaml"
+        raw = yaml.safe_load(cfg_path.read_text())
+        raw["execution"]["mode"] = "batch"
+        cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False))
+        monkeypatch.setattr(workspace.tempfile, "gettempdir",
+                            lambda: str(tmp_path / "tmp"))
+        (tmp_path / "tmp").mkdir()
+        # A batch case needs an input file to be listed.
+        args = SimpleNamespace(
+            config=str(cfg_path), run_id="r1", cases=None, symlinks=None)
+        summary = workspace._prepare(args)
+
+        assert staged_workspace_error(summary["workspace"]) is None
+
+    def test_workspace_from_before_the_filtering_is_refused(
+            self, tmp_path, monkeypatch):
+        # No record: staged by an older harness (which copied the dataset in
+        # through shared files, say) or put together by hand.
+        project, config = _project(
+            tmp_path, monkeypatch, runner="fullsend", shared=SHARED)
+        old = tmp_path / "old"
+        shutil.copytree(project, old, symlinks=True)
+
+        result, launched = self._execute(config, old, monkeypatch)
+
+        assert result.exit_code == -1 and launched == []
+        assert "stage it again" in result.stderr
+        # Nothing was touched, nothing deleted.
+        assert (old / DATASET / "case-001" / "annotations.yaml").is_file()
+
+    def test_record_of_another_version_is_refused(self, tmp_path, monkeypatch):
+        project, config = _project(
+            tmp_path, monkeypatch, runner="fullsend", shared=SHARED)
+        case_ws = _stage(tmp_path, project, config)
+        (case_ws / ".git" / STAGING_MARKER).write_text(f"{STAGING_VERSION - 1}\n")
+
+        result, launched = self._execute(config, case_ws, monkeypatch)
+
+        assert result.exit_code == -1 and launched == []
+
+    def test_staged_workspace_holds_no_dataset_and_no_record_in_the_tree(
+            self, tmp_path, monkeypatch):
+        project, config = _project(
+            tmp_path, monkeypatch, runner="fullsend", shared=SHARED)
+        case_ws = _stage(tmp_path, project, config)
 
         assert _bash_finds_key(case_ws) == ""
-        assert (case_ws / "keep.txt").is_file()
-        # The case input a sandbox is meant to receive is not an answer key.
-        assert (copied / "cases" / "case-001" / "input.yaml").is_file()
+        # The record sits inside .git: not a file of the working tree, and not
+        # in the initial commit the collector diffs against.
+        tracked = subprocess.run(
+            ["git", "-C", str(case_ws), "ls-files"],
+            capture_output=True, text=True, check=True).stdout.split()
+        assert STAGING_MARKER not in tracked
+        assert not (case_ws / STAGING_MARKER).exists()
+
+    def test_history_of_a_staged_workspace_carries_no_answer_key(
+            self, tmp_path, monkeypatch):
+        project, config = _project(
+            tmp_path, monkeypatch, runner="fullsend", shared=SHARED)
+        case_ws = _stage(tmp_path, project, config)
+
+        log = subprocess.run(
+            ["git", "-C", str(case_ws), "log", "-p", "--all"],
+            capture_output=True, text=True, check=True).stdout
+        assert KEY not in log
 
 
 def _empty_path_project(tmp_path, monkeypatch, *, shared=None):

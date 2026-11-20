@@ -47,6 +47,7 @@ from agent_eval.config import EvalConfig, load_raw, resolve_arguments
 from agent_eval.judges import BuiltinJudgeRegistry
 from agent_eval.tools.interception import generate_interception
 from agent_eval.workspace_provisioning import (
+    STAGING_VERSION,
     dataset_protected_paths,
     materialize_shared_files,
 )
@@ -286,6 +287,9 @@ def _render_multistep_task_toml(*, task_name, task_desc, eval_name, case_id,
         # Which config file(s) produced the bundle (root first); the reuse check
         # refuses a package built from a different chain.
         "config_chain = [" + ", ".join(_toml_string(c) for c in (config_chain or [])) + "]",
+        # Which dataset filtering staged the package; the reuse check refuses
+        # a package without it (staged before the dataset was kept out).
+        f"dataset_filter = {STAGING_VERSION}",
         "",
         "[environment]",
         f'docker_image = {_toml_string(image)}',
@@ -537,6 +541,7 @@ def generate_tasks(
             # Which config file(s) produced the bundle (root first).
             "CONFIG_CHAIN": "[" + ", ".join(
                 _toml_string(c) for c in (getattr(config, "config_chain", None) or [])) + "]",
+            "DATASET_FILTER": str(STAGING_VERSION),
             "IMAGE": _toml_string(image),
             "WORKDIR": _toml_string(workdir),
             "VERIFIER_TIMEOUT": verifier_timeout,

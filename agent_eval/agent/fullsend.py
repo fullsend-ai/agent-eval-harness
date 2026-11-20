@@ -79,9 +79,8 @@ from agent_eval.actions_mask import (
 )
 from agent_eval.config import resolve_env_value, workspace_source_roots
 from agent_eval.workspace_provisioning import (
-    dataset_fingerprints,
     dataset_protected_paths,
-    find_dataset_copies,
+    staged_workspace_error,
 )
 from .base import EvalRunner, RunResult, terminate_process_group
 from .stream_capture import (
@@ -426,22 +425,6 @@ class FullsendRunner(EvalRunner):
         # dataset (annotations.yaml, reference answers) is evaluation material.
         self._protected_paths = [Path(p).resolve() for p in (protected_paths or [])]
 
-    def _drop_dataset_copies(self, workspace: Path) -> None:
-        """Delete real copies of dataset files from the tree about to be uploaded.
-
-        Staging filters the dataset out of the workspace, but whatever route a
-        copy took here (a ``--agent fullsend`` override of another declared
-        runner, a pipeline step, a shared directory copied before this runner
-        ran), the upload is the boundary that matters: a file byte-identical to
-        a dataset file never reaches the sandbox.
-        """
-        if not self._protected_paths:
-            return
-        prints = dataset_fingerprints(self._protected_paths, exclude=[workspace])
-        for path in find_dataset_copies(workspace, prints):
-            _warn_protected(path)
-            path.unlink()
-
     @property
     def name(self) -> str:
         return "fullsend"
@@ -551,6 +534,16 @@ class FullsendRunner(EvalRunner):
                         "run and no artifacts could be collected; remove it"))
 
         workspace = workspace.resolve()
+        # The dataset is kept out of a workspace when it is staged, for every
+        # runner (a ``--agent fullsend`` override and a pipeline step receive
+        # the same workspace). A workspace without that record predates the
+        # filtering or was not staged by workspace.py: the upload would carry
+        # whatever it holds, so it is refused and has to be staged again.
+        stale = staged_workspace_error(workspace)
+        if stale:
+            return RunResult(
+                exit_code=-1, stdout="", duration_s=0.0,
+                stderr=f"fullsend runner: {stale}")
         original_settings = None
         try:
             try:
@@ -566,7 +559,6 @@ class FullsendRunner(EvalRunner):
                 roots = (None if self._allowed_roots is None
                          else [*self._allowed_roots, workspace])
                 materialize_symlinks(workspace, roots, self._protected_paths)
-                self._drop_dataset_copies(workspace)
                 output_dir = _run_base(workspace)
             except (OSError, ValueError, shutil.Error) as e:
                 return RunResult(

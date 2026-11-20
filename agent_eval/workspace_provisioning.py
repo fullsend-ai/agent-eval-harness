@@ -10,7 +10,6 @@ Plain string entries are per-case files handled by the case-directory copy and
 are ignored here.
 """
 
-import hashlib
 import os
 import shutil
 import sys
@@ -50,11 +49,13 @@ def _ignore_symlinks(dirpath, names):
 
 
 def _make_ignore(protected):
-    """copytree ignore callback: drop symlinks and protected paths.
+    """copytree ignore callback: drop symlinks, protected paths and Git metadata.
 
     A symlink is dropped without being resolved (resolving a cyclic link
     raises on Python 3.11/3.12), and nothing is resolved at all when there is
-    nothing to protect.
+    nothing to protect. A ``.git`` entry next to (or above) a protected path is
+    dropped too: the dataset's committed history would hand the answer keys
+    back through ``git show`` however cleanly the working tree was filtered.
     """
     def ignore(dirpath, names):
         skip = _ignore_symlinks(dirpath, names)
@@ -63,6 +64,10 @@ def _make_ignore(protected):
                 n for n in names
                 if n not in skip and _is_protected(_real(Path(dirpath) / n), protected)
             }
+            if ".git" in names:
+                here = _real(Path(dirpath))
+                if any(p == here or p.is_relative_to(here) for p in protected):
+                    skip.add(".git")
         return skip
 
     return ignore
@@ -131,63 +136,47 @@ def _real(path):
     return Path(os.path.realpath(path))
 
 
-# Files a sandboxed case legitimately carries from its dataset directory.
-_CASE_INPUT_NAMES = frozenset(
-    {"input.yaml", "input.yml", "input.json", "answers.yaml"})
+# Version of the dataset filtering that staging applies. Whatever stages a
+# tree for a sandboxed substrate (a Harbor task package, a workspace uploaded
+# by the fullsend runner) records it, and the consumer refuses a tree that
+# carries none or an older one: that tree was staged before the dataset was
+# kept out of it, and nothing here inspects its content to find out. Staging
+# it again (regeneration) is the only way to a tree that is accepted. Bump it
+# when the filtering changes in a way older trees do not satisfy.
+STAGING_VERSION = 1
+
+# A workspace records it as a file inside its own ``.git`` directory (every
+# workspace staged by ``workspace.py`` is a git repo): there it is neither part
+# of the working tree nor of the diff the collector takes.
+STAGING_MARKER = "agent-eval-dataset-filter"
 
 
-def _file_digest(path):
-    h = hashlib.sha256()
-    with open(path, "rb") as fh:
-        for chunk in iter(lambda: fh.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
+def stamp_staged_workspace(workspace):
+    """Record that *workspace* was staged with the dataset filtered out."""
+    git_dir = Path(workspace) / ".git"
+    git_dir.mkdir(parents=True, exist_ok=True)
+    (git_dir / STAGING_MARKER).write_text(f"{STAGING_VERSION}\n")
 
 
-def dataset_fingerprints(protected_paths, exclude=()):
-    """``(basename, sha256)`` of every non-empty dataset file.
+def staged_workspace_error(workspace):
+    """Why *workspace* may not go to a sandbox, or ``None`` when it may.
 
-    The case input files a sandbox is meant to receive are left out, and so is
-    anything under *exclude* (the tree being checked, which may sit inside a
-    broad dataset root). Used to spot a *copy* of an answer key: a path check
-    cannot, once the bytes have been copied elsewhere.
+    A workspace is accepted only when ``workspace.py`` of this version staged it
+    (see :func:`stamp_staged_workspace`). One staged by an older version, or put
+    together by hand, may hold the dataset: it must be staged again.
     """
-    prints = set()
-    excluded = [_real(p) for p in exclude]
-    for root in protected_paths:
-        root = Path(root)
-        if not root.is_dir():
-            continue
-        for dirpath, dirnames, filenames in os.walk(root):
-            dirnames[:] = [
-                d for d in dirnames
-                if not _is_protected(_real(Path(dirpath) / d), excluded)]
-            for name in filenames:
-                path = Path(dirpath) / name
-                if (name in _CASE_INPUT_NAMES or path.is_symlink()
-                        or not path.is_file() or path.stat().st_size == 0):
-                    continue
-                prints.add((name, _file_digest(path)))
-    return prints
-
-
-def find_dataset_copies(tree, fingerprints):
-    """Regular files under *tree* that are byte-identical copies of dataset files."""
-    found = []
-    if not fingerprints:
-        return found
-    names = {name for name, _ in fingerprints}
-    for dirpath, dirnames, filenames in os.walk(tree):
-        for name in filenames:
-            if name not in names:
-                continue
-            path = Path(dirpath) / name
-            if (name in _CASE_INPUT_NAMES or path.is_symlink()
-                    or not path.is_file() or path.stat().st_size == 0):
-                continue
-            if (name, _file_digest(path)) in fingerprints:
-                found.append(path)
-    return found
+    marker = Path(workspace) / ".git" / STAGING_MARKER
+    try:
+        version = marker.read_text().strip()
+    except (OSError, UnicodeDecodeError):
+        version = None
+    if version == str(STAGING_VERSION):
+        return None
+    return (
+        f"workspace {workspace} was not staged with the eval dataset filtered "
+        "out (it predates dataset filtering, or was not created by "
+        "`workspace.py`): stage it again with /eval-run (or workspace.py) so "
+        "the answer keys stay out of the sandbox")
 
 
 def materialize_shared_files(

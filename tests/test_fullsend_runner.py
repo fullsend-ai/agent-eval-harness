@@ -32,6 +32,16 @@ from agent_eval.config import EvalConfig
 
 SCRIPTS = Path(__file__).parent.parent / "skills" / "eval-run" / "scripts"
 
+
+@pytest.fixture(autouse=True)
+def _workspaces_are_staged(monkeypatch):
+    """The workspaces here are hand-built, not staged by ``workspace.py``.
+
+    The runner refuses a workspace that carries no record of the dataset
+    filtering; that refusal is covered in ``test_dataset_local_workspace.py``.
+    """
+    monkeypatch.setattr(fullsend_mod, "staged_workspace_error", lambda ws: None)
+
 FAKE_FULLSEND = textwrap.dedent('''\
     import json, os, sys, time
     from pathlib import Path

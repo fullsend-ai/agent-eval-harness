@@ -42,6 +42,7 @@ from agent_eval.tools.permissions import compile_permission_rules
 from agent_eval.workspace_provisioning import (
     dataset_protected_paths,
     materialize_shared_files,
+    stamp_staged_workspace,
 )
 from workspace_files import _copy_input_files
 
@@ -143,6 +144,7 @@ def _prepare(args):
     # the project root and load .claude/settings.json with the expanded
     # permission patterns (e.g. /private/tmp variants on macOS).
     subprocess.run([GIT_BIN, "init", "-q", str(workspace)], check=True)
+    stamp_staged_workspace(workspace)
 
     # Branch on execution mode
     # Case mode: one invocation per test case (works for both skill and prompt)
@@ -267,6 +269,9 @@ def _create_per_case_workspace(workspace, case_dirs, config, args):
         case_ws = workspace / "cases" / case_id
         case_ws.mkdir(parents=True, exist_ok=True)
         subprocess.run([GIT_BIN, "init", "-q", str(case_ws)], check=True)
+        # Everything staged below leaves the dataset out; the fullsend runner
+        # refuses a workspace without this record (an older or hand-made one).
+        stamp_staged_workspace(case_ws)
 
         # Copy only the input file and answers.yaml into the workspace.
         # Companion files (e.g., source code for autofix skills) should

@@ -8,7 +8,9 @@ the podman environment. Every check that matters is a Bash-style hunt
 
 import json
 import os
+import shutil
 import subprocess
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -18,9 +20,8 @@ from agent_eval.config import EvalConfig
 from agent_eval.harbor import run as run_mod
 from agent_eval.harbor import tasks as gen
 from agent_eval.workspace_provisioning import (
-    dataset_fingerprints,
+    STAGING_VERSION,
     dataset_protected_paths,
-    find_dataset_copies,
     materialize_shared_files,
 )
 
@@ -161,24 +162,63 @@ class TestStaleAndReusedPackages:
         # Nothing was deleted.
         assert (project / DATASET / "case-001" / "annotations.yaml").is_file()
 
-    def test_reuse_refuses_a_package_holding_a_dataset_copy(self, tmp_path):
-        project, cfg_path, config = _project(tmp_path)
+    def test_generated_package_records_the_dataset_filtering(self, tmp_path):
+        _project_dir, cfg_path, config = _project(tmp_path)
         out = tmp_path / "tasks"
         gen.generate_tasks(config, cfg_path, out, image="img:1")
-        run_mod._validate_task_package_reuse(out, config)  # clean: accepted
+        task = tomllib.loads((out / "case-001" / "task.toml").read_text())
+        assert task["metadata"]["dataset_filter"] == STAGING_VERSION
+        run_mod._validate_task_package_reuse(out, config)  # accepted
 
-        staged = out / "case-001" / "environment" / "demo" / "evals"
-        staged.mkdir(parents=True)
-        (staged / "annotations.yaml").write_text(f"expected: {KEY}\n")
+    def test_multi_step_package_records_the_dataset_filtering(self, tmp_path):
+        _project_dir, cfg_path, _config = _project(tmp_path)
+        raw = yaml.safe_load(cfg_path.read_text())
+        raw["execution"] = {"steps": [
+            {"id": "a", "skill": "demo", "arguments": "{{ input.prompt }}"},
+            {"id": "b", "skill": "demo", "arguments": "again"},
+        ]}
+        cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False))
+        config = EvalConfig.from_yaml(cfg_path)
+        out = tmp_path / "tasks"
+        gen.generate_tasks(config, cfg_path, out, image="img:1")
+        task = tomllib.loads((out / "case-001" / "task.toml").read_text())
+        assert task["metadata"]["dataset_filter"] == STAGING_VERSION
+        run_mod._validate_task_package_reuse(out, config)
+
+    @pytest.mark.parametrize("value", [None, 0, STAGING_VERSION - 1, True, "1"])
+    def test_reuse_refuses_a_package_without_the_current_record(
+            self, tmp_path, value):
+        # A package from before the filtering carries no record; whatever it
+        # holds, it is refused and has to be regenerated. Its content is never
+        # inspected, so a renamed answer key cannot slip through either.
+        _project_dir, cfg_path, config = _project(tmp_path)
+        out = tmp_path / "tasks"
+        gen.generate_tasks(config, cfg_path, out, image="img:1")
+        toml_path = out / "case-001" / "task.toml"
+        lines = [ln for ln in toml_path.read_text().splitlines()
+                 if not ln.startswith("dataset_filter")]
+        if value is not None:
+            lines.insert(
+                lines.index("[environment]"),
+                f"dataset_filter = {json.dumps(value)}")
+        toml_path.write_text("\n".join(lines) + "\n")
 
         with pytest.raises(ValueError, match="--regenerate"):
             run_mod._validate_task_package_reuse(out, config)
 
-    def test_reuse_check_ignores_the_case_inputs_a_package_carries(self, tmp_path):
-        project, cfg_path, config = _project(tmp_path)
+    def test_regeneration_makes_an_old_package_reusable(self, tmp_path):
+        _project_dir, cfg_path, config = _project(tmp_path)
         out = tmp_path / "tasks"
         gen.generate_tasks(config, cfg_path, out, image="img:1")
-        assert (out / "case-001" / "environment" / "input.yaml").is_file()
+        toml_path = out / "case-001" / "task.toml"
+        toml_path.write_text("\n".join(
+            ln for ln in toml_path.read_text().splitlines()
+            if not ln.startswith("dataset_filter")) + "\n")
+        with pytest.raises(ValueError, match="--regenerate"):
+            run_mod._validate_task_package_reuse(out, config)
+
+        gen.generate_tasks(config, cfg_path, out, image="img:1")
+
         run_mod._validate_task_package_reuse(out, config)
 
 
@@ -207,7 +247,9 @@ class TestLaunch:
         real_popen = subprocess.Popen
 
         def fake_popen(command, **kw):
-            if command[0] != "harbor":   # the Bash hunt below is a real process
+            # The Bash hunt below is a real process; harbor may be spelled as
+            # a resolved path when it is installed next to the interpreter.
+            if Path(command[0]).name != "harbor":
                 return real_popen(command, **kw)
             captured["command"] = command
             captured["env"] = kw["env"]
@@ -281,13 +323,14 @@ class TestLaunch:
                 mounts=[{"type": "bind", "source": str(project / DATASET),
                          "target": "/data", "read_only": True}])
 
-    def test_reused_package_with_an_answer_key_stops_the_run(
+    def test_reused_package_from_before_the_filtering_stops_the_run(
             self, tmp_path, monkeypatch):
         project, cfg_path, config = _project(tmp_path)
         gen.generate_tasks(config, cfg_path, tmp_path / "tasks", image="img:1")
-        gold = tmp_path / "tasks" / "case-001" / "environment" / "gold"
-        gold.mkdir()
-        (gold / "annotations.yaml").write_text(f"expected: {KEY}\n")
+        toml_path = tmp_path / "tasks" / "case-001" / "task.toml"
+        toml_path.write_text("\n".join(
+            ln for ln in toml_path.read_text().splitlines()
+            if not ln.startswith("dataset_filter")) + "\n")
         with pytest.raises(ValueError, match="--regenerate"):
             self._run(tmp_path, monkeypatch, cfg_path)
 
@@ -314,28 +357,170 @@ class TestProvisioningRobustness:
             assert (ws / "shared" / "keep.txt").is_file()
             assert not (ws / "shared" / "a").exists()
 
-    def test_fingerprints_flag_copies_not_case_inputs(self, tmp_path):
+
+
+def _commit_everything(project: Path) -> None:
+    """Commit the project, annotations included, as a real repository would."""
+    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    for argv in (["init", "-q"], ["add", "-A"], ["commit", "-q", "-m", "cases"]):
+        subprocess.run(["git", "-C", str(project), *argv], check=True,
+                       capture_output=True, env=env)
+
+
+def git_recovers_key(view: Path) -> bool:
+    """Can the committed annotations be read back through git inside *view*?
+
+    The commands an agent in the container would run, with ``safe.directory``
+    set the way a read-only mount owned by another user needs.
+    """
+    path = f"{DATASET}/case-001/annotations.yaml"
+    git = ["git", "-c", "safe.directory=*", "-C", str(view)]
+    for argv in (["show", f"HEAD:{path}"], ["grep", "-I", KEY, "HEAD"],
+                 ["log", "-p", "--all"], ["cat-file", "-p", f"HEAD:{path}"]):
+        out = subprocess.run([*git, *argv], capture_output=True, text=True)
+        if out.returncode == 0 and KEY in out.stdout:
+            return True
+    return False
+
+
+def container_view(project: Path, hidden: list[str], dest: Path) -> Path:
+    """The project as the container sees it: each hidden path an empty tmpfs."""
+    shutil.copytree(project, dest, symlinks=True)
+    for rel in hidden:
+        masked = dest / rel
+        shutil.rmtree(masked)
+        masked.mkdir()
+    return dest
+
+
+class TestGitHistory:
+    """Committed annotations must not come back through ``git`` (#345)."""
+
+    def test_the_committed_key_is_recoverable_without_a_mask(self, tmp_path):
+        project, _cfg_path, _config = _project(tmp_path)
+        _commit_everything(project)
+        # Guards the tests below: with only the dataset directory hidden, the
+        # key is still one ``git show`` away.
+        view = container_view(project, [DATASET], tmp_path / "view")
+        assert bash_finds_key(view) == ""
+        assert git_recovers_key(view)
+
+    def test_podman_project_mount_hides_the_git_metadata(self, tmp_path):
         project, _cfg_path, config = _project(tmp_path)
-        prints = dataset_fingerprints(dataset_protected_paths(config))
-        tree = tmp_path / "tree"
-        (tree / "x").mkdir(parents=True)
-        (tree / "x" / "annotations.yaml").write_text(f"expected: {KEY}\n")
-        (tree / "x" / "annotations.yaml.bak").write_text(f"expected: {KEY}\n")
-        (tree / "x" / "input.yaml").write_bytes(
-            (project / DATASET / "case-001" / "input.yaml").read_bytes())
-        (tree / "x" / "other.yaml").write_text("different\n")
+        _commit_everything(project)
 
-        found = find_dataset_copies(tree, prints)
+        hidden = run_mod._podman_project_hide_paths(
+            config, {"AGENT_EVAL_PODMAN_PROJECT_DIR": str(project)})
 
-        assert [p.name for p in found] == ["annotations.yaml"]
+        assert DATASET in hidden and ".git" in hidden
+        view = container_view(project, hidden, tmp_path / "view")
+        assert bash_finds_key(view) == ""
+        assert not git_recovers_key(view)
 
-    def test_fingerprints_leave_out_the_excluded_tree(self, tmp_path):
+    def test_nested_repositories_are_hidden_too(self, tmp_path):
         project, _cfg_path, config = _project(tmp_path)
-        # A tree inside the dataset (a broad root) is not its own answer key.
-        inner = project / DATASET / "case-001" / "pkg"
+        _commit_everything(project)
+        nested = project / "vendor" / "lib"
+        nested.mkdir(parents=True)
+        (nested / "f.txt").write_text("x\n")
+        _commit_everything(nested)
+        # A repository inside the dataset is masked with the dataset itself.
+        inner = project / DATASET / "case-001" / "sub"
         inner.mkdir()
-        (inner / "notes.txt").write_text("package content\n")
-        prints = dataset_fingerprints(
-            dataset_protected_paths(config), exclude=[inner])
-        assert not any(name == "notes.txt" for name, _ in prints)
-        assert any(name == "annotations.yaml" for name, _ in prints)
+        (inner / "f.txt").write_text("x\n")
+        _commit_everything(inner)
+
+        hidden = run_mod._podman_project_hide_paths(
+            config, {"AGENT_EVAL_PODMAN_PROJECT_DIR": str(project)})
+
+        assert sorted(hidden) == sorted([DATASET, ".git", "vendor/lib/.git"])
+
+    def test_gitdir_file_pointing_into_the_project_is_followed(self, tmp_path):
+        project, _cfg_path, config = _project(tmp_path)
+        _commit_everything(project)
+        # A submodule-style checkout: its ``.git`` is a file naming a metadata
+        # directory elsewhere in the project (here outside any ``.git``).
+        meta = project / "meta" / "sub.git"
+        shutil.copytree(project / ".git", meta)
+        sub = project / "sub"
+        sub.mkdir()
+        (sub / ".git").write_text(f"gitdir: {meta}\n")
+
+        hidden = run_mod._podman_project_hide_paths(
+            config, {"AGENT_EVAL_PODMAN_PROJECT_DIR": str(project)})
+
+        assert "meta/sub.git" in hidden
+        assert "sub/.git" not in hidden   # a file: nothing to overlay
+
+    def test_gitdir_outside_the_project_is_not_in_the_container(self, tmp_path):
+        project, _cfg_path, config = _project(tmp_path)
+        outside = tmp_path / "elsewhere.git"
+        outside.mkdir()
+        sub = project / "sub"
+        sub.mkdir()
+        (sub / ".git").write_text(f"gitdir: {outside}\n")
+
+        hidden = run_mod._podman_project_hide_paths(
+            config, {"AGENT_EVAL_PODMAN_PROJECT_DIR": str(project)})
+
+        assert hidden == [DATASET]
+
+    def test_project_without_the_dataset_needs_no_git_mask(self, tmp_path):
+        _project_dir, _cfg_path, config = _project(tmp_path)
+        other = tmp_path / "other"
+        (other / ".git").mkdir(parents=True)
+
+        assert run_mod._podman_project_hide_paths(
+            config, {"AGENT_EVAL_PODMAN_PROJECT_DIR": str(other)}) == []
+
+    def test_skill_root_copy_leaves_the_repository_history_out(self, tmp_path):
+        project, _cfg_path, config = _project(tmp_path)
+        _commit_everything(project)
+        stage = tmp_path / "stage"
+        stage.mkdir()
+
+        roots = run_mod._dataset_free_skill_roots(config, [project], stage)
+
+        assert roots != [project]
+        assert (roots[0] / "skills" / "demo" / "SKILL.md").is_file()
+        assert not (roots[0] / ".git").exists()
+        assert bash_finds_key(roots[0]) == ""
+
+    def test_shared_directory_holding_the_dataset_is_copied_without_git(
+            self, tmp_path):
+        project, cfg_path, _config = _project(tmp_path)
+        _commit_everything(project)
+        raw = yaml.safe_load(cfg_path.read_text())
+        raw["dataset"]["workspace"] = {"files": [
+            {"dest": "proj", "source": "."}]}
+        cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False))
+        config = EvalConfig.from_yaml(cfg_path)
+        ws = tmp_path / "ws"
+        ws.mkdir()
+
+        materialize_shared_files(
+            ws, config, protected_paths=dataset_protected_paths(config))
+
+        assert (ws / "proj" / "skills" / "demo" / "SKILL.md").is_file()
+        assert not (ws / "proj" / ".git").exists()
+        assert bash_finds_key(ws) == ""
+
+    def test_shared_directory_without_the_dataset_keeps_its_git(self, tmp_path):
+        project, cfg_path, _config = _project(tmp_path)
+        plugin = project / "plugin"
+        plugin.mkdir()
+        (plugin / "SKILL.md").write_text("# p\n")
+        _commit_everything(plugin)
+        raw = yaml.safe_load(cfg_path.read_text())
+        raw["dataset"]["workspace"] = {"files": [
+            {"dest": "plugin", "source": "plugin"}]}
+        cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False))
+        config = EvalConfig.from_yaml(cfg_path)
+        ws = tmp_path / "ws"
+        ws.mkdir()
+
+        materialize_shared_files(
+            ws, config, protected_paths=dataset_protected_paths(config))
+
+        assert (ws / "plugin" / ".git").is_dir()

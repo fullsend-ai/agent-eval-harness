@@ -116,7 +116,7 @@ Behavior (`workspace_files._copy_input_files` + `workspace_provisioning.material
 | `{dest, source}` — `dest` colliding with a reserved name (`input.yaml`, `answers.yaml`, `annotations.yaml`, `batch.yaml`, `.claude`, …), or empty/`.`/`/`, absolute, or parent-traversing | Skipped with a warning. |
 | `{dest, source}` — `dest` resolving inside the `source` directory | Skipped with a warning (would recurse). |
 | `{dest, source}` — `source` inside the dataset directory (`dataset.path`; with it empty, a case directory next to `eval.yaml`) | Skipped with a warning, in every case workspace and Harbor task package: the dataset holds the answer keys. |
-| `{dest, source}` — directory `source` that contains the dataset | Copied without it. A fullsend upload also drops any file that is a byte-identical copy of a dataset file. |
+| `{dest, source}` — directory `source` that contains the dataset | Copied without it, and without the `.git` directory next to or above it (the repository's history would return the answer keys through `git show`). Only the dataset's own path is filtered: a copy of an answer key made by hand elsewhere in the project is not looked for. |
 | Not listed | Left behind (never reaches the workspace). |
 
 String paths are relative to each case directory; a trailing `/` is stripped, and `..`

@@ -196,8 +196,13 @@ copies what it needs into `/workspace` at runtime.
 
 Locally with Podman, the equivalent is a bind-mount from a host directory:
 ```bash
-AGENT_EVAL_PODMAN_PROJECT_DIR=/path/to/project harbor run -p <task> --agent claude-code ...
+AGENT_EVAL_PODMAN_PROJECT_DIR=/path/to/project /eval-run --runner harbor ...
 ```
+
+`/eval-run --runner harbor` masks the eval dataset and the project's Git metadata inside the
+mount. A direct `harbor run` with `AGENT_EVAL_PODMAN_PROJECT_DIR` is refused unless you set
+`AGENT_EVAL_PODMAN_PROJECT_UNSAFE_ALLOW=1`, which is only for a directory that holds no
+dataset or Git history of it.
 
 All K8s resources are created programmatically via `agent_eval.harbor.k8s_resources`
 (uses the Kubernetes Python client — works from a laptop via kubeconfig and in-cluster
