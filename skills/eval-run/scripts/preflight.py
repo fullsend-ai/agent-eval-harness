@@ -232,6 +232,11 @@ def main():
         if (_is_dangerous_path(run_path)
                 or project_root.resolve().is_relative_to(run_path.resolve())):
             run_skip_reason = "dangerous"
+        # A run directory that *is* a state directory would be removed whole,
+        # taking the skills' own state files the file-granular clean keeps.
+        elif any(run_path.resolve() == (project_root / sd).resolve()
+                 for sd in STATE_DIRS):
+            run_skip_reason = "state directory"
         elif args.run_dir and run_path.is_dir() and not _has_run_marker(run_path):
             run_skip_reason = "not a run directory"
 
@@ -269,6 +274,10 @@ def main():
         run_path = project_root / run_dir
         if run_skip_reason == "dangerous":
             print(f"  SKIPPED (dangerous): {run_dir}", file=sys.stderr)
+            refused.append(str(run_dir))
+        elif run_skip_reason == "state directory":
+            print(f"  SKIPPED (state directory): {run_dir} holds skills' own "
+                  f"state", file=sys.stderr)
             refused.append(str(run_dir))
         elif run_skip_reason == "not a run directory":
             print(f"  SKIPPED (not a run directory): {run_dir} holds none of "

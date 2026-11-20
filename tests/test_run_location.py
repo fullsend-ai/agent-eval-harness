@@ -423,6 +423,23 @@ def test_preflight_refuses_a_symlinked_state_directory(tmp_path, runs, target):
     assert (project / "keep.txt").exists()
 
 
+def test_preflight_refuses_to_clean_a_run_dir_that_is_a_state_directory(tmp_path, runs):
+    """A run dir equal to tmp/ must not be removed along with the owned state."""
+    project = tmp_path / "proj"
+    project.mkdir()
+    cfg = _config(project, _SKILL_AND_NAME)
+    _step0_state(project)
+    (project / "tmp" / "summary.yaml").write_text("judges: {}\n")
+    proc = _run(SCRIPTS / "preflight.py", "--config", cfg, "--run-dir", "tmp",
+                "--clean", "--force", cwd=project)
+    assert proc.returncode != 0, proc.stdout + proc.stderr
+    assert "CLEAN" not in proc.stdout
+    assert "Traceback" not in proc.stderr
+    assert "state directory" in proc.stderr and "tmp" in proc.stderr
+    assert _read_state(project, "eval-config.yaml") == {"model": "opus", "run_id": "r1"}
+    assert _read_state(project, "optimize-config.yaml") == {"target_judge": "done"}
+
+
 def test_preflight_cleans_a_state_run_with_an_empty_subdirectory(tmp_path, runs):
     project = tmp_path / "proj"
     run = project / "tmp" / "r1"
