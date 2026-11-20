@@ -967,3 +967,88 @@ def test_process_create_time_matches_execute_py():
     exec_code = _func_ast(EXECUTE_PATH, "_process_create_time")
     assert hook_code is not None and exec_code is not None
     assert hook_code == exec_code
+
+
+# ── Review follow-ups (#338) ───────────────────────────────────────────────
+
+def test_early_pidfile_duplicate_output_flag_last_wins(tmp_path, monkeypatch):
+    """argparse keeps the last --output; the early scrape must lock that one,
+    not the first, or the guard watches a directory results never reach."""
+    import execute
+
+    monkeypatch.setattr(execute, "_PIDFILE_WRITTEN", False)
+    monkeypatch.setattr(execute, "_PIDFILE_PATH", None)
+    a, b = tmp_path / "a", tmp_path / "b"
+    execute._early_pidfile(["--output", str(a), "--run-dir=" + str(b)])
+    assert not a.exists()
+    assert (b / f"execute.{os.getpid()}.pid").exists()
+
+
+def test_write_pidfile_refuses_a_different_directory_once_locked(
+        tmp_path, monkeypatch, capsys):
+    """After the lock is taken on one directory, a later call for another one
+    (a disagreeing argument) must not carry on into it."""
+    import execute
+
+    first, other = tmp_path / "first", tmp_path / "other"
+    first.mkdir()
+    other.mkdir()
+    _start_executor(execute, monkeypatch, first, os.getpid())
+    execute._write_pidfile(first)  # same directory: idempotent
+    with pytest.raises(SystemExit) as exc:
+        execute._write_pidfile(other)
+    assert exc.value.code not in (0, None)
+    assert "already owns" in capsys.readouterr().err
+    assert list(other.iterdir()) == []
+    execute._release_pidfile()
+
+
+def test_duplicate_output_flag_process_does_not_split_directories(tmp_path):
+    """End to end: with ``--output A --output B`` the first directory is never
+    touched and the second one is the one that gets locked."""
+    a, b = tmp_path / "eval" / "runs" / "e" / "a", tmp_path / "eval" / "runs" / "e" / "b"
+    a.mkdir(parents=True)
+    b.mkdir(parents=True)
+    subprocess.run(
+        [sys.executable, str(EXECUTE_PATH), "--output", str(a), "--output", str(b)],
+        capture_output=True, text=True, timeout=60, cwd=tmp_path,
+    )
+    assert list(a.iterdir()) == []
+    assert (b / ".execute.lock").exists()
+
+
+def test_new_executor_reaps_dead_markers_only(
+        tmp_path, monkeypatch, live_proc, live_proc_b):
+    """Markers left by SIGKILLed executors are removed once a new executor owns
+    the directory; a live one, a legacy ``execute.pid`` and malformed or
+    mismatched files are not ours to delete."""
+    import execute
+
+    dead = subprocess.Popen([sys.executable, "-c", "pass"])
+    dead.wait(timeout=10)
+    stale = tmp_path / f"execute.{dead.pid}.pid"
+    stale.write_text(json.dumps({"pid": dead.pid, "create_time": "1"}))
+    reused = tmp_path / f"execute.{live_proc.pid}.pid"  # live pid, other identity
+    reused.write_text(json.dumps({"pid": live_proc.pid, "create_time": "bogus"}))
+    legacy = tmp_path / "execute.pid"
+    legacy.write_text(json.dumps({"pid": dead.pid, "create_time": "1"}))
+    garbage = tmp_path / "execute.4242.pid"
+    garbage.write_text("not json")
+    mismatch = tmp_path / "execute.4243.pid"
+    mismatch.write_text(json.dumps({"pid": dead.pid, "create_time": "1"}))
+
+    b = _start_executor(execute, monkeypatch, tmp_path, live_proc_b.pid)
+    assert not stale.exists()
+    if guard._process_create_time(live_proc.pid) is not None:
+        assert not reused.exists()
+    assert legacy.exists() and garbage.exists() and mismatch.exists()
+    assert b.exists()
+
+
+def test_reaping_never_touches_a_live_peers_marker(
+        tmp_path, monkeypatch, running_executor, live_proc_b):
+    """A rejected executor reaps nothing that belongs to the live one."""
+    execute, run_dir, a = running_executor
+    with pytest.raises(SystemExit):
+        _start_executor(execute, monkeypatch, run_dir, live_proc_b.pid)
+    assert a.exists()

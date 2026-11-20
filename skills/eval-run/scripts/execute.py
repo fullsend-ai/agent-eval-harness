@@ -61,6 +61,8 @@ except ImportError:  # POSIX
 
 _PIDFILE_WRITTEN = False
 _PIDFILE_PATH = None
+# Resolved run directory this executor holds the lock on (``_write_pidfile``).
+_LOCKED_DIR = None
 # Open run-directory lock fds, keyed by the pidfile path published under them.
 _RUN_DIR_LOCKS = {}
 # Lock file taking exclusive ownership of a run directory (see ``_lock_run_dir``).
@@ -107,6 +109,13 @@ def _process_create_time(pid):
     return None
 
 
+def _resolved(path):
+    try:
+        return Path(path).resolve()
+    except (OSError, RuntimeError):
+        return Path(os.path.abspath(path))
+
+
 def _pidfile_name(pid):
     """Per-executor pidfile name, e.g. ``execute.12345.pid``.
 
@@ -118,7 +127,7 @@ def _pidfile_name(pid):
     return "execute.%d.pid" % pid
 
 
-def _live_peer_executor(output_dir, own_pid):
+def _live_peer_executor(output_dir, own_pid, reap=False):
     """Return ``(pid, pidfile)`` of another live executor using ``output_dir``,
     or ``None``.
 
@@ -129,6 +138,15 @@ def _live_peer_executor(output_dir, own_pid):
     Stop guard's 24h abandonment limit. The legacy marker keeps the guard's rule
     that a ``run_result.json`` at least as new as the marker means it finished.
     Any unreadable marker is skipped.
+
+    With ``reap=True`` (only valid for a caller that holds the run-directory
+    lock, so no current executor is starting or running here) a per-executor
+    marker that is well formed and named for its pid, but whose process is dead
+    or whose pid has been reused, is deleted: a SIGKILLed executor never reaches
+    ``_release_pidfile``, so its marker would otherwise accumulate in a reused
+    run directory. Anything else (unreadable, mismatched name, legacy
+    ``execute.pid``, a live process) is left alone, so this never removes
+    evidence of a writer that might still be running.
 
     This is a best-effort view for diagnostics and for executors that predate
     the run-directory lock; ownership between current executors is decided by
@@ -190,6 +208,8 @@ def _live_peer_executor(output_dir, own_pid):
         except PermissionError:
             pass  # exists, owned by another user
         except OSError:
+            if reap and not legacy:
+                _reap_marker(path)
             continue
         recorded = info.get("create_time")
         current = _process_create_time(pid)
@@ -198,9 +218,19 @@ def _live_peer_executor(output_dir, own_pid):
             # writes carries one; a marker without it (or with a different one)
             # cannot vouch that this is the process that wrote it.
             if recorded is None or str(recorded) != str(current):
+                if reap and not legacy and recorded is not None:
+                    _reap_marker(path)  # pid reused by an unrelated process
                 continue
         return pid, path
     return None
+
+
+def _reap_marker(path):
+    """Best-effort removal of a stale peer marker."""
+    try:
+        os.remove(path)
+    except OSError:
+        pass
 
 
 def _reject_busy_run_dir(output_dir, pid=None):
@@ -323,14 +353,23 @@ def _write_pidfile(output_dir):
     Idempotent: only the first call writes, so the early call below and the
     fallback in ``main()`` never double-register the cleanup.
     """
-    global _PIDFILE_WRITTEN, _PIDFILE_PATH
+    global _PIDFILE_WRITTEN, _PIDFILE_PATH, _LOCKED_DIR
     if _PIDFILE_WRITTEN:
+        # The directory locked earlier must be the one this call is for: a
+        # duplicated --output/--run-dir (or any other disagreement between the
+        # early scrape and the parsed argument) would otherwise lock one
+        # directory and write results into another.
+        if _resolved(output_dir) != _LOCKED_DIR:
+            _refuse_unowned_run_dir(
+                output_dir,
+                "this executor already owns %s, not this directory" % _LOCKED_DIR)
         return
     pid = os.getpid()
     # Ownership is decided by the lock, taken before anything is published. The
     # marker scan still runs for executors that predate the lock.
     lock_fd = _lock_run_dir(output_dir)
-    peer = _live_peer_executor(output_dir, pid)
+    # We hold the lock, so any marker here whose process is gone is stale.
+    peer = _live_peer_executor(output_dir, pid, reap=True)
     if peer is not None:
         os.close(lock_fd)
         _reject_busy_run_dir(output_dir, peer[0])
@@ -371,6 +410,7 @@ def _write_pidfile(output_dir):
     _RUN_DIR_LOCKS[pidfile] = lock_fd
     _PIDFILE_WRITTEN = True
     _PIDFILE_PATH = pidfile
+    _LOCKED_DIR = _resolved(output_dir)
     atexit.register(_release_pidfile)
 
 
@@ -418,14 +458,15 @@ def _early_pidfile(argv):
     scrape, and ``main()`` calls ``_write_pidfile`` once the run directory is
     resolved, so the guard degrades to a slightly later write, never to none.
     """
+    # The last occurrence wins, as it does for argparse, so the directory locked
+    # here is the one main() goes on to write results into. (main() re-checks
+    # via _write_pidfile, which refuses a mismatch.)
     out = None
     for i, token in enumerate(argv):
         if token in ("--run-dir", "--output") and i + 1 < len(argv):
             out = argv[i + 1]
-            break
-        if token.startswith(("--run-dir=", "--output=")):
+        elif token.startswith(("--run-dir=", "--output=")):
             out = token.split("=", 1)[1]
-            break
     if not out:
         return
     try:
