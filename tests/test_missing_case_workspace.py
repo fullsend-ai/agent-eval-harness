@@ -7,6 +7,7 @@ cases only: a run could exit 0 with one fewer result than cases selected.
 
 import json
 import shutil
+import subprocess
 import threading
 import types
 
@@ -128,3 +129,26 @@ def test_in_repo_missing_metadata_is_a_failed_result(tmp_path):
         "", 5.0, 600, 1, 1)
     assert result["exit_code"] != 0
     assert "metadata missing" in result["error"]
+
+
+def test_in_repo_modified_failure(tmp_path):
+    class Runner:
+        name = "fake"
+
+        def execute(self, *, workspace, **kw):
+            (workspace / "touched.txt").write_text("agent wrote this\n")
+            return RunResult(exit_code=-1, stdout="", stderr="", duration_s=1.0)
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    case_ws = tmp_path / "workspace" / "cases" / "case-001"
+    case_ws.mkdir(parents=True)
+    (case_ws / "_metadata.yaml").write_text(
+        f"case_id: case-001\nrepo_cwd: {repo}\n")
+    _, result = ex._run_single_case_in_repo(
+        Runner(), "test-skill", case_ws, tmp_path / "output", "", "sonnet",
+        None, None, "", 5.0, 600, 1, 1)
+    assert result["repo_modified"] is True
+    assert result["exit_code"] == 1
+    assert "touched.txt" in (case_ws / "repo_modifications.txt").read_text()

@@ -15,6 +15,8 @@ literal in execute.py that serializes per-RunResult telemetry (identified by a
 import ast
 from pathlib import Path
 
+from agent_eval.agent.base import RunResult
+
 EXECUTE = (Path(__file__).resolve().parent.parent
            / "skills" / "eval-run" / "scripts" / "execute.py")
 
@@ -62,3 +64,51 @@ def test_multi_step_aggregate_carries_denials():
         "step-b": {"exit_code": 0, "permission_denials": [d1, d2]},
     })
     assert agg["permission_denials"] == [d1, d2]
+
+
+def test_to_case_result_defaults_empty_fields():
+    result = RunResult(exit_code=1, stdout="", stderr="", duration_s=0.04)
+    assert result.to_case_result() == {
+        "exit_code": 1,
+        "duration_s": 0.0,
+        "token_usage": None,
+        "cost_usd": None,
+        "num_turns": None,
+        "per_model_usage": None,
+        "per_model_turns": None,
+        "permission_denials": [],
+        "message_ids": [],
+        "generation_ids": [],
+        "cost_source": None,
+        "error_class": None,
+        "budget": None,
+    }
+
+
+def test_to_case_result_serializes_present_fields():
+    result = RunResult(
+        exit_code=0, stdout="s", stderr="e", duration_s=12.34,
+        token_usage={"input": 1200, "output": 340},
+        cost_usd=0.42, num_turns=7,
+        per_model_usage={"claude-opus-4-6": {"cost_usd": 0.11}},
+        per_model_turns={"claude-opus-4-6": 2, "claude-haiku-4-5": 1},
+        permission_denials=[{"tool_name": "Bash", "tool_use_id": "t1",
+                             "tool_input": {}, "reason": "blocked"}],
+        message_ids=["msg_1"], generation_ids=["gen-1"],
+        cost_source="ledger", error_class=None, budget={"exceeded": False})
+    assert result.to_case_result() == {
+        "exit_code": 0,
+        "duration_s": 12.3,
+        "token_usage": {"input": 1200, "output": 340},
+        "cost_usd": 0.42,
+        "num_turns": 7,
+        "per_model_usage": {"claude-opus-4-6": {"cost_usd": 0.11}},
+        "per_model_turns": {"claude-opus-4-6": 2, "claude-haiku-4-5": 1},
+        "permission_denials": [{"tool_name": "Bash", "tool_use_id": "t1",
+                                "tool_input": {}, "reason": "blocked"}],
+        "message_ids": ["msg_1"],
+        "generation_ids": ["gen-1"],
+        "cost_source": "ledger",
+        "error_class": None,
+        "budget": {"exceeded": False},
+    }

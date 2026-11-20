@@ -43,6 +43,29 @@ class RunResult:
     error_class: Optional[str] = None
     budget: Optional[dict] = None
 
+    def to_case_result(self) -> dict:
+        """The per-case ``run_result.json`` payload, serialized identically
+        by every caller: duration rounded to 0.1s and the list fields
+        defaulted to ``[]`` — a denial that lived only in raw stdout was
+        invisible to every downstream reader, so the empty list is written
+        explicitly. Hook results and cost reconciliation are applied by the
+        callers that know them, on the returned dict."""
+        return {
+            "exit_code": self.exit_code,
+            "duration_s": round(self.duration_s, 1),
+            "token_usage": self.token_usage,
+            "cost_usd": self.cost_usd,
+            "num_turns": self.num_turns,
+            "per_model_usage": self.per_model_usage,
+            "per_model_turns": self.per_model_turns,
+            "permission_denials": self.permission_denials or [],
+            "message_ids": self.message_ids or [],
+            "generation_ids": self.generation_ids or [],
+            "cost_source": self.cost_source,
+            "error_class": self.error_class,
+            "budget": self.budget,
+        }
+
 
 class EvalRunner(ABC):
     """Abstract runner -- one implementation per agent platform."""

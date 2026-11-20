@@ -205,31 +205,13 @@ def _start_provider_plan(eval_config, model_name, runner_type, *, run_id, run_di
     return plan, session, run_dir
 
 
-def _case_payload(result: RunResult) -> dict:
-    return {
-        "exit_code": result.exit_code,
-        "duration_s": round(result.duration_s, 1),
-        "token_usage": result.token_usage,
-        "cost_usd": result.cost_usd,
-        "num_turns": result.num_turns,
-        "per_model_usage": result.per_model_usage,
-        "per_model_turns": result.per_model_turns,
-        "permission_denials": result.permission_denials or [],
-        "message_ids": result.message_ids or [],
-        "generation_ids": result.generation_ids or [],
-        "cost_source": result.cost_source,
-        "error_class": result.error_class,
-        "budget": result.budget,
-    }
-
-
 def _write_case_result(run_dir: Path, case_id: str, result: RunResult, session) -> dict:
     """Per-case ``run_result.json`` in the pod's run dir (the reconciling
     writer; the run-end pass converges it once the backfill lands)."""
     from agent_eval.providers.reconcile import write_run_result
 
     return write_run_result(Path(run_dir) / "cases" / case_id / "run_result.json",
-                            _case_payload(result), plan=session.plan, ledger=session.ledger,
+                            result.to_case_result(), plan=session.plan, ledger=session.ledger,
                             catalog=session.catalog)
 
 
@@ -242,7 +224,7 @@ def _finish_provider_plan(session, run_dir: Path, case_results: list) -> dict:
     can retry against. Returns the provenance fields for the client."""
     from agent_eval.providers.reconcile import write_run_result
 
-    per_case = {cr["case_id"]: _case_payload(cr["run_result"]) for cr in case_results}
+    per_case = {cr["case_id"]: cr["run_result"].to_case_result() for cr in case_results}
     payload = {
         "exit_code": max((cr["run_result"].exit_code for cr in case_results), default=-1, key=abs),
         "execution_mode": "evalhub", "cost_usd": None, "per_case": per_case,
