@@ -34,7 +34,7 @@ permissions:
 
 | Form | Shape | Use for |
 | --- | --- | --- |
-| **Simple** | a string — a tool name or a pre-formed pattern (`"Skill"`, `"mcp__*"`, `"Edit(artifacts/**)"`) | Coarse tool allow/deny; passed through **as-is** (but see the note below on `allow` rules that overlap the dataset). |
+| **Simple** | a string — a tool name or a pre-formed pattern (`"Skill"`, `"mcp__*"`, `"Edit(artifacts/**)"`) | Coarse tool allow/deny; passed through **as-is**. |
 | **Path-based** | a dict `{ path: <dir-or-file>, tools: [<tool>, …] }` | Scoping file tools to (or away from) a directory — e.g. keeping a prompt-mode agent out of the answer key. |
 
 You can mix both forms in the same list. The presence of *any* dict switches the
@@ -48,19 +48,6 @@ twins](#relative-bash-rules-get-an-absolute-workspace-twin) are added to. (In ea
 releases a path-based rule in `allow` aborted the workspace builders before the agent
 started, and `deny` reached the settings only through the interception generator; with
 simple rules the main agent still received both lists through the runner's CLI flags.)
-
-!!! warning "`allow` rules that overlap the dataset are dropped by default"
-    Unless [`execution.project_access: true`](execution.md#granting-the-project-root)
-    is set, an isolated workspace never exposes the eval's dataset (its answer
-    keys) to the agent. Any `permissions.allow` file-tool rule — simple or
-    path-based — whose literal path prefix contains the dataset or sits inside it
-    is dropped with a warning, from the workspace settings **and** from the
-    runner's `--allowed-tools` / `--settings` overlay. Absolute (`//…`),
-    home-relative (`~/…`), settings-relative (`/…`) and `./`/`../` spellings are
-    checked, and a wildcard that starts partway through a directory name
-    (`Read(//project/ev*/**)`) is judged by its containing directory. With
-    `project_access: true` the rules are kept and the dataset is denied to the file
-    tools instead. `workspace_mode: repo` runs are not filtered.
 
 ## Path-based rules and the compiler
 
@@ -123,6 +110,17 @@ compiles (deny, `harden_bash=True`) to:
     cover arbitrary subprocess reads such as `python3 -c ...` or `awk` — those
     need an OS `sandbox` denyRead, outside this block.
 
+!!! warning "Permissions cannot keep the answer key from the agent under test"
+    The eval's dataset (`annotations.yaml`, reference outputs) sits in the project
+    root, and the local runners (`claude-code`, `codex`, `cursor`, `cli`) run the
+    agent as your own user without filesystem isolation. A deny rule, `harden_bash`
+    included, only covers the file tools and a few bash commands; any other
+    subprocess can still read the files. **Permissions alone cannot prevent
+    answer-key leakage.** If the agent must not be able to reach the dataset, run
+    it on a runner that provides the isolation: [Harbor](../../guides/harbor.md)
+    or the [`fullsend`](../../concepts/runners.md#fullsend) runner. Both keep the
+    dataset out of the sandbox.
+
 !!! tip "`harden_bash` is deny-only"
     Hardening runs only for **deny** lists. It is deliberately off for `allow`
     lists so listing `Bash` on an allow path never over-grants `Read`/`Edit`.
@@ -173,8 +171,7 @@ flowchart TD
 === "Simple only → CLI flags"
 
     When every entry is a string, the lists are passed straight through as
-    comma-separated CLI flags — no file is written (after the dataset-overlap
-    filtering of `allow` rules described [above](#two-forms)):
+    comma-separated CLI flags — no file is written:
 
     ```bash
     claude --print \

@@ -17,7 +17,7 @@ Only Linux containers are supported. The image is taken from
 import asyncio
 import re
 import shlex
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from harbor.environments.base import BaseEnvironment, ExecResult
 from harbor.environments.capabilities import (
@@ -139,6 +139,24 @@ def _environment_args(environment: dict[str, str]) -> list[str]:
                 "Podman expands value-free names ending in '*' as a "
                 "host-environment prefix glob")
         args += ["-e", key]
+    return args
+
+
+def _project_hide_args(project_mount: str) -> list[str]:
+    """``--mount`` args masking ``AGENT_EVAL_PODMAN_PROJECT_HIDE`` under the project mount.
+
+    The variable holds ``os.pathsep``-separated paths relative to the project
+    directory (set by ``harbor.run``). Each is overlaid with an empty tmpfs.
+    """
+    args: list[str] = []
+    for rel in filter(None, os.environ.get("AGENT_EVAL_PODMAN_PROJECT_HIDE", "").split(os.pathsep)):
+        path = PurePosixPath(rel)
+        if path.is_absolute() or ".." in path.parts or path.parts in ((), (".",)):
+            raise ValueError(f"Refusing to mask invalid project path {rel!r}")
+        target = PurePosixPath(project_mount, *path.parts)
+        if "," in str(target):
+            raise ValueError(f"Cannot mask project path containing a comma: {rel!r}")
+        args += ["--mount", f"type=tmpfs,destination={target},ro=true"]
     return args
 
 
@@ -298,6 +316,10 @@ class PodmanEnvironment(BaseEnvironment):
             project_mount = os.environ.get("AGENT_EVAL_PODMAN_PROJECT_MOUNT", "/opt/project")
             run_args += ["-v", f"{Path(project_dir).resolve()}:{project_mount}:ro"]
             forwarded["AGENT_EVAL_PROJECT_DIR"] = project_mount
+            # The eval dataset (annotations, reference answers) inside the
+            # project dir is masked with an empty tmpfs so the agent under test
+            # cannot read it, through Bash or otherwise.
+            run_args += _project_hide_args(project_mount)
 
         merged_env = {**forwarded, **(self._persistent_env or {})}
         run_args += _environment_args(merged_env)

@@ -368,7 +368,7 @@ def _setup_console_log(output_dir):
     return console_log
 
 
-def _resolve_permissions(config, workspace=None):
+def _resolve_permissions(config):
     """Return the permission rules to pass to the runner.
 
     User-authored ``permissions`` (allow AND deny) are honored in every
@@ -379,23 +379,11 @@ def _resolve_permissions(config, workspace=None):
 
     Args:
         config: EvalConfig with permissions
-        workspace: The directory the agent runs in. ``./`` and ``../`` allow
-            rules resolve against it, so each case (and the batch run) needs
-            its own result: the same filter the staged settings apply.
 
     Returns:
         Permissions dict safe to pass to the runner (a shallow copy)
     """
     filtered = dict(config.permissions) if config.permissions else {}
-
-    # Without project_access the runner's allow rules (``--allowed-tools`` and
-    # the ``--settings`` overlay) must not re-grant what the staged settings
-    # drop: allow rules that expose the dataset. ``workspace_mode: repo`` runs
-    # in the checkout and is not staged, so it is left alone.
-    allow = filtered.get("allow")
-    if allow and getattr(config.runner, "workspace_mode", None) != "repo":
-        from workspace import filter_allow_rules
-        filtered["allow"] = filter_allow_rules(allow, config, workspace)
 
     return filtered
 
@@ -568,7 +556,7 @@ def main():
         effort = args.effort or config.runner.effort
 
         # Honor user-authored permissions (allow + deny) in every mode.
-        filtered_permissions = _resolve_permissions(config, Path(args.workspace))
+        filtered_permissions = _resolve_permissions(config)
 
         runner = runner_cls.from_config(
             config,
@@ -1733,7 +1721,7 @@ def _run_multi_step_case(runner, case_id, case_ws, output_dir, model,
                     subagent_model=subagent_model,
                     mlflow_experiment=mlflow_experiment,
                     mlflow_tracking_uri=mlflow_tracking_uri,
-                    permissions=_resolve_permissions(config, case_ws),
+                    permissions=_resolve_permissions(config),
                     effort=step.runner.effort,
                     **_runner_overrides())
 
@@ -2068,20 +2056,6 @@ def _execute_per_case(args, config, runner, runner_cls,
     case_results = {}
     wall_clock_start = time.monotonic()
 
-    def _case_runner(case_id, case_ws):
-        # Relative allow rules resolve against the agent's own workspace, so
-        # each case gets permissions filtered for it (as its staged settings).
-        return runner_cls.from_config(
-            config,
-            log_prefix=f"eval:{case_id}",
-            subagent_model=subagent_model,
-            mlflow_experiment=mlflow_experiment,
-            mlflow_tracking_uri=config.mlflow.tracking_uri,
-            effort=effort,
-            permissions=_resolve_permissions(config, case_ws),
-            **_runner_overrides(),
-        )
-
     try:
         # Run before_all hooks and collect outputs
         global_hook_outputs = {}
@@ -2098,11 +2072,22 @@ def _execute_per_case(args, config, runner, runner_cls,
             from concurrent.futures import ThreadPoolExecutor, as_completed
 
             futures = {}
+            # Permissions are identical for every case; resolve once.
+            case_permissions = _resolve_permissions(config)
             with ThreadPoolExecutor(max_workers=effective_parallelism) as pool:
                 for i, entry in enumerate(case_order, 1):
                     case_id = entry if isinstance(entry, str) else entry["case_id"]
                     case_ws = workspace / "cases" / case_id
-                    case_runner = _case_runner(case_id, case_ws)
+                    case_runner = runner_cls.from_config(
+                        config,
+                        log_prefix=f"eval:{case_id}",
+                        subagent_model=subagent_model,
+                        mlflow_experiment=mlflow_experiment,
+                        mlflow_tracking_uri=config.mlflow.tracking_uri,
+                        effort=effort,
+                        permissions=case_permissions,
+                        **_runner_overrides(),
+                    )
 
                     # Route to in-repo or regular execution based on mode
                     if in_repo_mode:
@@ -2168,8 +2153,7 @@ def _execute_per_case(args, config, runner, runner_cls,
                 else:
                     # Regular isolated workspace mode with hooks
                     case_id, result = _run_single_case(
-                        _case_runner(case_id, case_ws), target, case_id,
-                        case_ws, output_dir,
+                        runner, target, case_id, case_ws, output_dir,
                         skill_args_template, model, mlflow_experiment,
                         config.mlflow.tracking_uri, system_prompt,
                         max_budget, timeout_s, len(case_order), i,

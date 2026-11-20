@@ -56,8 +56,14 @@ def iter_shared_files(config):
             yield entry
 
 
+def _is_protected(path, protected):
+    """*path* (resolved) is, or lies inside, a protected path."""
+    return any(path == p or path.is_relative_to(p) for p in protected)
+
+
 def materialize_shared_files(
-    target_dir, config, *, reserved_names=DEFAULT_RESERVED_NAMES
+    target_dir, config, *, reserved_names=DEFAULT_RESERVED_NAMES,
+    protected_paths=()
 ):
     """Copy each ``{dest, source}`` workspace.files entry into *target_dir*.
 
@@ -72,8 +78,13 @@ def materialize_shared_files(
     single-file ``SKILL.md`` is the common case). The result is always a real
     file or directory, never a symlink, so it ports to containers and object
     storage.
+
+    ``protected_paths`` (the dataset, for sandboxed substrates) never reach
+    *target_dir*: a source inside one is skipped with a warning, and a
+    directory source that contains one is copied without it.
     """
     target_dir = Path(target_dir)
+    protected = [Path(p).resolve() for p in protected_paths]
     for entry in iter_shared_files(config):
         dest_rel = Path(entry.dest)
         # Defense in depth for programmatically built WorkspaceFiles that bypass
@@ -97,6 +108,9 @@ def materialize_shared_files(
                 f"the project/plugin roots",
             )
             continue
+        if _is_protected(resolved, protected):
+            _warn_skip(entry.dest, "source is inside the protected eval dataset")
+            continue
         dst = target_dir / dest_rel
         dst.parent.mkdir(parents=True, exist_ok=True)
         # Guard against a destination inside the source (e.g. source: "." with an
@@ -109,8 +123,14 @@ def materialize_shared_files(
             _warn_skip(entry.dest, "destination is inside the source (recursive copy)")
             continue
         if resolved.is_dir():
-            shutil.copytree(
-                resolved, dst, ignore=_ignore_symlinks, dirs_exist_ok=True
-            )
+            def ignore(dirpath, names):
+                skip = _ignore_symlinks(dirpath, names)
+                skip |= {
+                    n for n in names
+                    if _is_protected((Path(dirpath) / n).resolve(), protected)
+                }
+                return skip
+
+            shutil.copytree(resolved, dst, ignore=ignore, dirs_exist_ok=True)
         else:
             shutil.copy2(resolved, dst)

@@ -57,9 +57,6 @@ def _run_case_mode(tmp_path, monkeypatch, exit_codes, parallelism=None):
 
     monkeypatch.setattr(ex, "_run_single_case", fake_run_single_case)
     runner = types.SimpleNamespace(name="fake", version="0")
-    # Each case builds its own runner (permissions resolve per workspace).
-    runner_cls = types.SimpleNamespace(
-        from_config=lambda *a, **kw: runner)
     config = EvalConfig()
     config.skill = "test-skill"
     args = types.SimpleNamespace(
@@ -67,7 +64,7 @@ def _run_case_mode(tmp_path, monkeypatch, exit_codes, parallelism=None):
         input_override=None)
     with pytest.raises(SystemExit) as exc:
         ex._execute_per_case(
-            args, config, runner, runner_cls, output_dir, 5.0, 600, "sonnet", None,
+            args, config, runner, None, output_dir, 5.0, 600, "sonnet", None,
             skill_args_template="", parallelism=parallelism,
             target="test-skill")
     run_result = json.loads((output_dir / "run_result.json").read_text())

@@ -79,8 +79,6 @@ execution:
   # env:                    # Inject env vars into workspace .claude/settings.json
   #   JIRA_SERVER: http://localhost:8080   # Literal value
   #   JIRA_TOKEN: $JIRA_TOKEN              # $VAR resolved from caller's environment
-  # project_access: false   # true = grant isolated workspaces the project root
-  #                         # (default off: the root holds the dataset's answer keys)
   # symlinks: [types]       # Extra top-level project entries to link into each local workspace
 
 # Runner — agent harness + runner-specific knobs

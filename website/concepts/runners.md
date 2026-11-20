@@ -412,7 +412,10 @@ Per case (or once per batch) the runner:
    replaced by a real copy (nested links followed relative to the link's own
    directory, dangling links dropped, `.git` excluded). A link whose real target
    lies outside the project root and the configured `runner.plugin_dirs` is
-   dropped with a warning, so host files never reach the sandbox. `.claude` settings
+   dropped with a warning, so host files never reach the sandbox. The eval dataset
+   (`dataset.path`: `annotations.yaml`, reference outputs) is never copied either:
+   a link to it is dropped, and a linked tree that contains it (for example
+   `skills/<x>/evals/cases` under a linked `skills/`) is copied without it. `.claude` settings
    files and `.claude` directories, however reached, are never copied; only the
    workspace's own top-level settings link is, because the rewrite of step 2 has already
    seen it. The decision is by what an entry resolves to as well as by where it lands:
@@ -430,10 +433,8 @@ Per case (or once per batch) the runner:
    and a failure is reported as a failed case (exit `-1`).
 2. **Rewrites the workspace `.claude/settings.json`** for this runner. The harness
    writes `env`, its own hook entries (the `SubagentStop` transcript capture and
-   the `PreToolUse` interception hooks) and, for the other runners,
-   `permissions.additionalDirectories` — written only with
-   [`execution.project_access: true`](../reference/config/execution.md#granting-the-project-root)
-   or for carried-over grants that do not contain the dataset; they name host paths and values that mean nothing in the
+   the `PreToolUse` interception hooks) and `permissions.additionalDirectories` for
+   the other runners; they name host paths and values that mean nothing in the
    sandbox, and fullsend uploads the file with the repository, so the runner removes
    all three for the duration of the run and puts the original file back
    afterwards, so a later non-fullsend step in the same workspace keeps its hooks,
@@ -562,6 +563,16 @@ load for this runner.
 !!! warning "`settings.api_key` is a secret in config"
     It is the one credential the harness accepts from `eval.yaml` rather than the
     environment. Prefer `OPENAI_API_KEY` so the config stays shareable.
+
+## Isolation and the answer key
+
+Only `harbor` and `fullsend` run the agent in a sandbox that the harness controls,
+so only they can keep the dataset (`annotations.yaml`, reference answers) out of the
+agent's reach. The local runners (`claude-code`, `codex`, `cursor`, `cli`) share the
+host filesystem with the agent: permission rules cannot stop an agent that runs
+Bash from reading the project root. **Permissions alone cannot prevent answer-key
+leakage; the runner must provide the isolation.** Use Harbor or fullsend when an
+agent that finds the answers would invalidate the result.
 
 ## Choosing a runner
 

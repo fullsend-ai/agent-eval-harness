@@ -619,10 +619,8 @@ def _create_repo_mode_settings(case_ws, project_root, config):
         if pattern not in allow_list:
             allow_list.append(pattern)
 
-    # Grant access to project root for reading — but not to the dataset in it
-    # (the agent's own answer keys, #345)
+    # Grant access to project root for reading
     perms.setdefault("additionalDirectories", []).append(repo_str)
-    _add_deny(settings, _dataset_deny_rules(config))
 
     # Add SubagentStop hook to capture transcripts
     from agent_eval.agent.stream_capture import setup_subagent_hook
@@ -941,208 +939,6 @@ def _carry_over_permissions(settings, workspace=None):
         ).extend(dirs)
 
 
-# Carried-over directory grants already warned about (once per run, not per case).
-_WARNED_GRANTS = set()
-
-
-def _dataset_dir_variants(config):
-    """The dataset directory as configured and resolved (``[]`` without a dataset).
-
-    Both spellings are returned when they differ (``/tmp`` vs
-    ``/private/tmp`` on macOS, or a dataset that is a symlink) so a rule
-    covers whichever the agent uses. An empty ``dataset.path`` resolves to the
-    config directory, exactly as case preparation reads it, so it is
-    protected rather than silently skipped.
-    """
-    dataset = getattr(config, "dataset", None)
-    if dataset is None:
-        return []
-    given = Path(os.path.abspath(config.resolve_path(getattr(dataset, "path", "") or "")))
-    real = given.resolve()
-    return [given] if real == given else [given, real]
-
-
-def _dataset_deny_rules(config):
-    """File-tool deny rules covering the eval's dataset — its answer keys.
-
-    A rule path starting with ``//`` is absolute in Claude Code (a single
-    ``/`` is relative to the settings file). Bash is not path-scoped, so this
-    is a second layer, not a guarantee: the first is not disclosing the path.
-    """
-    return [
-        f"{tool}(/{d}/**)"
-        for d in _dataset_dir_variants(config)
-        for tool in ("Read", "Edit", "Grep", "Glob")
-    ]
-
-
-def _add_deny(settings, rules):
-    deny = settings.setdefault("permissions", {}).setdefault("deny", [])
-    for rule in rules:
-        if rule not in deny:
-            deny.append(rule)
-
-
-_FILE_TOOL_ALLOW = re.compile(
-    r"^(?:Read|Edit|Write|Grep|Glob|NotebookEdit)\(((?://|~/|/|\./|\.\./)[^)]*)\)$")
-_GLOB_CHARS = re.compile(r"[*?\[{]")
-
-
-def _overlaps(a, b):
-    """True when path *a* is *b*, inside it, or contains it."""
-    return a == b or a.is_relative_to(b) or b.is_relative_to(a)
-
-
-def _exposed_paths(entry, workspace):
-    """Every absolute location a carried-over directory grant may mean.
-
-    A relative entry is resolved against the agent's working directory
-    (*workspace*) and against the project root (the cwd the harness resolves
-    its absolute twin against); each is taken lexically and canonically, so a
-    symlinked grant or dataset is caught by either spelling.
-    """
-    path = Path(entry).expanduser()
-    if path.is_absolute():
-        bases = [path]
-    else:
-        bases = [Path.cwd() / path]
-        if workspace is not None:
-            bases.insert(0, Path(workspace) / path)
-    out = []
-    for base in bases:
-        lexical = Path(os.path.abspath(base))
-        out += [lexical, lexical.resolve()]
-    return out
-
-
-def _exposes_dataset(paths, datasets):
-    return any(_overlaps(p, d) for p in paths for d in datasets)
-
-
-def _apply_project_access(settings, config, workspace=None):
-    """Grant an isolated workspace the project root — only on opt-in.
-
-    The project root holds the eval's dataset (``annotations.yaml``,
-    reference outputs). A grant lands in the session's init event as
-    ``additional_directories``, and Bash is not path-scoped, so an agent
-    under test can follow it, find its case's answer key and copy it (#345).
-
-    Call this last, after every source of permissions (the project's
-    settings, eval.yaml, ``runner.settings``) has been merged.
-
-    Default (``execution.project_access: false``): no grant, and any
-    directory grant, or path-scoped file-tool allow rule (``//abs``, ``~/``,
-    settings-relative ``/x`` and ``./``/``../``), that overlaps the
-    dataset (contains it or sits inside it, by either its configured or its
-    resolved path) is dropped with a warning. Opted in: the project root is
-    granted as before, and the dataset is denied to the file tools.
-    Bash-based access stays out of reach of this filter.
-    """
-    perms = settings.setdefault("permissions", {})
-    dirs = list(perms.get("additionalDirectories") or [])
-    if getattr(config.execution, "project_access", False):
-        project_root = str(Path.cwd().resolve())
-        if project_root not in dirs:
-            dirs.append(project_root)
-        _add_deny(settings, _dataset_deny_rules(config))
-    else:
-        datasets = []
-        for d in _dataset_dir_variants(config):
-            datasets += [d, d.resolve()]
-        if datasets:
-            dirs = [
-                entry for entry in dirs
-                if not _warn_dropped(
-                    _exposes_dataset(_exposed_paths(entry, workspace), datasets),
-                    f"additionalDirectories entry {entry!r}",
-                    "set execution.project_access: true to grant the project root")
-            ]
-            allow = perms.get("allow")
-            if allow:
-                perms["allow"] = filter_allow_rules(allow, config, workspace)
-    if dirs:
-        perms["additionalDirectories"] = dirs
-    else:
-        perms.pop("additionalDirectories", None)
-
-
-def filter_allow_rules(allow, config, workspace=None):
-    """Drop the allow rules that expose the eval dataset (``project_access: false``).
-
-    Shared by the staged workspace settings (:func:`_apply_project_access`) and
-    the rules the runner passes on the command line or in its ``--settings``
-    overlay (``execute.py::_resolve_permissions``), so a dataset-overlapping
-    rule cannot come back at execution time. A path-based (dict) rule is
-    judged by the patterns it compiles to. Returns *allow* unchanged when the
-    config grants the project root (``project_access: true``) or has no dataset.
-    """
-    if getattr(config.execution, "project_access", False):
-        return list(allow)
-    datasets = []
-    for d in _dataset_dir_variants(config):
-        datasets += [d, d.resolve()]
-    if not datasets:
-        return list(allow)
-    return [
-        rule for rule in allow
-        if not _warn_dropped(
-            any(_allow_rule_exposes(p, datasets, workspace)
-                for p in compile_permission_rules([rule])),
-            f"permissions.allow rule {rule!r}",
-            "execution.project_access: true keeps it, with the dataset denied "
-            "to the file tools")
-    ]
-
-
-def _allow_rule_exposes(rule, datasets, workspace=None):
-    """Whether a path-scoped file-tool allow rule may reach the dataset.
-
-    The rule's literal path prefix (up to its first wildcard) is compared with
-    the dataset. A wildcard that starts partway through a directory name
-    (``ev*``) leaves that name incomplete, so the containing directory is used
-    — erring toward dropping the rule. Handled spellings: ``//abs``, ``~/home``,
-    ``/rel`` (relative to the settings root, taken as the project root) and
-    ``./``/``../`` (relative to the project root and, when known, the
-    agent's *workspace*). Bare relative patterns (``notes/**``) resolve inside
-    the agent's own workspace and are not checked.
-    """
-    m = _FILE_TOOL_ALLOW.match(rule) if isinstance(rule, str) else None
-    if not m:
-        return False
-    spec = m.group(1)
-    if spec.startswith("//"):
-        roots, rest = [Path("/")], spec[2:]
-    elif spec.startswith("~/"):
-        roots, rest = [Path.home()], spec[2:]
-    elif spec.startswith("/"):
-        roots, rest = [Path.cwd()], spec[1:]
-    else:
-        roots, rest = [Path.cwd()], spec
-        if workspace is not None:
-            roots.insert(0, Path(workspace))
-    glob = _GLOB_CHARS.search(rest)
-    prefix = rest[:glob.start()] if glob else rest
-    if glob and not prefix.endswith("/"):
-        prefix = prefix.rpartition("/")[0]
-    prefix = prefix.rstrip("/")
-    paths = []
-    for root in roots:
-        given = Path(os.path.abspath(root / prefix))
-        paths += [given, given.resolve()]
-    return _exposes_dataset(paths, datasets)
-
-
-def _warn_dropped(exposes, what, hint):
-    """Warn once that *what* is dropped for exposing the dataset; return *exposes*."""
-    if exposes:
-        _warn_once(
-            _WARNED_GRANTS, what,
-            f"not granting {what}: it overlaps the eval dataset"
-            + (f" ({hint})" if hint else ""),
-        )
-    return exposes
-
-
 def _carry_over_hooks(settings, config):
     """Append the project's settings hooks to the run settings.
 
@@ -1297,6 +1093,12 @@ def _setup_subagent_only_hook(workspace, config):
     _carry_over_permissions(settings, workspace)
     _merge_harness_permissions(settings, config, workspace)
 
+    # Grant project root access
+    project_root = str(Path.cwd().resolve())
+    settings.setdefault("permissions", {}).setdefault(
+        "additionalDirectories", []
+    ).append(project_root)
+
     # Add SubagentStop hook
     from agent_eval.agent.stream_capture import setup_subagent_hook
 
@@ -1311,10 +1113,6 @@ def _setup_subagent_only_hook(workspace, config):
 
     # Apply user-provided runner.settings last so they can override defaults
     _apply_runner_settings(settings, config)
-
-    # The project root (and the dataset in it) only on opt-in; last, so it sees
-    # the final permissions, runner.settings included
-    _apply_project_access(settings, config, workspace)
 
     with open(settings_dir / "settings.json", "w") as f:
         _json.dump(settings, f, indent=2)
@@ -1353,6 +1151,12 @@ def _setup_tool_hooks(workspace, config):
     _carry_over_permissions(settings, workspace)
     _merge_harness_permissions(settings, config, workspace)
 
+    # Grant access to the project root so symlinked resources can be read.
+    project_root = str(Path.cwd().resolve())
+    settings.setdefault("permissions", {}).setdefault(
+        "additionalDirectories", []
+    ).append(project_root)
+
     # Add SubagentStop hook to capture background agent transcripts.
     from agent_eval.agent.stream_capture import setup_subagent_hook
     subagent_dir = str((workspace / "subagents").resolve())
@@ -1366,10 +1170,6 @@ def _setup_tool_hooks(workspace, config):
 
     # Apply user-provided runner.settings last so they can override defaults
     _apply_runner_settings(settings, config)
-
-    # The project root (and the dataset in it) only on opt-in; last, so it sees
-    # the final permissions, runner.settings included
-    _apply_project_access(settings, config, workspace)
 
     with open(settings_path, "w") as f:
         _json.dump(settings, f, indent=2)

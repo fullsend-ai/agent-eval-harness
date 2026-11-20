@@ -85,6 +85,16 @@ def _task_label(config) -> str:
     return label
 
 
+def _dataset_protected_paths(config) -> list:
+    """The dataset directory: annotations and reference answers the agent must not see.
+
+    Only ``input.yaml`` and ``answers.yaml`` travel in ``environment/`` (the
+    agent's workspace); a shared ``workspace.files`` source must not pull the
+    rest of the dataset in through the back door.
+    """
+    return [config.resolve_path(config.dataset.path or "").resolve()]
+
+
 def _find_input_file(case_dir: Path):
     for suffix in (".yaml", ".yml", ".json"):
         candidate = case_dir / f"input{suffix}"
@@ -404,7 +414,8 @@ def _write_multi_step_case_package(config, config_path, bundled_cfg, case_dir,
         shutil.copy2(answers, env_dir / "answers.yaml")
     # Shared {dest, source} workspace.files, resolved from the local checkout
     # and copied in so the file travels inside the task package.
-    materialize_shared_files(env_dir, config)
+    materialize_shared_files(
+        env_dir, config, protected_paths=_dataset_protected_paths(config))
     _generate_tool_interception(env_dir, config, config_path, workdir)
     return task_dir
 
@@ -544,7 +555,8 @@ def generate_tasks(
             shutil.copy2(answers, env_dir / "answers.yaml")
         # Shared {dest, source} workspace.files, resolved from the local
         # checkout and copied in so the file travels inside the task package.
-        materialize_shared_files(env_dir, config)
+        materialize_shared_files(
+            env_dir, config, protected_paths=_dataset_protected_paths(config))
 
         # Batch mode: create a 1-item batch.yaml so the same --input batch.yaml
         # argument works per-case in Harbor as it does in local batch runs.

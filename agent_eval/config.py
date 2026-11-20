@@ -753,13 +753,6 @@ class ExecutionConfig:
       SubagentStop/PreToolUse hooks), so a skill keeps the hooks it has in
       production — a SessionStart/compact recovery banner, a Stop guard.
       Default True; set False to run the skill with the harness hooks only.
-    - project_access: grant each isolated (per-case or batch) workspace read
-      access to the project root through ``permissions.additionalDirectories``.
-      Default False: the project root holds the eval's own dataset (expected
-      answers, reference outputs), and granting it discloses its path to the
-      agent under test. Opt in only when the skill must read project files
-      beyond the staged ones; the dataset is then denied to the file tools.
-      ``workspace_mode: repo`` runs in the checkout and ignores this key.
     - symlinks: additional top-level project entries (files or directories)
       to link into each staged workspace in addition to the defaults
       (``scripts``, ``.claude``, ``CLAUDE.md``, ``.context``, ``skills``).
@@ -784,8 +777,6 @@ class ExecutionConfig:
     judge_parallelism: Optional[int] = None
     env: dict = field(default_factory=dict)
     project_hooks: bool = True
-    # Grant isolated workspaces the project root (see the class docstring).
-    project_access: bool = False
     # Extra top-level project entries linked into each staged workspace, on
     # top of workspace.py's defaults (see the class docstring).
     symlinks: list = field(default_factory=list)
@@ -807,11 +798,6 @@ class ExecutionConfig:
             raise ValueError(
                 "execution.project_hooks must be a boolean, got: "
                 f"{self.project_hooks!r}"
-            )
-        if not isinstance(self.project_access, bool):
-            raise ValueError(
-                "execution.project_access must be a boolean, got: "
-                f"{self.project_access!r}"
             )
 
         # Each entry becomes a path component under the project root and the
@@ -2432,7 +2418,6 @@ class EvalConfig:
                 exec_raw.get("judge_parallelism"), "execution.judge_parallelism"),
             env=exec_raw.get("env") or {},
             project_hooks=exec_raw.get("project_hooks", True),
-            project_access=exec_raw.get("project_access", False),
             # Default to [] only when absent/null; any other value goes through
             # unchanged so ExecutionConfig rejects a non-list (`false`, "types").
             symlinks=(

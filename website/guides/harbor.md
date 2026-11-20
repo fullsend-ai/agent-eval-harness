@@ -185,9 +185,18 @@ a host directory instead of baked into an image:
 AGENT_EVAL_PODMAN_PROJECT_DIR=. harbor run -p eval/harbor-tasks --agent claude-code ...
 ```
 
+The dataset (annotations, reference answers) is evaluation material and never enters the
+trial. The task package's `environment/` holds only `input.yaml`, `answers.yaml` and the
+shared `workspace.files` entries; a shared entry whose source is inside the dataset is
+skipped, and a directory source that contains it is copied without it. When the mounted
+project directory contains the dataset, the harness masks that path inside the container
+with an empty `tmpfs`, so the agent finds nothing there, Bash included. Mounting a
+directory that *is* the dataset is refused. For Kubernetes, build the project ConfigMap
+without the dataset.
+
 | Variable | Description |
 | --- | --- |
-| `AGENT_EVAL_PODMAN_PROJECT_DIR` | Bind-mount project resources (no project image needed) |
+| `AGENT_EVAL_PODMAN_PROJECT_DIR` | Bind-mount project resources (no project image needed); the dataset inside it is masked |
 | `AGENT_EVAL_PODMAN_GCP_CREDENTIALS_FILE` | GCP service-account key (read-only mount) |
 | `AGENT_EVAL_PODMAN_KEEP_RUN` | `1` keeps the container after the trial for debugging |
 

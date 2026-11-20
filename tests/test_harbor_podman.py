@@ -249,3 +249,32 @@ def test_podman_forward_excludes_under_plan(tmp_path, monkeypatch):
     run_args, _ = calls[-1]
     assert "CLAUDE_CODE_USE_VERTEX" in run_args and "GOOGLE_APPLICATION_CREDENTIALS" in run_args
 
+
+
+def test_start_masks_dataset_inside_project_mount(tmp_path, monkeypatch):
+    # The project dir is bind-mounted read-only; the dataset in it (answer keys)
+    # is overlaid with an empty tmpfs so the agent cannot read it, even via Bash.
+    project = tmp_path / "project"
+    project.mkdir()
+    env = _startable_environment(tmp_path, [])
+    calls = []
+
+    async def fake_podman(args, **kwargs):
+        calls.append(args)
+        return SimpleNamespace(return_code=0, stderr="")
+
+    async def fake_upload():
+        return None
+
+    env._podman = fake_podman
+    env._upload_environment_dir_after_start = fake_upload
+    monkeypatch.setenv("AGENT_EVAL_PODMAN_PROJECT_DIR", str(project))
+    monkeypatch.setenv("AGENT_EVAL_PODMAN_PROJECT_HIDE", "evals/cases")
+    asyncio.run(PodmanEnvironment.start(env, force_build=False))
+
+    run_args = calls[-1]
+    assert f"{project.resolve()}:/opt/project:ro" in run_args
+    mount = run_args.index("--mount")
+    assert run_args[mount + 1] == (
+        "type=tmpfs,destination=/opt/project/evals/cases,ro=true")
+    assert run_args.index(f"{project.resolve()}:/opt/project:ro") < mount

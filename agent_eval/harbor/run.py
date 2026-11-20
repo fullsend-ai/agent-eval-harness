@@ -655,6 +655,30 @@ def _write_report(config_path: Path, output_dir: Path, summary: dict,
         print(f"WARNING: report generation failed: {exc}", file=sys.stderr)
 
 
+def _podman_project_hide_paths(config, env) -> list[str]:
+    """Dataset path(s) inside ``AGENT_EVAL_PODMAN_PROJECT_DIR``, relative to it.
+
+    The project directory is bind-mounted into every trial container, where the
+    agent can read it; the dataset in it holds the answer keys, so podman.py
+    masks these paths. Empty when no project dir is mounted or the dataset is
+    outside it. A dataset that *is* the project dir cannot be masked without
+    emptying the mount: that is refused.
+    """
+    project_dir = env.get("AGENT_EVAL_PODMAN_PROJECT_DIR")
+    if not project_dir or not Path(project_dir).is_dir():
+        return []
+    project = Path(project_dir).resolve()
+    dataset = config.resolve_path(config.dataset.path or "").resolve()
+    if dataset == project:
+        raise ValueError(
+            "AGENT_EVAL_PODMAN_PROJECT_DIR is the eval dataset directory: the "
+            "container would expose the answer keys. Mount the project's "
+            "resources from a directory that does not hold the dataset.")
+    if not dataset.is_relative_to(project):
+        return []
+    return [str(dataset.relative_to(project))]
+
+
 def run_eval_on_harbor(
     config_path: Path,
     *,
@@ -852,6 +876,9 @@ def _run_eval_on_harbor(
         if plan.runner == "harbor-k8s":
             child_env.update(_k8s_plan_child_env(plan, session, output_dir, keep_api_key=keep_api_key))
     child_env.update(harbor_env)
+    hide = _podman_project_hide_paths(config, child_env)
+    if hide:
+        child_env["AGENT_EVAL_PODMAN_PROJECT_HIDE"] = os.pathsep.join(hide)
     proc = subprocess.Popen(cmd, env=child_env)
     def _forward_signal(signum, frame):
         try:
