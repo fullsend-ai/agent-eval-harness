@@ -1,3 +1,10 @@
+## [1.67.1](https://github.com/fullsend-ai/agent-eval-harness/compare/v1.67.0...v1.67.1) (2026-11-20)
+
+
+### Bug Fixes
+
+* **eval-run:** resolve the run directory once, in the harness ([#325](https://github.com/fullsend-ai/agent-eval-harness/issues/325)) ([c6549f1](https://github.com/fullsend-ai/agent-eval-harness/commit/c6549f1187e1b32b83209ebef31ea961b00980ef)), closes [#309](https://github.com/fullsend-ai/agent-eval-harness/issues/309)
+
 # [1.67.0](https://github.com/fullsend-ai/agent-eval-harness/compare/v1.66.3...v1.67.0) (2026-11-19)
 
 
