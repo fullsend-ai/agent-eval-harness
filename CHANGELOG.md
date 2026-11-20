@@ -1,3 +1,10 @@
+## [1.68.2](https://github.com/fullsend-ai/agent-eval-harness/compare/v1.68.1...v1.68.2) (2026-11-20)
+
+
+### Bug Fixes
+
+* **eval-run:** keep skills' own state out of preflight's clean ([#340](https://github.com/fullsend-ai/agent-eval-harness/issues/340)) ([f855264](https://github.com/fullsend-ai/agent-eval-harness/commit/f85526474c15380158db8898727e8e963d02d137)), closes [#339](https://github.com/fullsend-ai/agent-eval-harness/issues/339)
+
 ## [1.68.1](https://github.com/fullsend-ai/agent-eval-harness/compare/v1.68.0...v1.68.1) (2026-11-20)
 
 
