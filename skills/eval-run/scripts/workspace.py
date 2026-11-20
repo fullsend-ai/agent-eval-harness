@@ -39,7 +39,11 @@ import yaml
 from agent_eval.config import EvalConfig, deep_merge, workspace_source_roots
 from agent_eval.tools.interception import extract_tool_patterns
 from agent_eval.tools.permissions import compile_permission_rules
-from agent_eval.workspace_provisioning import materialize_shared_files
+from agent_eval.workspace_provisioning import (
+    dataset_protected_paths,
+    materialize_shared_files,
+    stamp_staged_workspace,
+)
 from workspace_files import _copy_input_files
 
 # Resolve git executable to absolute path to prevent PATH hijacking (CWE-426)
@@ -140,6 +144,7 @@ def _prepare(args):
     # the project root and load .claude/settings.json with the expanded
     # permission patterns (e.g. /private/tmp variants on macOS).
     subprocess.run([GIT_BIN, "init", "-q", str(workspace)], check=True)
+    stamp_staged_workspace(workspace)
 
     # Branch on execution mode
     # Case mode: one invocation per test case (works for both skill and prompt)
@@ -264,6 +269,9 @@ def _create_per_case_workspace(workspace, case_dirs, config, args):
         case_ws = workspace / "cases" / case_id
         case_ws.mkdir(parents=True, exist_ok=True)
         subprocess.run([GIT_BIN, "init", "-q", str(case_ws)], check=True)
+        # Everything staged below leaves the dataset out; the fullsend runner
+        # refuses a workspace without this record (an older or hand-made one).
+        stamp_staged_workspace(case_ws)
 
         # Copy only the input file and answers.yaml into the workspace.
         # Companion files (e.g., source code for autofix skills) should
@@ -283,7 +291,13 @@ def _create_per_case_workspace(workspace, case_dirs, config, args):
         _copy_input_files(case_dir, case_ws, config)
         # Materialize shared {dest, source} workspace.files entries (e.g. a
         # live SKILL.md in a plugin) as real files in the case workspace.
-        materialize_shared_files(case_ws, config)
+        # The dataset (answer keys) never enters a case workspace through a
+        # shared source, whatever runner executes it: a --agent override or a
+        # pipeline step can hand this workspace to a sandboxed runner (fullsend
+        # uploads it as the target repo), so the filter does not depend on the
+        # declared runner.
+        materialize_shared_files(
+            case_ws, config, protected_paths=dataset_protected_paths(config))
 
         # Create output directories
         for output in config.outputs:
@@ -619,8 +633,10 @@ def _create_repo_mode_settings(case_ws, project_root, config):
         if pattern not in allow_list:
             allow_list.append(pattern)
 
-    # Grant access to project root for reading
+    # Grant access to project root for reading — but deny the file tools the
+    # dataset in it (the agent's own answer keys, #345)
     perms.setdefault("additionalDirectories", []).append(repo_str)
+    _add_deny(settings, _dataset_deny_rules(config))
 
     # Add SubagentStop hook to capture transcripts
     from agent_eval.agent.stream_capture import setup_subagent_hook
@@ -939,6 +955,47 @@ def _carry_over_permissions(settings, workspace=None):
         ).extend(dirs)
 
 
+def _dataset_dir_variants(config):
+    """The dataset directories as configured and resolved.
+
+    These are the paths case discovery protects (``dataset_protected_paths``):
+    the dataset directory, or with an empty ``dataset.path`` the case
+    directories next to ``eval.yaml``. Both spellings are returned when they
+    differ (``/tmp`` vs ``/private/tmp`` on macOS) so a rule covers whichever
+    the agent uses.
+    """
+    out = []
+    for given, real in zip(dataset_protected_paths(config, resolved=False),
+                           dataset_protected_paths(config)):
+        out.append(given)
+        if real != given:
+            out.append(real)
+    return out
+
+
+def _dataset_deny_rules(config):
+    """File-tool deny rules covering the eval's dataset — its answer keys.
+
+    The project-root grant stays, and these rules sit on top of it as defense
+    in depth. A rule path starting with ``//`` is absolute in Claude Code (a
+    single ``/`` is relative to the settings file). Bash is not path-scoped, so
+    this does not make the dataset unreachable: only a runner or environment
+    that isolates the agent does that.
+    """
+    return [
+        f"{tool}(/{d}/**)"
+        for d in _dataset_dir_variants(config)
+        for tool in ("Read", "Edit", "Grep", "Glob")
+    ]
+
+
+def _add_deny(settings, rules):
+    deny = settings.setdefault("permissions", {}).setdefault("deny", [])
+    for rule in rules:
+        if rule not in deny:
+            deny.append(rule)
+
+
 def _carry_over_hooks(settings, config):
     """Append the project's settings hooks to the run settings.
 
@@ -1093,11 +1150,12 @@ def _setup_subagent_only_hook(workspace, config):
     _carry_over_permissions(settings, workspace)
     _merge_harness_permissions(settings, config, workspace)
 
-    # Grant project root access
+    # Grant project root access, but deny the file tools the dataset in it
     project_root = str(Path.cwd().resolve())
     settings.setdefault("permissions", {}).setdefault(
         "additionalDirectories", []
     ).append(project_root)
+    _add_deny(settings, _dataset_deny_rules(config))
 
     # Add SubagentStop hook
     from agent_eval.agent.stream_capture import setup_subagent_hook
@@ -1156,6 +1214,7 @@ def _setup_tool_hooks(workspace, config):
     settings.setdefault("permissions", {}).setdefault(
         "additionalDirectories", []
     ).append(project_root)
+    _add_deny(settings, _dataset_deny_rules(config))
 
     # Add SubagentStop hook to capture background agent transcripts.
     from agent_eval.agent.stream_capture import setup_subagent_hook

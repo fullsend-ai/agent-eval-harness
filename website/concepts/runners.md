@@ -412,7 +412,18 @@ Per case (or once per batch) the runner:
    replaced by a real copy (nested links followed relative to the link's own
    directory, dangling links dropped, `.git` excluded). A link whose real target
    lies outside the project root and the configured `runner.plugin_dirs` is
-   dropped with a warning, so host files never reach the sandbox. `.claude` settings
+   dropped with a warning, so host files never reach the sandbox. The eval dataset
+   (`dataset.path`: `annotations.yaml`, reference outputs) is never copied either:
+   a link to it is dropped, and a linked tree that contains it (for example
+   `skills/<x>/evals/cases` under a linked `skills/`) is copied without it. Shared
+   `workspace.files` sources get the same treatment: one inside the dataset is skipped, and a
+   directory source that contains it is copied without it, whichever runner the
+   workspace was staged for (an `--agent fullsend` override or a fullsend pipeline step
+   included). That filtering happens when the workspace is staged, and the runner
+   does not look inside the workspace for dataset content: it accepts only a workspace
+   that `workspace.py` staged with the filtering in place (recorded inside the
+   workspace's `.git`, outside the working tree) and fails the case (exit `-1`) for an
+   older or hand-made one. Stage it again with `/eval-run`. `.claude` settings
    files and `.claude` directories, however reached, are never copied; only the
    workspace's own top-level settings link is, because the rewrite of step 2 has already
    seen it. The decision is by what an entry resolves to as well as by where it lands:
@@ -560,6 +571,29 @@ load for this runner.
 !!! warning "`settings.api_key` is a secret in config"
     It is the one credential the harness accepts from `eval.yaml` rather than the
     environment. Prefer `OPENAI_API_KEY` so the config stays shareable.
+
+## Isolation and the answer key
+
+The dataset (`annotations.yaml`, reference answers) is grading material and must stay
+**outside the evaluated agent's boundary**. The boundary is whatever the agent cannot
+reach: a sandbox, a container, a separate host. Which part of the stack provides it
+depends on the runner:
+
+- `harbor` and `fullsend` run the agent in a sandbox that the harness controls, and the
+  harness keeps the dataset out of it (see the notes on each runner).
+- The local runners (`claude-code`, `codex`, `cursor`, `cli`) start the agent as your own
+  user on the host filesystem. The harness keeps the project-root grant, so skills can
+  read their linked resources, and denies the dataset directory to the file tools
+  (`Read`, `Edit`, `Grep`, `Glob`) as defense in depth. That is not isolation: Bash is
+  not path-scoped, and an agent that finds the dataset path can read it. **Permissions
+  alone cannot prevent answer-key leakage.**
+- For a local runner, the isolation has to come from the runner or its surrounding
+  environment: run it inside OpenShell, a container, a VM or another sandbox in which
+  the grading material is not mounted. The harness does not require a particular
+  mechanism, only that the dataset is not readable from inside it.
+
+Use an isolated setup whenever an agent that finds the answers would invalidate the
+result.
 
 ## Choosing a runner
 

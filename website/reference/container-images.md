@@ -89,7 +89,7 @@ and never creates sub-pods or invokes Harbor. See the
 
 ## No project-specific images {#no-project-specific-images}
 
-The base image is deliberately project-agnostic. Your `eval.yaml`, dataset, and any
+The base image is deliberately project-agnostic. Your `eval.yaml` and any
 project files reach the trial pod through one of three delivery mechanisms — never by
 baking a new image per project:
 

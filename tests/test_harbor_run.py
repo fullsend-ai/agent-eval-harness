@@ -12,6 +12,11 @@ import yaml
 
 from agent_eval.config import EvalConfig, OutputConfig
 from agent_eval.harbor import run as run_mod
+from agent_eval.workspace_provisioning import STAGING_VERSION
+
+# The record a generated package carries of the dataset filtering; the reuse
+# check refuses a package without it.
+_FILTER_RECORD = f"dataset_filter = {STAGING_VERSION}\n"
 
 
 def _config(tmp_path):
@@ -51,7 +56,8 @@ def _write_pregenerated_task(tasks_dir, case_id="case-1", *,
     task = tasks_dir / case_id
     (task / "tests").mkdir(parents=True)
     (task / "task.toml").write_text(
-        '[metadata]\njudge_mode = ' + json.dumps(judge_mode) + '\n')
+        '[metadata]\njudge_mode = ' + json.dumps(judge_mode) + '\n'
+        + _FILTER_RECORD)
     (task / "tests" / "eval.yaml").write_text(yaml.safe_dump({
         "judges": [{"name": name, "check": "return True"}
                    for name in judges],
@@ -527,7 +533,7 @@ def test_pregenerated_task_from_other_eval_rejected(tmp_path):
     tasks = tmp_path / "tasks"
     task = _write_pregenerated_task(tasks)
     (task / "task.toml").write_text(
-        '[metadata]\neval_name = "other"\njudge_mode = "full"\n')
+        '[metadata]\neval_name = "other"\njudge_mode = "full"\n' + _FILTER_RECORD)
     with pytest.raises(ValueError, match="generated for eval 'other'"):
         run_mod._validate_task_package_reuse(tasks, config)
 
@@ -549,7 +555,8 @@ def test_legacy_pregenerated_task_missing_thresholded_judge_is_rejected(tmp_path
     config = _config(tmp_path)
     tasks = tmp_path / "tasks"
     task = _write_pregenerated_task(tasks, judges=())
-    (task / "task.toml").write_text('[metadata]\neval_name = "t"\n')
+    (task / "task.toml").write_text(
+        '[metadata]\neval_name = "t"\n' + _FILTER_RECORD)
     with pytest.raises(ValueError, match="missing thresholded judge.*rfe_quality"):
         run_mod._validate_task_package_reuse(tasks, config)
 
@@ -618,7 +625,7 @@ def _write_task_with_chain(tasks_dir, chain, case_id="case-1"):
     chain_toml = ("" if chain is None
                   else "config_chain = [" + ", ".join(json.dumps(c) for c in chain) + "]\n")
     (task / "task.toml").write_text(
-        '[metadata]\njudge_mode = "full"\n' + chain_toml)
+        '[metadata]\njudge_mode = "full"\n' + _FILTER_RECORD + chain_toml)
     (task / "tests" / "eval.yaml").write_text(yaml.safe_dump({
         "judges": [{"name": "rfe_quality", "check": "return True"}]}))
     return task

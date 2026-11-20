@@ -110,6 +110,21 @@ compiles (deny, `harden_bash=True`) to:
     cover arbitrary subprocess reads such as `python3 -c ...` or `awk` — those
     need an OS `sandbox` denyRead, outside this block.
 
+!!! warning "Permissions cannot keep the answer key from the agent under test"
+    The eval's dataset (`annotations.yaml`, reference outputs) sits in the project
+    root, and the local runners (`claude-code`, `codex`, `cursor`, `cli`) run the
+    agent as your own user without filesystem isolation. For those runners the
+    harness keeps the project-root grant and adds `Read`, `Edit`, `Grep` and `Glob`
+    deny rules for the dataset directory as defense in depth. A deny rule, `harden_bash`
+    included, only covers the file tools and a few bash commands; any other
+    subprocess can still read the files. **Permissions alone cannot prevent
+    answer-key leakage.** The grading material must stay outside the evaluated
+    agent's boundary, and a runner or its surrounding environment has to provide that
+    boundary: [Harbor](../../guides/harbor.md), the
+    [`fullsend`](../../concepts/runners.md#fullsend) runner, or any other sandbox you run a
+    local runner in, such as OpenShell, a container or a VM. See
+    [Isolation and the answer key](../../concepts/runners.md#isolation-and-the-answer-key).
+
 !!! tip "`harden_bash` is deny-only"
     Hardening runs only for **deny** lists. It is deliberately off for `allow`
     lists so listing `Bash` on an allow path never over-grants `Read`/`Edit`.
@@ -226,9 +241,10 @@ permissions:
 !!! tip "Answer-key protection is why path rules exist"
     Prompt-mode evals and `workspace_mode: repo` runs execute the agent inside
     the real repository, where the dataset, `eval.yaml`, and reference outputs
-    live. Path-based deny rules stop the agent from reading its own answer key.
-    See [tool interception](../../concepts/tool-interception.md) and
-    [runners](../../concepts/runners.md).
+    live. Path-based deny rules are defense in depth for the file tools only:
+    they do not keep the answer key from the agent (see the warning above, and
+    [isolation and the answer key](../../concepts/runners.md#isolation-and-the-answer-key)).
+    See also [tool interception](../../concepts/tool-interception.md).
 
 ## See also
 
