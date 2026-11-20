@@ -7,6 +7,7 @@ discovery results for the LLM to parse and act on.
 
 Usage:
     python3 scripts/discover.py [--project-root <path>]
+    python3 scripts/discover.py --config <eval.yaml> --run-id <id>
 
 Output (JSON):
     {
@@ -14,6 +15,12 @@ Output (JSON):
         "layout": "root|nested|flat|mixed|none",
         "count": 1
     }
+
+With --config and --run-id it prints instead, as one plain line, the run
+directory every eval-run script (execute, collect, score, report) resolves
+for that run — $AGENT_EVAL_RUNS_DIR/<eval_name>/<run-id> — so a CI wrapper
+reads results from exactly where the harness writes them. The path is
+relative when $AGENT_EVAL_RUNS_DIR is (resolved against the cwd).
 """
 
 import argparse
@@ -24,7 +31,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import agent_eval._bootstrap  # noqa: F401 — auto-activate venv
-from agent_eval.config import discover_configs, infer_layout
+from agent_eval.config import EvalConfig, discover_configs, infer_layout
+from agent_eval.run_location import RunLocationError, resolve_run_dir
 
 
 def main():
@@ -32,7 +40,23 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--project-root", default=".",
                         help="Project root directory (default: cwd)")
+    parser.add_argument("--config", default=None,
+                        help="With --run-id: print the run directory for this config")
+    parser.add_argument("--run-id", default=None,
+                        help="With --config: print the run directory for this run id")
     args = parser.parse_args()
+
+    if args.config or args.run_id:
+        if not (args.config and args.run_id):
+            parser.error("--config and --run-id must be given together")
+        config = EvalConfig.from_yaml(args.config)
+        try:
+            run_dir, _ = resolve_run_dir(config, args.run_id)
+        except RunLocationError as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            sys.exit(1)
+        print(run_dir)
+        return
 
     project_root = Path(args.project_root).resolve()
     configs = discover_configs(project_root)

@@ -25,16 +25,18 @@ it: *"how did my skill do"*, *"what failed"*, *"look at the eval results"*,
 
 | Flag | Required | Default | Description |
 | --- | --- | --- | --- |
-| `--run-id <id>` | **yes** | — | Which eval run to review |
+| `--run-id <id>` | one of `--run-id`/`--run-dir` | — | Which eval run to review, under the default runs directory |
+| `--run-dir <path>` | one of `--run-id`/`--run-dir` | — | The run directory itself; authoritative when given (its basename is the run id). `/eval-run` hands this to review, which reads and writes `review.yaml` there |
 | `--config <path>` | no | auto-discover | Path to the eval config |
 | `--cases <name> [<name> ...]` | no | all | Exact case directory names to review |
 
 !!! note "Config auto-discovery"
     With no `--config`, the skill discovers configs automatically. One config is
     selected for you; multiple configs prompt you to choose; none errors and suggests
-    running [`/eval-analyze`](eval-analyze.md) first. The selected config's `skill`
-    field becomes the `<eval-name>` used in run paths
-    (`$AGENT_EVAL_RUNS_DIR/<eval-name>/<id>/`).
+    running [`/eval-analyze`](eval-analyze.md) first. The harness resolves the run
+    directory from the selected config (its `skill`, else its `name`, else its path)
+    as `$AGENT_EVAL_RUNS_DIR/<eval-name>/<id>/`; `scripts/discover.py --config <config>
+    --run-id <id>` prints it.
 
 ## What it does
 

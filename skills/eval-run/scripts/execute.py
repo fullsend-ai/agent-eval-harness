@@ -10,12 +10,18 @@ Usage:
         --skill rfe.speedrun \\
         --skill-args "--input batch.yaml --headless --dry-run" \\
         --model opus \\
-        --output eval/runs/test-001 \\
+        --config eval.yaml \\
+        --run-id test-001 \\
         [--agent claude-code] \\
         [--subagent-model sonnet] \\
         [--max-budget 100] \\
         [--timeout 3600] \\
         [--mlflow-experiment my-eval]
+
+The run directory is resolved from --config + --run-id by
+agent_eval.run_location ($AGENT_EVAL_RUNS_DIR/<eval_name>/<run-id>), the
+same resolver score.py uses. --run-dir (alias --output) overrides it; its
+basename must equal --run-id when both are given.
 """
 
 import agent_eval._bootstrap  # noqa: F401 — auto-activate venv
@@ -25,6 +31,7 @@ import atexit
 import copy
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -133,23 +140,37 @@ def _write_pidfile(output_dir):
 def _early_pidfile(argv):
     """Write the pidfile straight from ``argv``, before anything else runs.
 
-    ``--output`` is scraped by hand rather than via argparse so the write does
-    not wait on the parser, the config load, or the imports below. Best effort:
-    on any miss ``main()`` still calls ``_write_pidfile`` once ``args.output``
-    is parsed, so the guard degrades to a slightly later write, never to none.
+    ``--run-dir``/``--output`` is scraped by hand rather than via argparse so
+    the write does not wait on the parser, the config load, or the imports
+    below. SKILL.md passes the harness-resolved ``<run-dir>`` as ``--run-dir``
+    so this path is the normal one. Best effort: when only ``--config`` +
+    ``--run-id`` are given (a config-resolved run directory) there is nothing to
+    scrape, and ``main()`` calls ``_write_pidfile`` once the run directory is
+    resolved, so the guard degrades to a slightly later write, never to none.
     """
     out = None
     for i, token in enumerate(argv):
-        if token == "--output" and i + 1 < len(argv):
+        if token in ("--run-dir", "--output") and i + 1 < len(argv):
             out = argv[i + 1]
             break
-        if token.startswith("--output="):
+        if token.startswith(("--run-dir=", "--output=")):
             out = token.split("=", 1)[1]
             break
     if not out:
         return
     try:
         directory = Path(out)
+        # An invalid run id is rejected by main() (run_location.RUN_ID_PATTERN,
+        # not imported here to keep this write ahead of the agent_eval imports);
+        # do not create its directory.
+        resolved = directory.resolve()
+        if not re.fullmatch(r"[A-Za-z0-9._-]+", resolved.name):
+            return
+        # Likewise for the working directory or an ancestor of it (--run-dir .):
+        # the resolver rejects it, so do not drop a pidfile there first.
+        cwd = Path.cwd().resolve()
+        if resolved == cwd or resolved in cwd.parents:
+            return
         directory.mkdir(parents=True, exist_ok=True)
         _write_pidfile(directory)
         _warn_if_unscannable(directory)
@@ -359,7 +380,10 @@ def main():
                         help="Skill arguments (default: from eval.yaml execution.arguments)")
     parser.add_argument("--model", default=None,
                         help="Skill model (default: from eval.yaml models.skill)")
-    parser.add_argument("--output", required=True)
+    parser.add_argument("--run-dir", "--output", dest="run_dir", default=None,
+                        help="Run directory override (default: "
+                             "$AGENT_EVAL_RUNS_DIR/<eval_name>/<run-id>, resolved from "
+                             "--config + --run-id). Its basename is the run id.")
     parser.add_argument("--config", required=True,
                         help="Path to eval.yaml")
     parser.add_argument("--agent", default=None,
@@ -375,7 +399,8 @@ def main():
     parser.add_argument("--parallelism", type=int, default=None,
                         help="Max parallel case executions (default: from eval.yaml or sequential)")
     parser.add_argument("--run-id", default=None,
-                        help="Run identifier (for hook env vars and log paths)")
+                        help="Run identifier; with --config it determines the run "
+                             "directory. Required unless --run-dir is given.")
     parser.add_argument("--strict-cost", action="store_true",
                         help="Exit 2 when a provider plan is active and the run's cost "
                              "could not be reconciled (cost_source unavailable) or the "
@@ -397,7 +422,16 @@ def main():
                            allow_estimate=args.allow_estimate)
 
     from agent_eval.config import EvalConfig
+    from agent_eval.run_location import RunLocationError, resolve_run_dir
     config = EvalConfig.from_yaml(args.config)
+
+    # One resolver for every eval-run script, so execute.py writes exactly
+    # where collect.py and score.py read (issue #309).
+    try:
+        output_dir, args.run_id = resolve_run_dir(config, args.run_id, args.run_dir)
+    except RunLocationError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(1)
 
     # Determine if prompt mode (execution.prompt is set)
     is_prompt_mode = config.is_prompt_mode()
@@ -427,7 +461,6 @@ def main():
         sys.exit(1)
     subagent_model = args.subagent_model or config.models.subagent or model
 
-    output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Mirror all console output to <output_dir>/console.log so callers never
@@ -435,9 +468,10 @@ def main():
     # viewer). The real stdout/stderr streams still receive everything.
     _setup_console_log(output_dir)
 
-    # Fallback for the Stop-guard pidfile: normally already written by
-    # _early_pidfile() before the imports at the top of this module. No-op
-    # unless that scrape missed (e.g. an --output form it didn't recognise).
+    # Fallback for the Stop-guard pidfile: already written by _early_pidfile()
+    # before the imports at the top of this module when --run-dir/--output was
+    # passed (SKILL.md does). Otherwise (config-resolved run directory) this is
+    # the first write, after the imports and config load.
     _write_pidfile(output_dir)
 
     # Resolve skill args: CLI override > config > empty
@@ -730,8 +764,10 @@ def _build_eval_params(args, config, skill_args, max_budget, timeout_s, effort=N
     chain = list(getattr(config, "config_chain", None) or [])
     if chain:
         params["config_chain"] = chain
-    # skill is optional for prompt mode
-    target = args.skill or config.resolve_skill()
+    # Prompt and multi-step runs have no single skill: main() forces the
+    # target to None there, so a stray --skill must not be recorded either.
+    target = (None if config.is_prompt_mode() or config.execution.steps
+              else args.skill or config.resolve_skill())
     if target:
         params["skill"] = target
     if skill_args:

@@ -25,16 +25,23 @@ Usage:
 import agent_eval._bootstrap  # noqa: F401 — auto-activate venv
 
 import argparse
-import os
 import shutil
 import sys
 from pathlib import Path
 
 from agent_eval.config import EvalConfig, _validate_path_segment
+from agent_eval.run_location import RunLocationError, resolve_run_dir
+from agent_eval.run_location import runs_root as _runs_base
 
 
 # State directories that skills write to between runs
 STATE_DIRS = ["tmp"]
+
+# What a run directory directly contains. An explicit --run-dir is only cleaned
+# when it carries one, so a runs root or an eval-name directory (which hold only
+# run subdirectories) is never removed by mistake.
+RUN_MARKERS = ["run_result.json", "summary.yaml", "collection.json",
+               "console.log", "execute.pid"]
 
 
 def _is_dangerous_path(path: Path) -> bool:
@@ -45,6 +52,12 @@ def _is_dangerous_path(path: Path) -> bool:
     """
     resolved = path.resolve()
     return resolved in {Path.home().resolve(), Path("/").resolve()}
+
+
+def _has_run_marker(path: Path) -> bool:
+    """True when *path* is itself a run directory (not a parent of run directories)."""
+    return (any((path / m).is_file() for m in RUN_MARKERS)
+            or (path / "cases").is_dir())
 
 
 def _find_files(directory: Path) -> list[Path]:
@@ -67,7 +80,12 @@ def main():
     parser.add_argument("--force", action="store_true",
                         help="Skip confirmation prompt (for non-interactive use)")
     parser.add_argument("--run-id", default=None,
-                        help="Also check if eval/runs/<id> already exists")
+                        help="Also check if the run directory "
+                             "($AGENT_EVAL_RUNS_DIR/<eval_name>/<id>) already exists")
+    parser.add_argument("--run-dir", default=None,
+                        help="Check this run directory instead (its basename is the run "
+                             "id; a conflicting --run-id is an error). A --baseline "
+                             "still resolves under $AGENT_EVAL_RUNS_DIR/<eval_name>/.")
     parser.add_argument("--baseline", default=None,
                         help="Verify the given baseline run-id exists before continuing")
     args = parser.parse_args()
@@ -80,8 +98,16 @@ def main():
 
     config = EvalConfig.from_yaml(args.config)
     project_root = Path.cwd()
-    runs_base = Path(os.environ.get("AGENT_EVAL_RUNS_DIR", "eval/runs"))
-    runs_dir = runs_base / config.eval_name()
+    runs_dir = _runs_base() / config.eval_name()
+    # The run directory comes from the resolver every eval-run script shares,
+    # so preflight checks exactly the directory execute.py will write.
+    run_dir = None
+    if args.run_id or args.run_dir:
+        try:
+            run_dir, args.run_id = resolve_run_dir(config, args.run_id, args.run_dir)
+        except RunLocationError as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            sys.exit(1)
 
     # 0. Baseline existence — fail fast before any expensive setup
     if args.baseline:
@@ -114,7 +140,7 @@ def main():
     # 2. Previous run output
     run_exists = False
     if args.run_id:
-        run_path = project_root / runs_dir / args.run_id
+        run_path = project_root / run_dir
         if run_path.exists() and any(run_path.iterdir()):
             run_exists = True
 
@@ -133,18 +159,26 @@ def main():
         print(f"  {label}: {count} files — {', '.join(examples)}{suffix}")
 
     if run_exists:
-        run_path = project_root / runs_dir / args.run_id
+        run_path = project_root / run_dir
         run_files = _find_files(run_path)
-        print(f"  {runs_dir}/{args.run_id}: {len(run_files)} files (previous run)")
+        print(f"  {run_dir}: {len(run_files)} files (previous run)")
 
     if not args.clean:
         print(f"\n{total} stale files from previous run(s).")
         sys.exit(1)
 
+    # shutil.rmtree refuses a symlinked directory; fail up front, before any
+    # state directory has been cleaned, rather than with a traceback halfway.
+    if run_exists and (project_root / run_dir).is_symlink():
+        print(f"ERROR: {run_dir} is a symlink; refusing to clean it. Pass the "
+              f"real directory as --run-dir (or remove the link by hand).",
+              file=sys.stderr)
+        sys.exit(1)
+
     # Confirm before cleaning — require --force in non-interactive mode
     targets = sorted(dirty.keys())
     if run_exists:
-        targets.append(f"{runs_dir}/{args.run_id}")
+        targets.append(f"{run_dir}")
     print(f"\nWill clean: {', '.join(targets)}")
     if not args.force:
         if not sys.stdin.isatty():
@@ -157,10 +191,12 @@ def main():
             sys.exit(1)
 
     # Clean
+    refused = []
     for label, files in dirty.items():
         path = project_root / label
         if _is_dangerous_path(path):
             print(f"  SKIPPED (dangerous): {label}", file=sys.stderr)
+            refused.append(label)
             continue
         if path.is_file():
             path.unlink()
@@ -170,10 +206,29 @@ def main():
         print(f"  cleaned: {label}")
 
     if run_exists and args.run_id:
-        run_path = project_root / runs_dir / args.run_id
-        if not _is_dangerous_path(run_path):
+        run_path = project_root / run_dir
+        # An explicit --run-dir can name anything; never remove the project
+        # (or a directory containing it) along with the run.
+        if (_is_dangerous_path(run_path)
+                or project_root.resolve().is_relative_to(run_path.resolve())):
+            print(f"  SKIPPED (dangerous): {run_dir}", file=sys.stderr)
+            refused.append(str(run_dir))
+        elif args.run_dir and run_path.is_dir() and not _has_run_marker(run_path):
+            print(f"  SKIPPED (not a run directory): {run_dir} holds none of "
+                  f"{', '.join(RUN_MARKERS)} or a cases/ subdirectory",
+                  file=sys.stderr)
+            refused.append(str(run_dir))
+        elif run_path.exists():
             shutil.rmtree(run_path)
-            print(f"  cleaned: {runs_dir}/{args.run_id}")
+            print(f"  cleaned: {run_dir}")
+        else:
+            # Already removed with an enclosing state directory (e.g. tmp/).
+            print(f"  cleaned: {run_dir} (removed with enclosing directory)")
+
+    # A refused target still holds stale artifacts; don't report CLEAN.
+    if refused:
+        print(f"Not cleaned (refused): {', '.join(refused)}", file=sys.stderr)
+        sys.exit(1)
 
     print("CLEAN")
 

@@ -1266,11 +1266,15 @@ def _render_eval_params(run_result):
         body += '<dl class="config-grid">\n' + "\n".join(chips) + '\n</dl>\n'
 
     skill_args = params.get("skill_args")
+    # Prompt-mode and multi-step runs record no `skill`: show the arguments
+    # alone rather than a made-up `/skill` invocation.
+    skill = params.get("skill")
+    invocation = f"/{skill} {skill_args}" if skill else skill_args
     if skill_args:
         body += (
             '<div class="run-command">'
-            '<span class="run-command-label">Skill Args</span>'
-            f'<pre><code>/{_esc(params.get("skill", "skill"))} {_esc(skill_args)}</code></pre>'
+            f'<span class="run-command-label">{"Skill Args" if skill else "Arguments"}</span>'
+            f'<pre><code>{_esc(invocation)}</code></pre>'
             '</div>\n'
         )
 
@@ -1282,7 +1286,7 @@ def _render_eval_params(run_result):
     # comma-joined view of the short params.
     preview_text = ""
     if skill_args:
-        preview_text = f'/{params.get("skill", "skill")} {skill_args}'
+        preview_text = invocation
     else:
         bits = [_fmt(k, params.get(k))
                 for _, k in short_fields if _fmt(k, params.get(k))]
@@ -3221,14 +3225,18 @@ def main():
 
     runs_base = Path(os.environ.get("AGENT_EVAL_RUNS_DIR", "eval/runs"))
     runs_dir = runs_base / eval_name if eval_name else runs_base
+    # The resolver execute.py, collect.py and score.py share. --run-dir is an
+    # explicit directory (an optimization rollout lives in a parallel runs
+    # root, agent_eval/optimize/export.py); a baseline still resolves under the
+    # ordinary runs dir.
+    from agent_eval.run_location import RunLocationError, resolve_run_dir
+    try:
+        run_dir, args.run_id = resolve_run_dir(config_obj, args.run_id, args.run_dir)
+    except RunLocationError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(1)
     if args.run_dir:
-        # An explicit directory (an optimization rollout lives in a parallel
-        # runs root, agent_eval/optimize/export.py); a baseline still resolves
-        # under the ordinary runs dir.
-        run_dir = Path(args.run_dir).resolve()
-        args.run_id = run_dir.name
-    else:
-        run_dir = runs_dir / args.run_id
+        run_dir = run_dir.resolve()
     baseline_dir = runs_dir / args.baseline if args.baseline else None
 
     if not run_dir.exists():

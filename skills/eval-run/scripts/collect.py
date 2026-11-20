@@ -8,7 +8,12 @@ Usage:
     python3 ${CLAUDE_SKILL_DIR}/scripts/collect.py \\
         --config eval.yaml \\
         --workspace /tmp/agent-eval/test-001 \\
-        --output eval/runs/test-001
+        --run-id test-001
+
+The run directory is resolved from --config + --run-id by
+agent_eval.run_location ($AGENT_EVAL_RUNS_DIR/<eval_name>/<run-id>), the
+same resolver execute.py and score.py use. --run-dir (alias --output)
+overrides it; its basename must equal --run-id when both are given.
 """
 
 import agent_eval._bootstrap  # noqa: F401 — auto-activate venv
@@ -31,6 +36,7 @@ from agent_eval.agent.claude_code import (
     EVAL_PERMISSIONS_OVERLAY, EVAL_SETTINGS_OVERLAY,
 )
 from agent_eval.config import EvalConfig
+from agent_eval.run_location import RunLocationError, resolve_run_dir
 from agent_eval.events import (
     DEFAULT_RESULT_CAP, parse_stream_events, merge_subagent_transcripts,
 )
@@ -374,12 +380,22 @@ def main():
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--config", required=True)
     parser.add_argument("--workspace", required=True)
-    parser.add_argument("--output", required=True)
+    parser.add_argument("--run-id", default=None,
+                        help="Run identifier; with --config it determines the run "
+                             "directory. Required unless --run-dir is given.")
+    parser.add_argument("--run-dir", "--output", dest="run_dir", default=None,
+                        help="Run directory override (default: "
+                             "$AGENT_EVAL_RUNS_DIR/<eval_name>/<run-id>). Its basename "
+                             "is the run id.")
     args = parser.parse_args()
 
     config = EvalConfig.from_yaml(args.config)
     workspace = Path(args.workspace)
-    output_dir = Path(args.output)
+    try:
+        output_dir, _ = resolve_run_dir(config, args.run_id, args.run_dir)
+    except RunLocationError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(1)
 
     # Per-case mode: outputs are already in case workspaces
     # (Works for both skill and prompt execution in case mode)

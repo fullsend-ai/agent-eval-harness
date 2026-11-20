@@ -107,6 +107,7 @@ Parsed from `$ARGUMENTS` at Step 0. CLI flags override the corresponding `eval.y
 | `--subagent-model <model>` | `models.subagent` → falls back to `--model` | Model for subagents (e.g. sonnet subagents under an opus main) |
 | `--skill <name>` | from config | Override the skill being tested |
 | `--run-id <id>` | `YYYY-MM-DD-<model>` | Identifier for this run (names the output directory) |
+| `--run-dir <path>` | resolved from config + run id | Put the run in exactly this directory (CI); its basename is the run id (it must match `[A-Za-z0-9._-]+`), and a conflicting `--run-id` fails |
 | `--cases <id> [<id> …]` | all cases | Run only the listed case IDs |
 | `--parallelism <n>` | `execution.parallelism` | Concurrent cases, for both execution (case mode) and judging |
 | `--baseline <run-id>` | — | Add a pairwise A/B comparison against a prior run under the same eval-name |

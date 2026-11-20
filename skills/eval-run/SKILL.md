@@ -20,6 +20,7 @@ Parse `$ARGUMENTS`:
 | `--subagent-model <model>` | no | `models.subagent` → falls back to skill model | Model for subagents (e.g., `claude-sonnet-4-6` while main is `claude-opus-4-7`) |
 | `--skill <name>` | no | from config | Override the skill to test |
 | `--run-id <id>` | no | `YYYY-MM-DD-<model>` | Identifier for this run |
+| `--run-dir <path>` | no | resolved from config + run id | Put the run in exactly this directory; its basename is the run id and must match `[A-Za-z0-9._-]+` |
 | `--cases <id> [<id> ...]` | no | all cases | Exact case IDs to run |
 | `--baseline <run-id>` | no | — | Previous run to compare against |
 | `--no-llm-judges` | no | false | Skip LLM judges (prompt, prompt_file, LLM builtins, agent). Run deterministic judges (check, Python builtins, external code). |
@@ -31,7 +32,7 @@ Parse `$ARGUMENTS`:
 | `--mount <source:target[:ro or rw]>` | no | — | Repeatable Podman bind mount; defaults to read-only (only with `--runner harbor`) |
 | `--cpus <n>` / `--memory-mb <MiB>` | no | Harbor defaults | Hard resource limits per Harbor environment |
 
-If `--runner harbor`: after config discovery, **skip to the Harbor runner section** below. Steps 2–6 are replaced by one `run.py` call.
+If `--runner harbor`: finish Step 0 and Step 1, then **skip to the Harbor runner section** below. Steps 2–6 are replaced by one `run.py` call.
 
 ### Config Discovery
 
@@ -47,8 +48,6 @@ python3 ${CLAUDE_SKILL_DIR}/../../scripts/discover.py
 - **Multiple configs found**: present the list and ask the user which to run
 - **No configs found**: proceed to the bootstrap flow below
 
-After selecting a config, read its `skill` field to set `<eval-name>` (used in `$AGENT_EVAL_RUNS_DIR/<eval-name>/<id>` paths below).
-
 Check if the resolved config file exists:
 
 ```bash
@@ -57,9 +56,19 @@ test -f <config> && echo "CONFIG_EXISTS" || echo "NO_CONFIG"
 
 **If config is missing**: bootstrap via `/eval-analyze` (invoked through the Skill tool) — if `skills/` contains skills, suggest `/eval-analyze --skill <name>`; otherwise `/eval-analyze --prompt <path>` (prompt mode).
 
-Once config exists, read it to understand the eval setup — the skill under test, runner, dataset, outputs, judges, models, and any tool interception. The downstream scripts read the same config; you don't need to pass these fields through, just confirm they're present and warn the user about anything missing or surprising.
+Once config exists, read it to understand the eval setup (skill under test, runner, dataset, outputs, judges, models, tool interception). Scripts read the same config; just warn the user about anything missing or surprising.
 
-`inputs.tools` is claude-code-only (codex/cursor/fullsend reject it at load). For claude-code, if it has entries but the skill uses AskUserQuestion or external APIs, verify the handlers cover those tools — an unintercepted tool can hang headless execution.
+`inputs.tools` is claude-code-only (others reject it at load). If the skill uses AskUserQuestion or external APIs, verify the handlers cover them — an unintercepted tool can hang headless execution.
+
+### Run Directory
+
+Only once the config exists (after any bootstrap above). If `--run-dir` was supplied it is authoritative: `<run-dir>` is that path and `<id>` its basename — do not run discovery. If `--run-id` was also supplied explicitly and differs from that basename, stop with an error; `--run-dir` alone is valid. Otherwise never build the path yourself; get it from the harness:
+
+```bash
+python3 ${CLAUDE_SKILL_DIR}/../../scripts/discover.py --config <config> --run-id <id>
+```
+
+Its output is `<run-dir>`. Pass `--run-dir <run-dir>` (not `--run-id`) to the scripts below; see [`references/execution-monitoring.md`](references/execution-monitoring.md).
 
 Persist parsed flags:
 
@@ -87,20 +96,20 @@ If no cases found, stop and tell the user clearly:
 
 ## Step 2: Preflight Check
 
-Before setting up the workspace, verify the project's artifact directories are clean. Skills write to the project directory (not the workspace), so stale artifacts from previous runs contaminate results — wrong IDs, stale run reports, inflated file counts.
+Before setting up the workspace, verify the project's artifact directories are clean. Skills write to the project directory, so stale artifacts from previous runs contaminate results (wrong IDs, stale reports, inflated file counts).
 
 ```bash
 python3 ${CLAUDE_SKILL_DIR}/scripts/preflight.py \
   --config <config> \
-  [--run-id <id>] \
+  --run-dir <run-dir> \
   [--baseline <baseline-id>]
 ```
 
-The script checks `tmp/` state files, whether `$AGENT_EVAL_RUNS_DIR/<eval-name>/<id>` already has results from a previous run, and (if `--baseline` is given) that the baseline run-id exists under the same eval-name directory.
+The script checks `tmp/` state files, whether `<run-dir>` already has results, and (with `--baseline`) that the baseline run exists.
 
 - **`CLEAN`**: proceed to workspace setup.
-- **`DIRTY`**: report the findings and ask the user to choose — *force clean* (`preflight.py --clean --force`, then proceed), *change run-id* (append a suffix like `-opus-v2`, then re-run preflight with `--clean` on the new id to avoid overwriting prior results), or *abort* for manual cleanup.
-- **`MISSING_BASELINE` (exit 2)**: the `--baseline` run-id wasn't found under `$AGENT_EVAL_RUNS_DIR/<eval-name>/`. The script lists nearby run-ids — confirm the correct one with the user before retrying.
+- **`DIRTY`**: report the findings and ask the user to choose — *force clean* (`preflight.py --clean --force`, then proceed), *change run-id* (append a suffix like `-opus-v2`, then re-run preflight with `--clean` on the new id), or *abort* for manual cleanup.
+- **`MISSING_BASELINE` (exit 2)**: the `--baseline` run-id wasn't found. The script lists nearby run-ids — confirm the right one with the user.
 
 ## Step 3: Prepare Workspace
 
@@ -122,9 +131,8 @@ If the case count is 0, stop — the filter matched nothing.
 
 ## Step 3a: Resolve Tool Interception (if `inputs.tools` configured)
 
-If eval.yaml has `inputs.tools` entries, this step is **mandatory for Claude Code**.
-Codex, Cursor and fullsend reject `inputs.tools` because their runtimes cannot consume the
-harness interception handlers. `workspace.py` emits a skeleton in
+If eval.yaml has `inputs.tools` entries, this step is **mandatory for Claude Code**
+(other runtimes reject `inputs.tools`). `workspace.py` emits a skeleton in
 `tool_handlers.yaml`; you must resolve each handler's `prompt` into concrete runtime
 checks (`input_filters`, `env_checks`, `case_overrides`). Do not skip this even when
 the eval.yaml is unchanged — the workspace is created fresh each time.
@@ -141,19 +149,18 @@ Write the resolved handlers back to `tool_handlers.yaml`.
 
 Run the eval headlessly against test cases. `execute.py` auto-detects the execution mode from the config: **skill mode** (`execution.skill` + `arguments`) invokes the skill, while **prompt mode** (`execution.prompt`) sends the prompt directly with no skill wrapper. For how the mode is selected and how templates are resolved, see `${CLAUDE_SKILL_DIR}/references/execution-modes.md`.
 
-In `case` mode (default), execute.py runs once per case with case-specific arguments and workspace — each case gets its own stdout.log and subagent transcripts. In `batch` mode, all cases run in a single invocation via batch.yaml.
+In `case` mode (default), execute.py runs once per case, each with its own stdout.log and subagent transcripts. In `batch` mode, all cases run in one invocation via batch.yaml.
 
-If `hooks:` is configured in eval.yaml, execute.py automatically runs lifecycle hooks at the appropriate points: `before_all` before any case executes, `before_each`/`after_each` around each case execution, and `after_all` after all cases complete (guaranteed, even on failure). Hook logs are written to `$AGENT_EVAL_RUNS_DIR/<id>/hooks/`.
+If `hooks:` is configured, execute.py runs the lifecycle hooks itself (`before_all`, `before_each`/`after_each`, `after_all` — guaranteed, even on failure). Logs go to `<run-dir>/hooks/`.
 
 ```bash
 python3 ${CLAUDE_SKILL_DIR}/scripts/execute.py \
   --config <config> \
   --workspace <workspace_path> \
-  --skill <skill_name> \
-  --skill-args "<skill arguments>" \
+  [--skill <skill_name>] \
+  [--skill-args "<skill arguments>"] \
   --model <model> \
-  --output $AGENT_EVAL_RUNS_DIR/<eval-name>/<id> \
-  --run-id <id> \
+  --run-dir <run-dir> \
   [--agent <runner>] \
   [--subagent-model <model>] \
   [--mlflow-experiment <name>] \
@@ -161,7 +168,9 @@ python3 ${CLAUDE_SKILL_DIR}/scripts/execute.py \
   [--parallelism <n>]
 ```
 
-**Launch with `run_in_background: true` and do NOT redirect its output** (no `>`, `|`, `tee`, `2>&1`) — a redirect diverts the stream Claude Code's background viewer reads and leaves it blank. You don't need one: `execute.py` mirrors its live console to `<output_dir>/console.log`.
+Pass `--skill`/`--skill-args` only to override the config (never `--skill` in prompt mode).
+
+**Launch with `run_in_background: true` and do NOT redirect its output** (no `>`, `|`, `tee`, `2>&1`) — a redirect diverts the stream Claude Code's background viewer reads and leaves it blank. `execute.py` mirrors its console to `<output_dir>/console.log`.
 
 When it finishes, read `run_result.json` — if `exit_code` is non-zero, report the failure and stop. If `stderr.log` ends with a bg-wait-ceiling `ERROR:`, see the reference below. For session lifecycle, polling, problem detection, and CLI fallbacks, see [`references/execution-monitoring.md`](references/execution-monitoring.md).
 
@@ -173,13 +182,13 @@ Distribute workspace outputs into per-case directories so judges can score each 
 python3 ${CLAUDE_SKILL_DIR}/scripts/collect.py \
   --config <config> \
   --workspace <workspace_path> \
-  --output $AGENT_EVAL_RUNS_DIR/<eval-name>/<id>
+  --run-dir <run-dir>
 ```
 
 Read the collection summary (JSON file — read it with `cat` or `jq`, not `state.py`):
 
 ```bash
-cat $AGENT_EVAL_RUNS_DIR/<eval-name>/<id>/collection.json
+cat <run-dir>/collection.json
 ```
 
 Report per-case counts. If any case has 0 artifacts, warn — the skill may not have produced output for that case.
@@ -192,7 +201,7 @@ If `--no-llm-judges` was specified, skip judges that make LLM API calls (prompt,
 
 ```bash
 python3 ${CLAUDE_SKILL_DIR}/scripts/score.py judges \
-  --run-id <id> \
+  --run-dir <run-dir> \
   --config <config> \
   --workspace <workspace_path> \
   --model <model> \
@@ -208,7 +217,7 @@ If `--baseline` was specified, also run pairwise comparison:
 
 ```bash
 python3 ${CLAUDE_SKILL_DIR}/scripts/score.py pairwise \
-  --run-id <id> \
+  --run-dir <run-dir> \
   --baseline <baseline_id> \
   --config <config> \
   [--parallelism <n>]
@@ -219,31 +228,31 @@ python3 ${CLAUDE_SKILL_DIR}/scripts/score.py pairwise \
 Read the full results:
 
 ```bash
-python3 ${CLAUDE_SKILL_DIR}/scripts/agent_eval/state.py read $AGENT_EVAL_RUNS_DIR/<eval-name>/<id>/summary.yaml
+python3 ${CLAUDE_SKILL_DIR}/scripts/agent_eval/state.py read <run-dir>/summary.yaml
 ```
 
 `summary.yaml` carries `judges`, `per_case`, `unmeasured`, `judge_usage`, `total_cost_usd`, plus `pairwise` when --baseline was used (keys: [`data-pipeline.md`](references/data-pipeline.md)).
 
 ## Step 7: Interpret and Report
 
-Read the summary and analyze the results. Read `${CLAUDE_SKILL_DIR}/prompts/analyze-results.md` for the full analysis framework and output format. Lead with **Recommendation** (self-contained — many readers only read this section). Save the analysis to `$AGENT_EVAL_RUNS_DIR/<eval-name>/<id>/analysis.md` with YAML frontmatter (agent, model, date) — see the prompt file for the template.
+Read the summary and analyze the results. Read `${CLAUDE_SKILL_DIR}/prompts/analyze-results.md` for the full analysis framework and output format. Lead with **Recommendation** (self-contained — many readers only read this section). Save the analysis to `<run-dir>/analysis.md` with YAML frontmatter (agent, model, date) — see the prompt file for the template.
 
 **Generate HTML report**:
 
 ```bash
 python3 ${CLAUDE_SKILL_DIR}/scripts/report.py \
-  --run-id <id> \
+  --run-dir <run-dir> \
   --config <config> \
   [--baseline <baseline_id>] \
   --open
 ```
 
-Tell the user the report is at `$AGENT_EVAL_RUNS_DIR/<eval-name>/<id>/report.html`.
+Tell the user the report is at `<run-dir>/report.html`.
 
 **If `--gold` flag**: After scoring, copy collected artifacts to dataset case dirs as reference files. Report which cases were saved.
 
 Suggest next steps (include `--config <config>` if a non-default config was used):
-- `/eval-review --run-id <id>` for interactive human review of the results
+- `/eval-review --run-dir <run-dir>` (plus `--config <config>` if non-default) for interactive human review of the results
 - `/eval-optimize --model <model>` for automated improvement based on failures
 - `/eval-mlflow --run-id <id>` to log results to MLflow
 
@@ -252,7 +261,7 @@ Suggest next steps (include `--config <config>` if a non-default config was used
 If `mlflow.experiment` is configured in eval.yaml:
 
 ```text
-Use the Skill tool to invoke /eval-mlflow --action log-results --run-id <id> --config <config>
+Use the Skill tool to invoke /eval-mlflow --action log-results --run-dir <run-dir> --config <config>
 ```
 
 ## Harbor runner (`--runner harbor`)
@@ -272,7 +281,7 @@ VENV_PY="$PLUGIN_ROOT/.eval-venv/bin/python3"
 
 PYTHONPATH="$PLUGIN_ROOT:$(pwd)${PYTHONPATH:+:$PYTHONPATH}" "$VENV_PY" -m agent_eval.harbor.run \
     --config <config> --model <model> \
-    --output $AGENT_EVAL_RUNS_DIR/<eval-name>/<run-id> \
+    --output <run-dir> \
     --tasks-dir <tasks-dir> --jobs-dir <tmp-jobs> \
     [--image <image>] [--agent <agent>] [--n-concurrent N] \
     [--env kubernetes] [--mount <source:target:ro>] [--no-llm-judges] \
@@ -314,7 +323,7 @@ VENV_PY="$PLUGIN_ROOT/.eval-venv/bin/python3"
 
 PYTHONPATH="$PLUGIN_ROOT:$(pwd)${PYTHONPATH:+:$PYTHONPATH}" "$VENV_PY" -m agent_eval.evalhub.runner \
     --config <config> --model <model> \
-    --output $AGENT_EVAL_RUNS_DIR/<eval-name>/<run-id> \
+    --output <run-dir> \
     [--evalhub-url <url>] [--namespace <ns>] [--project-dir <path>]
 ```
 

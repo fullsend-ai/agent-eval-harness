@@ -117,6 +117,18 @@ fails the step automatically.
 
 Runs live under `$AGENT_EVAL_RUNS_DIR/<eval-name>/<run-id>/` (default `eval/runs/`), so
 pass a stable `--run-id` (e.g. the commit SHA) to find the same directory later in the job.
+`<eval-name>` is the skill under test when the config has one, not the config `name` —
+don't rebuild the path in your wrapper. Ask the harness for it, using the same resolver
+every eval-run script uses:
+
+```bash
+RUN_DIR=$(python3 scripts/discover.py --config eval.yaml --run-id "$RUN_ID")
+cat "$RUN_DIR/summary.yaml"
+```
+
+To choose the directory yourself instead, pass `/eval-run --run-dir <path>` (the
+scripts accept `--run-dir` in place of `--run-id`; its basename is the run id, and a
+`--run-id` that disagrees with it fails the step rather than writing elsewhere).
 
 ## Comparing against a baseline
 
@@ -256,7 +268,7 @@ jobs:
       # PSEUDOCODE — replace with a real driver (not a bare /eval-run shell call).
       # Options: Claude Code headless (guides/headless.md) or Harbor
       # (`/eval-run --runner harbor …`). Must produce:
-      #   eval/runs/<eval-name>/$RUN_ID/summary.yaml
+      #   $(python3 scripts/discover.py --config eval.yaml --run-id "$RUN_ID")/summary.yaml
       - name: Run the eval
         run: |
           your-headless-or-harbor-driver \

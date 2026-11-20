@@ -15,7 +15,8 @@ Parse `$ARGUMENTS` for:
 |----------|----------|---------|-------------|
 | `--action <action>` | no | `all` | One of: `sync-dataset`, `log-results`, `push-feedback`, `pull-feedback`, `all` |
 | `--config <path>` | no | auto-discover | Path to eval config |
-| `--run-id <id>` | for log/push/pull | — | Which eval run to log or attach feedback to |
+| `--run-id <id>` | for log/push/pull (or `--run-dir`) | — | Which eval run to log or attach feedback to, under the default runs directory |
+| `--run-dir <path>` | for log/push/pull (or `--run-id`) | — | The run directory itself; authoritative when given (its basename is the run id). `/eval-run` passes this |
 
 ### Config Discovery
 
@@ -109,13 +110,15 @@ python3 ${CLAUDE_SKILL_DIR}/scripts/sync_dataset.py \
 
 The script validates the mapping against the first case and prints a preview before syncing. If the preview looks wrong, adjust the mapping and re-run.
 
+In the commands below, `<run-selector>` is `--run-dir <path>` if one was given, otherwise `--run-id <id>`; never pass both.
+
 ## Step 4: Log Run Results (if `--action log-results` or `all`)
 
-Requires `--run-id`. Logs params, metrics, artifacts, and per-case results table to an MLflow run.
+Requires `--run-id` or `--run-dir`. Logs params, metrics, artifacts, and per-case results table to an MLflow run.
 
 ```bash
 python3 ${CLAUDE_SKILL_DIR}/scripts/log_results.py \
-  --run-id <id> \
+  <run-selector> \
   --config <config>
 ```
 
@@ -129,11 +132,11 @@ This logs:
 
 ## Step 5: Push Feedback (if `--action push-feedback` or `all`)
 
-Requires `--run-id`. Finds execution traces and attaches judge + human feedback.
+Requires `--run-id` or `--run-dir`. Finds execution traces and attaches judge + human feedback.
 
 ```bash
 python3 ${CLAUDE_SKILL_DIR}/scripts/attach_feedback.py \
-  --run-id <id> \
+  <run-selector> \
   --config <config> \
   --source all
 ```
@@ -146,11 +149,11 @@ If no traces are found (tracing not enabled), the script reports 0 and succeeds 
 
 ## Step 6: Pull Feedback (if `--action pull-feedback`)
 
-Requires `--run-id`. Pulls annotations added via the MLflow UI back into `review.yaml` for `/eval-optimize` to consume.
+Requires `--run-id` or `--run-dir`. Pulls annotations added via the MLflow UI back into `review.yaml` for `/eval-optimize` to consume.
 
 ```bash
 python3 ${CLAUDE_SKILL_DIR}/scripts/attach_feedback.py \
-  --run-id <id> \
+  <run-selector> \
   --config <config> \
   --action pull
 ```
