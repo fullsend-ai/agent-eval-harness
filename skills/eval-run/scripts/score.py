@@ -3676,12 +3676,16 @@ def _judges_read_files(judges):
 def _judge_parallelism(parallelism, config, n_cases):
     """How many cases to judge concurrently.
 
-    The run's case parallelism limit: `parallelism` (CLI `--parallelism`) wins,
-    then `execution.parallelism`, then the CPU count. Always capped at the
-    number of cases and at least 1. Judges within one case stay sequential.
+    `parallelism` (CLI `--parallelism`) wins, then `execution.judge_parallelism`
+    (judging-only override for config-only callers), then the run's case limit
+    `execution.parallelism`, then the CPU count. Always capped at the number of
+    cases and at least 1. Judges within one case stay sequential.
     """
+    execution = getattr(config, "execution", None)
     if parallelism is None:
-        parallelism = getattr(getattr(config, "execution", None), "parallelism", None)
+        parallelism = getattr(execution, "judge_parallelism", None)
+    if parallelism is None:
+        parallelism = getattr(execution, "parallelism", None)
     if parallelism is None:
         parallelism = os.cpu_count() or 4
     return max(1, min(n_cases, int(parallelism)))

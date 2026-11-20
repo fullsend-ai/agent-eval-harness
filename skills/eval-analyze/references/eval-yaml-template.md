@@ -75,6 +75,7 @@ execution:
   # timeout: 3600           # Per-invocation wall-clock timeout (seconds)
   # max_budget_usd: 5.0     # Per-invocation cost cap
   # parallelism: 3          # Run up to N cases concurrently (case mode only)
+  # judge_parallelism: 8    # Cases judged at once (default: parallelism)
   # env:                    # Inject env vars into workspace .claude/settings.json
   #   JIRA_SERVER: http://localhost:8080   # Literal value
   #   JIRA_TOKEN: $JIRA_TOKEN              # $VAR resolved from caller's environment
