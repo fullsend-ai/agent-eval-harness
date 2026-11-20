@@ -14,6 +14,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import textwrap
 import time
 from pathlib import Path
@@ -120,7 +121,8 @@ FAKE_FULLSEND = textwrap.dedent('''\
         {"type": "system", "subtype": "init", "model": "claude-opus-4-6"},
         {"type": "assistant", "requestId": "gen-1", "message": {
             "id": "msg_1", "model": "claude-opus-4-6", "role": "assistant",
-            "content": [{"type": "text", "text": "Working"}],
+            "content": [{"type": "text", "text": os.environ.get(
+                "FAKE_FULLSEND_RESULT_TEXT", "Working")}],
             "usage": {"input_tokens": 10, "output_tokens": 5}}},
         {"type": "assistant", "requestId": "gen-2", "message": {
             "id": "msg_2", "model": "claude-opus-4-6", "role": "assistant",
@@ -137,15 +139,18 @@ FAKE_FULLSEND = textwrap.dedent('''\
     (it / "output.jsonl").write_text(
         "\\n".join(json.dumps(e) for e in events) + "\\n")
     (it / "output" / "agent-result.json").write_text(json.dumps({"ok": True}))
+    secret = os.environ.get("FAKE_FULLSEND_SECRET", "")
     (it / "transcripts" / "s1-agent-a1.jsonl").write_text(json.dumps(
         {"requestId": "gen-sub-1", "message": {"role": "assistant", "id": "msg_sub_1",
-                     "model": "claude-haiku-4-5"}}) + "\\n")
+                     "model": "claude-haiku-4-5",
+                     "content": [{"type": "text", "text": secret}]}}) + "\\n")
     (it / "transcripts" / "main.jsonl").write_text("{}\\n")
     (run / "run-telemetry.jsonl").write_text("\\n".join([
         json.dumps({"event": "tool", "attributes": {"gen_ai.tool.name": "Read"}}),
         json.dumps({"event": "hook", "attributes": {
             "decision": "block", "gen_ai.tool.name": "Bash",
-            "gen_ai.tool.call.id": "toolu_9", "reason": "Tirith: curl | sh"}}),
+            "gen_ai.tool.call.id": "toolu_9",
+            "reason": "Tirith: curl | sh" + (f" {secret}" if secret else "")}}),
     ]) + "\\n")
     (run / "security" / "findings.jsonl").write_text("{}\\n")
 
@@ -199,7 +204,8 @@ def fake_fullsend(fake_bin, tmp_path, monkeypatch):
                 "FAKE_FULLSEND_NO_RUN", "FAKE_FULLSEND_HANG_AFTER_RUN",
                 "FAKE_FULLSEND_ITERATIONS",
                 "FAKE_FULLSEND_NO_IMAGE", "FAKE_FULLSEND_IMAGE",
-                "FAKE_FULLSEND_CONSOLE", "FAKE_FULLSEND_CONSOLE_ERR"):
+                "FAKE_FULLSEND_CONSOLE", "FAKE_FULLSEND_CONSOLE_ERR",
+                "FAKE_FULLSEND_RESULT_TEXT", "FAKE_FULLSEND_SECRET"):
         monkeypatch.delenv(var, raising=False)
     return record
 
@@ -967,7 +973,8 @@ class TestFullsendExecute:
             {"message": {"role": "assistant", "id": "msg_sub_1",
                          "model": "claude-haiku-4-5"}}) + "\n")
         result = _runner(tmp_path)._map_run_dir(
-            out, ws, exit_code=-1, stderr="", duration=1.0)
+            out, ws, exit_code=-1, console_stdout="", console_stderr="",
+            duration=1.0)
         assert result.per_model_turns == {"claude-opus-4-6": 1, "claude-haiku-4-5": 1}
         assert result.num_turns == 2
 
@@ -1103,6 +1110,17 @@ class TestTranscriptCopyContainment:
         ws.mkdir()
         fullsend_mod._copy_subagent_transcripts(src, ws / "subagents", ws)
         assert (ws / "subagents" / "s1-agent-a1.jsonl").read_text() == "new"
+
+    def test_read_only_source_can_still_be_redacted(self, tmp_path):
+        src = self._transcripts(tmp_path)
+        source = src / "s1-agent-a1.jsonl"
+        source.write_text("::add-mask::readonly-secret\nreadonly-secret\n")
+        source.chmod(0o444)
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        fullsend_mod._copy_subagent_transcripts(src, ws / "subagents", ws)
+        copied = ws / "subagents" / "s1-agent-a1.jsonl"
+        assert copied.read_text() == "::add-mask::***\n***\n"
 
 
 class TestMaterializeSymlinks:
@@ -1576,6 +1594,85 @@ def test_execute_py_batch_end_to_end(tmp_path, fake_bin):
     for n, case_id in enumerate(("case-001", "case-002"), start=1):
         report = output_dir / "cases" / case_id / "artifacts" / f"report-{n}.md"
         assert report.read_text() == f"report {n}"
+
+
+def test_execute_py_case_end_to_end_masks_actions_values(tmp_path, fake_bin):
+    """A one-case local pipeline run never leaks a declared Actions value."""
+    secret = "SYNTHETIC-SECRET-7f31"
+    project = tmp_path / "project"
+    (project / "cases" / "case-001").mkdir(parents=True)
+    (project / "cases" / "case-001" / "input.yaml").write_text(
+        yaml.dump({"prompt": "use the synthetic secret"}))
+    (project / "scripts").mkdir()
+    (project / "scripts" / "helper.sh").write_text("echo hi")
+    (project / ".claude" / "skills" / "rfe.speedrun").mkdir(parents=True)
+    (project / ".claude" / "skills" / "rfe.speedrun" / "SKILL.md").write_text("# s")
+    (project / ".fullsend").mkdir()
+    (project / ".fullsend" / "config.yaml").write_text("agents: []\n")
+    (project / "eval.yaml").write_text(yaml.dump({
+        "name": "fullsend-case-mask",
+        "execution": {"mode": "case", "skill": "rfe.speedrun",
+                      "arguments": "{{ input.prompt }}"},
+        "runner": {"type": "fullsend", "agent": "rfe-creator-eval"},
+        "models": {"skill": "opus"},
+        "dataset": {"path": "cases", "schema": "Each case has a prompt"},
+    }))
+
+    console_out = tmp_path / "console-out.txt"
+    console_out.write_text(f"→ Working with {secret}\n")
+    console_err = tmp_path / "console-err.txt"
+    console_err.write_text(f"::add-mask::{secret}\n")
+    record = tmp_path / "record.json"
+    runs_dir = tmp_path / "runs"
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("_AGENT_EVAL_BOOTSTRAP_DONE", "FAKE_FULLSEND_EXIT",
+                        "FAKE_FULLSEND_SLEEP")}
+    env.update({
+        "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}",
+        "AGENT_EVAL_RUNS_DIR": str(runs_dir),
+        "GITHUB_ACTIONS": "true",
+        "FAKE_FULLSEND_RECORD": str(record),
+        "FAKE_FULLSEND_CONSOLE": str(console_out),
+        "FAKE_FULLSEND_CONSOLE_ERR": str(console_err),
+        "FAKE_FULLSEND_RESULT_TEXT": secret,
+        "FAKE_FULLSEND_SECRET": secret,
+    })
+
+    ws_result = _run_script("workspace.py", ["--config", "eval.yaml", "--run-id", "r1"],
+                            cwd=project, env=env)
+    assert ws_result.returncode == 0, ws_result.stderr
+    workspace = next(Path(line.split(":", 1)[1].strip())
+                     for line in ws_result.stdout.splitlines()
+                     if line.startswith("WORKSPACE:"))
+
+    output_dir = runs_dir / "fullsend-case-mask" / "r1"
+    output_dir.mkdir(parents=True)
+    exec_result = _run_script("execute.py", [
+        "--workspace", str(workspace), "--model", "opus",
+        "--output", str(output_dir), "--config", str(project / "eval.yaml"),
+        "--run-id", "r1",
+    ], cwd=project, env=env)
+    assert exec_result.returncode == 0, exec_result.stderr
+    assert secret not in exec_result.stdout
+    assert secret not in exec_result.stderr
+
+    case_output = output_dir / "cases" / "case-001"
+    stdout = (case_output / "stdout.log").read_text()
+    stderr = (case_output / "stderr.log").read_text()
+    assert secret not in stdout
+    assert secret not in stderr
+    assert f'"text": "{secret}"' not in stdout
+    assert "::add-mask::***" in stderr
+    run_result = json.loads((case_output / "run_result.json").read_text())
+    assert secret not in json.dumps(run_result)
+    assert run_result["permission_denials"][0]["reason"] == "Tirith: curl | sh ***"
+    for transcript in (
+        workspace / "cases" / "case-001" / "subagents" / "s1-agent-a1.jsonl",
+        case_output / "subagents" / "s1-agent-a1.jsonl",
+    ):
+        text = transcript.read_text()
+        assert secret not in text
+        assert "text\": \"***\"" in text
 
 
 # ── Run provenance ───────────────────────────────────────────────────
@@ -2238,7 +2335,8 @@ class TestPerIterationUsage:
                 "claude-opus-4-6": {"inputTokens": 10, "outputTokens": 5, "costUSD": 0.15},
                 "claude-haiku-4-5": {"inputTokens": 3, "outputTokens": 2, "costUSD": 0.05}})])
         result = _runner(tmp_path)._map_run_dir(
-            ws / ".fullsend-runs", ws, exit_code=0, stderr="", duration=1.0)
+            ws / ".fullsend-runs", ws, exit_code=0, console_stdout="",
+            console_stderr="", duration=1.0)
         assert result.cost_usd == pytest.approx(0.30)
         assert result.token_usage == {
             "input": 113, "output": 57, "cache_read": 7, "cache_create": 0}
@@ -2259,7 +2357,8 @@ class TestPerIterationUsage:
         # The later iteration never reached a result event.
         _write_iteration(run, 2, [_assistant("m2", inp=4, out=2)])
         result = _runner(tmp_path)._map_run_dir(
-            ws / ".fullsend-runs", ws, exit_code=-1, stderr="", duration=1.0)
+            ws / ".fullsend-runs", ws, exit_code=-1, console_stdout="",
+            console_stderr="", duration=1.0)
         assert result.cost_usd == pytest.approx(0.10)
         assert result.token_usage["input"] == 104
         assert result.token_usage["output"] == 52
@@ -2321,7 +2420,7 @@ class TestInterruptCleanup:
             if not interrupted:
                 interrupted.append(True)
                 deadline = time.monotonic() + 10
-                while "holder " not in self.stdout and time.monotonic() < deadline:
+                while "holder " not in self.raw_stdout and time.monotonic() < deadline:
                     time.sleep(0.05)
                 raise KeyboardInterrupt
             return real_join(self, timeout_s)
@@ -2333,7 +2432,7 @@ class TestInterruptCleanup:
             runner._run([str(script)], _workspace(tmp_path), dict(os.environ), 60)
         elapsed = time.monotonic() - start
         ((proc, console),) = captures
-        holder = _holder_pid(console.stdout)
+        holder = _holder_pid(console.raw_stdout)
         try:
             assert elapsed < 10
             assert proc.poll() is not None  # the leader was stopped and reaped
@@ -2343,7 +2442,7 @@ class TestInterruptCleanup:
             assert console.join(10)  # the holder wrote its line and exited: EOF
             assert proc.stdout.closed and proc.stderr.closed
             assert "Late line" not in capsys.readouterr().out
-            assert "Late line" not in console.stdout
+            assert "Late line" not in console.raw_stdout
         finally:
             _kill_quietly(holder)
 
@@ -2366,7 +2465,7 @@ class TestInterruptCleanup:
         with pytest.raises(KeyboardInterrupt):
             runner._run([str(script)], _workspace(tmp_path), dict(os.environ), 3)
         ((proc, console),) = captures
-        holder = _holder_pid(console.stdout)
+        holder = _holder_pid(console.raw_stdout)
         try:
             assert "  ✓ Sandbox created (1.0s)" in _streamed(capsys)
             flag.write_text("")
@@ -2375,7 +2474,7 @@ class TestInterruptCleanup:
             assert console.join(10)  # the holder wrote its line and exited: EOF
             assert proc.stdout.closed and proc.stderr.closed
             assert "Late line" not in capsys.readouterr().out
-            assert "Late line" not in console.stdout
+            assert "Late line" not in console.raw_stdout
         finally:
             _kill_quietly(holder)
             _kill_quietly(proc.pid)
@@ -2441,7 +2540,8 @@ class TestRunDirContainment:
 
     def _map(self, tmp_path, ws):
         return _runner(tmp_path)._map_run_dir(
-            ws / ".fullsend-runs", ws, exit_code=0, stderr="", duration=1.0)
+            ws / ".fullsend-runs", ws, exit_code=0, console_stdout="",
+            console_stderr="", duration=1.0)
 
     def test_symlinked_metrics_json_not_read(self, tmp_path):
         ws, run = self._run_dir(tmp_path)
@@ -2472,6 +2572,33 @@ class TestRunDirContainment:
         (run / "run-telemetry.jsonl").write_text((line + "\n") * 3)
         monkeypatch.setattr(fullsend_mod, "_MAX_TELEMETRY_BYTES", len(line) + 1)
         assert len(self._map(tmp_path, ws).permission_denials) == 1
+
+    def test_actions_masks_redact_denials_and_subagent_transcripts(
+            self, tmp_path):
+        secret = "denial-secret"
+        ws, run = self._run_dir(tmp_path)
+        iteration = run / "iteration-1"
+        transcripts = iteration / "transcripts"
+        transcripts.mkdir(parents=True)
+        (iteration / "output.jsonl").write_text(
+            f"::add-mask::{secret}\n")
+        (transcripts / "s1-agent-a1.jsonl").write_text(json.dumps({
+            "message": {"content": [{"type": "text", "text": secret}]}}) + "\n")
+        (run / "run-telemetry.jsonl").write_text(json.dumps({
+            "attributes": {
+                "decision": "block", "gen_ai.tool.name": "Bash",
+                "tool_input": {"command": f"echo {secret}"},
+                "reason": f"blocked {secret}",
+            }}) + "\n")
+
+        result = self._map(tmp_path, ws)
+        assert result.permission_denials == [{
+            "tool_name": "Bash", "tool_use_id": "",
+            "tool_input": {"command": "echo ***"},
+            "reason": "blocked ***"}]
+        transcript = (ws / "subagents" / "s1-agent-a1.jsonl").read_text()
+        assert secret not in transcript
+        assert "text\": \"***\"" in transcript
 
     def test_symlinked_security_dir_not_walked(self, tmp_path):
         ws, run = self._run_dir(tmp_path)
@@ -3477,6 +3604,26 @@ class TestFullsendConsoleStreaming:
         assert "  ✓ Sandbox created (17.6s)" in streamed
         assert streamed[-1].startswith("FAIL (exit -1)")
 
+    def test_timeout_still_masks_actions_values(
+            self, tmp_path, fake_fullsend, monkeypatch, capsys):
+        secret = "timeout-secret"
+        self._console_files(
+            tmp_path, monkeypatch,
+            out=f"::add-mask::{secret}\n  ✓ Sandbox created {secret}\n",
+            err=f"Error: {secret}\n")
+        monkeypatch.setenv("FAKE_FULLSEND_SLEEP", "30")
+        ws = _workspace(tmp_path)
+        result = _runner(tmp_path, term_grace_s=2, log_prefix="eval").execute(
+            target="s", args="", workspace=ws, model="m", timeout_s=1)
+        printed = capsys.readouterr().out
+
+        assert result.exit_code == -1
+        assert secret not in result.stderr
+        assert "::add-mask::***" in result.stderr
+        assert secret not in printed
+        assert "  eval |   ✓ Sandbox created ***" in printed
+        assert printed.splitlines()[-1].startswith("  eval | FAIL (exit -1)")
+
     def test_both_pipes_drained_past_the_pipe_buffer(
             self, tmp_path, fake_fullsend, monkeypatch, capsys):
         # Far more than a pipe buffer (64 KiB) on each pipe at once: a reader
@@ -3525,7 +3672,7 @@ class TestFullsendConsoleStreaming:
             sink = Broken()
         monkeypatch.setattr(sys, "stdout", sink)
         runner = _runner(tmp_path, log_prefix="eval", term_grace_s=1)
-        rc, out, err, duration = runner._run(
+        rc, out, err, duration, note = runner._run(
             [sys.executable, "-c", self._CHATTY_CHILD], tmp_path,
             dict(os.environ), timeout_s=15)
         assert rc == 0
@@ -3556,15 +3703,15 @@ class TestFullsendConsoleStreaming:
             time.sleep(60)
             """)
         runner = _runner(tmp_path, log_prefix="eval", term_grace_s=1)
-        rc, out, err, duration = runner._run(
+        rc, out, err, duration, note = runner._run(
             [sys.executable, "-c", child], tmp_path, dict(os.environ), timeout_s=3)
-        holder = _holder_pid(err)
+        holder = _holder_pid(out)
         try:
             assert rc == -1
-            assert err.startswith("Timed out after 3s\n")
-            assert "  ✓ Sandbox created (1.0s)\n" in err
-            assert err.endswith("Console pipes still open after the group kill")
-            assert "Process group termination hung" not in err  # the leader exited
+            assert note == ("Timed out after 3s\n"
+                            "Console pipes still open after the group kill")
+            assert "  ✓ Sandbox created (1.0s)\n" in out
+            assert "Process group termination hung" not in note  # leader exited
             assert duration < 10
             assert "  ✓ Sandbox created (1.0s)" in _streamed(capsys)
         finally:
@@ -3693,6 +3840,148 @@ class TestFullsendConsoleStreaming:
                      "Error: *** rejected for ***"):
             assert streamed.count(line) == 1, line
 
+    def test_actions_mask_values_redacted_from_capture_and_live_stream(
+            self, tmp_path, fake_fullsend, monkeypatch, capsys):
+        out = ("::add-mask::synthetic-secret\n"
+               "  ✓ Sandbox created synthetic-secret\n")
+        err = "Error: synthetic-secret\n"
+        self._console_files(tmp_path, monkeypatch, out=out, err=err)
+        ws = _workspace(tmp_path)
+        result = _runner(tmp_path, log_prefix="eval").execute(
+            target="s", args="", workspace=ws, model="m", timeout_s=60)
+        printed = capsys.readouterr().out
+
+        assert result.exit_code == 0
+        assert "synthetic-secret" not in result.stderr
+        assert "::add-mask::***" in result.stderr
+        assert "synthetic-secret" not in printed
+        assert "  eval |   ✓ Sandbox created ***" in printed
+
+    def test_actions_mask_live_stream_masks_prefix_env_secret_whole(
+            self, tmp_path, fake_fullsend, monkeypatch, capsys):
+        # An environment secret that is a prefix of a declared mask value is
+        # masked only after the longer value: concatenated unsorted, the
+        # shorter one replaced first and the longer value's tail leaked.
+        monkeypatch.setenv("JIRA_TOKEN", "abcdefgh")
+        out = ("::add-mask::abcdefgh-123\n"
+               "  ✓ Sandbox created abcdefgh-123\n")
+        err = ""
+        self._console_files(tmp_path, monkeypatch, out=out, err=err)
+        ws = _workspace(tmp_path)
+        result = _runner(tmp_path, log_prefix="eval").execute(
+            target="s", args="", workspace=ws, model="m", timeout_s=60)
+        printed = capsys.readouterr().out
+
+        assert result.exit_code == 0
+        assert "  eval |   ✓ Sandbox created ***" in printed
+        assert "abcdefgh" not in printed
+        assert "abcdefgh-123" not in printed
+        assert "***-123" not in printed
+
+    def test_actions_mask_values_redacted_across_both_pipes(
+            self, tmp_path, fake_fullsend, monkeypatch):
+        out = "::add-mask::cross-stream-secret\n"
+        err = "Error: cross-stream-secret\n"
+        self._console_files(tmp_path, monkeypatch, out=out, err=err)
+        ws = _workspace(tmp_path)
+        result = _runner(tmp_path).execute(
+            target="s", args="", workspace=ws, model="m", timeout_s=60)
+
+        assert result.exit_code == 0
+        assert "cross-stream-secret" not in result.stderr
+        assert "::add-mask::***" in result.stderr
+
+    @pytest.mark.parametrize("ending", ["exit", "timeout"])
+    def test_actions_mask_persistence_keeps_pipe_stop_commands_state(
+            self, tmp_path, fake_fullsend, monkeypatch, ending):
+        out = ("::stop-commands::pause\n"
+               "Error: cross-pipe-secret\n")
+        err = "::add-mask::cross-pipe-secret\n"
+        self._console_files(tmp_path, monkeypatch, out=out, err=err)
+        timeout_s = 60
+        if ending == "timeout":
+            monkeypatch.setenv("FAKE_FULLSEND_SLEEP", "30")
+            timeout_s = 1
+        ws = _workspace(tmp_path)
+        result = _runner(tmp_path, term_grace_s=2).execute(
+            target="s", args="", workspace=ws, model="m", timeout_s=timeout_s)
+
+        assert result.exit_code == (0 if ending == "exit" else -1)
+        if ending == "timeout":
+            assert result.stderr.startswith("Timed out after 1s\n")
+        assert "cross-pipe-secret" not in result.stderr
+        assert "::add-mask::***" in result.stderr
+
+    def test_actions_mask_persistence_uses_transcript_union_for_console(
+            self, tmp_path):
+        ws = _workspace(tmp_path)
+        run = ws / ".fullsend-runs" / "fs-sandbox-1"
+        iteration = run / "iteration-1"
+        transcripts = iteration / "transcripts"
+        transcripts.mkdir(parents=True)
+        (iteration / "output.jsonl").write_text("")
+        (transcripts / "s1-agent-a1.jsonl").write_text(
+            "::add-mask::transcript-only-secret\n")
+        result = _runner(tmp_path)._map_run_dir(
+            ws / ".fullsend-runs", ws, exit_code=0,
+            console_stdout="Error: transcript-only-secret\n",
+            console_stderr="", duration=1.0)
+
+        assert "transcript-only-secret" not in result.stdout
+        assert "transcript-only-secret" not in result.stderr
+        assert "Error: ***" in result.stderr
+
+    def test_actions_mask_persistence_uses_denial_union_for_console(
+            self, tmp_path):
+        ws = _workspace(tmp_path)
+        run = ws / ".fullsend-runs" / "fs-sandbox-1"
+        (run / "iteration-1").mkdir(parents=True)
+        (run / "run-telemetry.jsonl").write_text(json.dumps({
+            "event": "hook", "decision": "block",
+            "reason": "::add-mask::denial-only-secret\n"}) + "\n")
+        result = _runner(tmp_path)._map_run_dir(
+            ws / ".fullsend-runs", ws, exit_code=0,
+            console_stdout="Error: denial-only-secret\n",
+            console_stderr="", duration=1.0)
+
+        assert result.permission_denials[0]["reason"] == "::add-mask::***\n"
+        assert "denial-only-secret" not in result.stderr
+        assert "Error: ***" in result.stderr
+
+    def test_final_mask_line_without_newline_is_collected_at_eof(
+            self, tmp_path):
+        child = ("import sys, time; sys.stdout.write("
+                 "'::add-mask::eof-secret'); sys.stdout.flush(); time.sleep(2)")
+        proc = subprocess.Popen(
+            [sys.executable, "-c", child], stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, start_new_session=True)
+        console = fullsend_mod._ConsoleCapture(proc, log_prefix="eval")
+        try:
+            assert console.join(10)
+            assert "eof-secret" in console._current_mask_values()
+        finally:
+            fullsend_mod.terminate_process_group(
+                proc, 1.0, capture_output=False)
+            console.join(5)
+            console.detach()
+            proc.wait(timeout=5)
+
+    def test_actions_mask_escaped_values_redacted(
+            self, tmp_path, fake_fullsend, monkeypatch, capsys):
+        out = ("::add-mask::abc%25defg\n"
+               "  ✓ Sandbox created abc%defg\n")
+        self._console_files(tmp_path, monkeypatch, out=out, err="")
+        ws = _workspace(tmp_path)
+        result = _runner(tmp_path, log_prefix="eval").execute(
+            target="s", args="", workspace=ws, model="m", timeout_s=60)
+        printed = capsys.readouterr().out
+
+        assert result.exit_code == 0
+        assert "abc%25defg%0A" not in result.stderr
+        assert "abc%defg" not in result.stderr
+        assert "::add-mask::***" in result.stderr
+        assert "abc%defg" not in printed
+
     def test_line_longer_than_one_read_kept_whole_and_forwarded_once(
             self, tmp_path, capsys):
         # A line with no newline, far past one pipe read (_MAX_PIPE_READ_CHARS),
@@ -3703,7 +3992,7 @@ class TestFullsendConsoleStreaming:
         child = ("import sys; sys.stderr.write('  💬 ' + 'x' * 300_000); "
                  "sys.stderr.flush()")
         runner = _runner(tmp_path, log_prefix="eval", term_grace_s=1)
-        rc, _out, err, _duration = runner._run(
+        rc, _out, err, _duration, _note = runner._run(
             [sys.executable, "-c", child], tmp_path, dict(os.environ), timeout_s=30)
         assert rc == 0
         assert len(text) > 4 * fullsend_mod._MAX_PIPE_READ_CHARS
@@ -3730,7 +4019,9 @@ class TestFullsendConsoleStreaming:
         holder = _holder_pid(result.stderr)
         try:
             assert result.exit_code == -1
-            assert result.stderr.endswith("Console pipes still open after the group kill")
+            assert result.stderr.startswith(
+                "Timed out after 3s\n"
+                "Console pipes still open after the group kill\n")
             assert result.duration_s < 10
             streamed = _streamed(capsys)
             assert "  ✓ Sandbox created (1.0s)" in streamed
@@ -3741,6 +4032,118 @@ class TestFullsendConsoleStreaming:
             assert console.join(10)  # the holder wrote its line and exited: EOF
             assert proc.stdout.closed and proc.stderr.closed
             assert "Late line" not in capsys.readouterr().out
-            assert "Late line" not in console.stdout
+            assert "Late line" not in console.raw_stdout
         finally:
             _kill_quietly(holder)
+
+    def test_selected_line_is_forwarded_while_the_process_is_alive(
+            self, tmp_path, capsys):
+        child = ("import sys, time; "
+                 "sys.stdout.write('  ✓ Sandbox created live\\n'); "
+                 "sys.stdout.flush(); time.sleep(30)")
+        proc = subprocess.Popen(
+            [sys.executable, "-c", child], stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, start_new_session=True)
+        console = fullsend_mod._ConsoleCapture(proc, log_prefix="eval")
+        try:
+            deadline = time.monotonic() + 10
+            printed = ""
+            while "Sandbox created live" not in printed:
+                assert time.monotonic() < deadline
+                printed += capsys.readouterr().out
+                time.sleep(0.01)
+            assert proc.poll() is None
+        finally:
+            fullsend_mod.terminate_process_group(
+                proc, 1.0, capture_output=False)
+            console.join(5)
+            console.detach()
+            proc.wait(timeout=5)
+
+    def test_keyboard_interrupt_during_detach_stops_queued_backlog(
+            self, tmp_path, monkeypatch, capsys):
+        child = "import time; time.sleep(30)"
+        proc = subprocess.Popen(
+            [sys.executable, "-c", child], stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, start_new_session=True)
+        entered = threading.Event()
+        release = threading.Event()
+
+        def blocked_present(text, secrets):
+            entered.set()
+            release.wait(10)
+            return "queued-secret"
+
+        monkeypatch.setattr(fullsend_mod, "_present", blocked_present)
+        console = fullsend_mod._ConsoleCapture(proc, log_prefix="eval")
+        forward_thread = next(
+            thread for thread in console._threads
+            if thread.name == "fullsend-console")
+        try:
+            console._forward_queue.put("first")
+            assert entered.wait(10)
+            for _ in range(1000):
+                console._forward_queue.put("queued")
+
+            class InterruptedJoin:
+                name = "fullsend-console"
+
+                def join(self, timeout=None):
+                    raise KeyboardInterrupt
+
+            console._threads = [InterruptedJoin()]
+            with pytest.raises(KeyboardInterrupt):
+                console.detach()
+
+            release.set()
+            forward_thread.join(10)
+            assert not forward_thread.is_alive()
+            assert console._forward_queue.empty()
+            assert "queued-secret" not in capsys.readouterr().out
+        finally:
+            fullsend_mod.terminate_process_group(
+                proc, 1.0, capture_output=False)
+            console.join(5)
+            console.detach()
+            proc.wait(timeout=5)
+
+    def test_forward_write_failure_stops_pumps_from_retaining_queue_entries(
+            self, tmp_path, monkeypatch):
+        child = "import time; time.sleep(30)"
+        proc = subprocess.Popen(
+            [sys.executable, "-c", child], stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, start_new_session=True)
+        entered = threading.Event()
+        release = threading.Event()
+
+        def blocked_present(text, secrets):
+            entered.set()
+            release.wait(10)
+            return "write-failure-secret"
+
+        def failing_print(*args, **kwargs):
+            raise OSError("closed")
+
+        monkeypatch.setattr(fullsend_mod, "_present", blocked_present)
+        monkeypatch.setattr("builtins.print", failing_print)
+        console = fullsend_mod._ConsoleCapture(proc, log_prefix="eval")
+        forward_thread = next(
+            thread for thread in console._threads
+            if thread.name == "fullsend-console")
+        try:
+            console._forward_queue.put("first")
+            assert entered.wait(10)
+            for _ in range(1000):
+                console._forward_queue.put("queued")
+            release.set()
+            forward_thread.join(10)
+            assert not forward_thread.is_alive()
+            assert console._forward_queue.empty()
+            console._enqueue_forward("late line")
+            assert console._forward_queue.empty()
+        finally:
+            fullsend_mod.terminate_process_group(
+                proc, 1.0, capture_output=False)
+            console.join(5)
+            console.detach()
+            proc.wait(timeout=5)
