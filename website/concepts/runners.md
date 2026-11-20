@@ -415,7 +415,9 @@ Per case (or once per batch) the runner:
    dropped with a warning, so host files never reach the sandbox. The eval dataset
    (`dataset.path`: `annotations.yaml`, reference outputs) is never copied either:
    a link to it is dropped, and a linked tree that contains it (for example
-   `skills/<x>/evals/cases` under a linked `skills/`) is copied without it. `.claude` settings
+   `skills/<x>/evals/cases` under a linked `skills/`) is copied without it. Shared
+   `workspace.files` sources get the same treatment: one inside the dataset is skipped, and a
+   directory source that contains it is copied without it. `.claude` settings
    files and `.claude` directories, however reached, are never copied; only the
    workspace's own top-level settings link is, because the rewrite of step 2 has already
    seen it. The decision is by what an entry resolves to as well as by where it lands:
@@ -566,13 +568,26 @@ load for this runner.
 
 ## Isolation and the answer key
 
-Only `harbor` and `fullsend` run the agent in a sandbox that the harness controls,
-so only they can keep the dataset (`annotations.yaml`, reference answers) out of the
-agent's reach. The local runners (`claude-code`, `codex`, `cursor`, `cli`) share the
-host filesystem with the agent: permission rules cannot stop an agent that runs
-Bash from reading the project root. **Permissions alone cannot prevent answer-key
-leakage; the runner must provide the isolation.** Use Harbor or fullsend when an
-agent that finds the answers would invalidate the result.
+The dataset (`annotations.yaml`, reference answers) is grading material and must stay
+**outside the evaluated agent's boundary**. The boundary is whatever the agent cannot
+reach: a sandbox, a container, a separate host. Which part of the stack provides it
+depends on the runner:
+
+- `harbor` and `fullsend` run the agent in a sandbox that the harness controls, and the
+  harness keeps the dataset out of it (see the notes on each runner).
+- The local runners (`claude-code`, `codex`, `cursor`, `cli`) start the agent as your own
+  user on the host filesystem. The harness keeps the project-root grant, so skills can
+  read their linked resources, and denies the dataset directory to the file tools
+  (`Read`, `Edit`, `Grep`, `Glob`) as defense in depth. That is not isolation: Bash is
+  not path-scoped, and an agent that finds the dataset path can read it. **Permissions
+  alone cannot prevent answer-key leakage.**
+- For a local runner, the isolation has to come from the runner or its surrounding
+  environment: run it inside OpenShell, a container, a VM or another sandbox in which
+  the grading material is not mounted. The harness does not require a particular
+  mechanism, only that the dataset is not readable from inside it.
+
+Use an isolated setup whenever an agent that finds the answers would invalidate the
+result.
 
 ## Choosing a runner
 

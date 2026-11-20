@@ -56,6 +56,20 @@ def iter_shared_files(config):
             yield entry
 
 
+def dataset_protected_paths(config):
+    """The eval dataset directory, resolved: answer keys the agent must not see.
+
+    ``[]`` when ``dataset.path`` is unset or empty. An empty path would resolve
+    to the config directory, which is not a dataset: protecting it would drop
+    every shared source and link under the project, so no protection applies.
+    """
+    dataset = getattr(config, "dataset", None)
+    path = getattr(dataset, "path", "") if dataset is not None else ""
+    if not path:
+        return []
+    return [config.resolve_path(path).resolve()]
+
+
 def _is_protected(path, protected):
     """*path* (resolved) is, or lies inside, a protected path."""
     return any(path == p or path.is_relative_to(p) for p in protected)

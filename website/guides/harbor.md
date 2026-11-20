@@ -188,15 +188,19 @@ AGENT_EVAL_PODMAN_PROJECT_DIR=. harbor run -p eval/harbor-tasks --agent claude-c
 The dataset (annotations, reference answers) is evaluation material and never enters the
 trial. The task package's `environment/` holds only `input.yaml`, `answers.yaml` and the
 shared `workspace.files` entries; a shared entry whose source is inside the dataset is
-skipped, and a directory source that contains it is copied without it. When the mounted
-project directory contains the dataset, the harness masks that path inside the container
-with an empty `tmpfs`, so the agent finds nothing there, Bash included. Mounting a
-directory that *is* the dataset is refused. For Kubernetes, build the project ConfigMap
-without the dataset.
+skipped, and a directory source that contains it is copied without it. When you run
+`/eval-run --runner harbor` and the mounted project directory contains the dataset, the
+harness masks that path inside the container with an empty `tmpfs`, so the agent finds
+nothing there, Bash included. Mounting a directory that is the dataset, or lies inside it,
+is refused. The masking is set up by `/eval-run`, not by the podman environment itself:
+if you run `harbor run` on a generated task package directly with
+`AGENT_EVAL_PODMAN_PROJECT_DIR`, the whole project directory is mounted as given, so
+mount a directory that does not hold the dataset. For Kubernetes, build the project
+ConfigMap without the dataset.
 
 | Variable | Description |
 | --- | --- |
-| `AGENT_EVAL_PODMAN_PROJECT_DIR` | Bind-mount project resources (no project image needed); the dataset inside it is masked |
+| `AGENT_EVAL_PODMAN_PROJECT_DIR` | Bind-mount project resources (no project image needed); under `/eval-run --runner harbor` the dataset inside it is masked |
 | `AGENT_EVAL_PODMAN_GCP_CREDENTIALS_FILE` | GCP service-account key (read-only mount) |
 | `AGENT_EVAL_PODMAN_KEEP_RUN` | `1` keeps the container after the trial for debugging |
 

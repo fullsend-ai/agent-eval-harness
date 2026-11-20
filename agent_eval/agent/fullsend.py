@@ -78,6 +78,7 @@ from agent_eval.actions_mask import (
     redact_actions_masks_in_data,
 )
 from agent_eval.config import resolve_env_value, workspace_source_roots
+from agent_eval.workspace_provisioning import dataset_protected_paths
 from .base import EvalRunner, RunResult, terminate_process_group
 from .stream_capture import (
     count_subagent_turns, extract_usage, message_ids_for_run,
@@ -374,7 +375,7 @@ class FullsendRunner(EvalRunner):
             term_grace_s=getattr(runner, "term_grace_s", None),
             log_prefix=log_prefix,
             allowed_roots=workspace_source_roots(config),
-            protected_paths=_dataset_protected_paths(config),
+            protected_paths=dataset_protected_paths(config),
         )
 
     def __init__(
@@ -1946,14 +1947,6 @@ def _runs_workspace_hook(command: str, hook_dirs: list) -> bool:
                 real == root or root in real.parents for root in hook_dirs):
             return True
     return False
-
-
-def _dataset_protected_paths(config) -> list:
-    """The eval dataset directory, resolved: answer keys the agent must not see."""
-    dataset = getattr(config, "dataset", None)
-    if dataset is None:
-        return []
-    return [config.resolve_path(getattr(dataset, "path", "") or "").resolve()]
 
 
 def _is_protected(path: Path, protected) -> bool:

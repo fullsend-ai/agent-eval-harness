@@ -113,13 +113,17 @@ compiles (deny, `harden_bash=True`) to:
 !!! warning "Permissions cannot keep the answer key from the agent under test"
     The eval's dataset (`annotations.yaml`, reference outputs) sits in the project
     root, and the local runners (`claude-code`, `codex`, `cursor`, `cli`) run the
-    agent as your own user without filesystem isolation. A deny rule, `harden_bash`
+    agent as your own user without filesystem isolation. For those runners the
+    harness keeps the project-root grant and adds `Read`, `Edit`, `Grep` and `Glob`
+    deny rules for the dataset directory as defense in depth. A deny rule, `harden_bash`
     included, only covers the file tools and a few bash commands; any other
     subprocess can still read the files. **Permissions alone cannot prevent
-    answer-key leakage.** If the agent must not be able to reach the dataset, run
-    it on a runner that provides the isolation: [Harbor](../../guides/harbor.md)
-    or the [`fullsend`](../../concepts/runners.md#fullsend) runner. Both keep the
-    dataset out of the sandbox.
+    answer-key leakage.** The grading material must stay outside the evaluated
+    agent's boundary, and a runner or its surrounding environment has to provide that
+    boundary: [Harbor](../../guides/harbor.md), the
+    [`fullsend`](../../concepts/runners.md#fullsend) runner, or any other sandbox you run a
+    local runner in, such as OpenShell, a container or a VM. See
+    [Isolation and the answer key](../../concepts/runners.md#isolation-and-the-answer-key).
 
 !!! tip "`harden_bash` is deny-only"
     Hardening runs only for **deny** lists. It is deliberately off for `allow`

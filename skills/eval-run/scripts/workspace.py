@@ -39,7 +39,10 @@ import yaml
 from agent_eval.config import EvalConfig, deep_merge, workspace_source_roots
 from agent_eval.tools.interception import extract_tool_patterns
 from agent_eval.tools.permissions import compile_permission_rules
-from agent_eval.workspace_provisioning import materialize_shared_files
+from agent_eval.workspace_provisioning import (
+    dataset_protected_paths,
+    materialize_shared_files,
+)
 from workspace_files import _copy_input_files
 
 # Resolve git executable to absolute path to prevent PATH hijacking (CWE-426)
@@ -283,7 +286,14 @@ def _create_per_case_workspace(workspace, case_dirs, config, args):
         _copy_input_files(case_dir, case_ws, config)
         # Materialize shared {dest, source} workspace.files entries (e.g. a
         # live SKILL.md in a plugin) as real files in the case workspace.
-        materialize_shared_files(case_ws, config)
+        # The fullsend runner uploads this workspace as the sandbox's target
+        # repo, so a shared source must not carry the dataset (answer keys)
+        # into it; other runners keep the unfiltered copy.
+        materialize_shared_files(
+            case_ws, config,
+            protected_paths=(dataset_protected_paths(config)
+                             if getattr(config.runner, "type", None) == "fullsend"
+                             else ()))
 
         # Create output directories
         for output in config.outputs:
@@ -619,8 +629,10 @@ def _create_repo_mode_settings(case_ws, project_root, config):
         if pattern not in allow_list:
             allow_list.append(pattern)
 
-    # Grant access to project root for reading
+    # Grant access to project root for reading — but deny the file tools the
+    # dataset in it (the agent's own answer keys, #345)
     perms.setdefault("additionalDirectories", []).append(repo_str)
+    _add_deny(settings, _dataset_deny_rules(config))
 
     # Add SubagentStop hook to capture transcripts
     from agent_eval.agent.stream_capture import setup_subagent_hook
@@ -939,6 +951,43 @@ def _carry_over_permissions(settings, workspace=None):
         ).extend(dirs)
 
 
+def _dataset_dir_variants(config):
+    """The dataset directory as configured and resolved (``[]`` if unset).
+
+    Both spellings are returned when they differ (``/tmp`` vs
+    ``/private/tmp`` on macOS) so a rule covers whichever the agent uses.
+    """
+    path = getattr(getattr(config, "dataset", None), "path", "")
+    if not path:
+        return []
+    given = Path(os.path.abspath(config.resolve_path(path)))
+    real = given.resolve()
+    return [given] if real == given else [given, real]
+
+
+def _dataset_deny_rules(config):
+    """File-tool deny rules covering the eval's dataset — its answer keys.
+
+    The project-root grant stays, and these rules sit on top of it as defense
+    in depth. A rule path starting with ``//`` is absolute in Claude Code (a
+    single ``/`` is relative to the settings file). Bash is not path-scoped, so
+    this does not make the dataset unreachable: only a runner or environment
+    that isolates the agent does that.
+    """
+    return [
+        f"{tool}(/{d}/**)"
+        for d in _dataset_dir_variants(config)
+        for tool in ("Read", "Edit", "Grep", "Glob")
+    ]
+
+
+def _add_deny(settings, rules):
+    deny = settings.setdefault("permissions", {}).setdefault("deny", [])
+    for rule in rules:
+        if rule not in deny:
+            deny.append(rule)
+
+
 def _carry_over_hooks(settings, config):
     """Append the project's settings hooks to the run settings.
 
@@ -1093,11 +1142,12 @@ def _setup_subagent_only_hook(workspace, config):
     _carry_over_permissions(settings, workspace)
     _merge_harness_permissions(settings, config, workspace)
 
-    # Grant project root access
+    # Grant project root access, but deny the file tools the dataset in it
     project_root = str(Path.cwd().resolve())
     settings.setdefault("permissions", {}).setdefault(
         "additionalDirectories", []
     ).append(project_root)
+    _add_deny(settings, _dataset_deny_rules(config))
 
     # Add SubagentStop hook
     from agent_eval.agent.stream_capture import setup_subagent_hook
@@ -1156,6 +1206,7 @@ def _setup_tool_hooks(workspace, config):
     settings.setdefault("permissions", {}).setdefault(
         "additionalDirectories", []
     ).append(project_root)
+    _add_deny(settings, _dataset_deny_rules(config))
 
     # Add SubagentStop hook to capture background agent transcripts.
     from agent_eval.agent.stream_capture import setup_subagent_hook

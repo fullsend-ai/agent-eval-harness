@@ -40,6 +40,7 @@ from agent_eval.harbor import tasks as tasks_mod
 from agent_eval.harbor.reward import _load_score_module
 from agent_eval.providers.base import ConfigError
 from agent_eval.providers.env import MANAGED_ENV_KEYS, settings_env_block
+from agent_eval.workspace_provisioning import dataset_protected_paths
 from agent_eval.providers.openrouter.plan import build_plan, effective_roles, plan_is_active
 
 SESSION_FACTORY = None       # tests inject a ProviderSession subclass with fake timing
@@ -661,19 +662,23 @@ def _podman_project_hide_paths(config, env) -> list[str]:
     The project directory is bind-mounted into every trial container, where the
     agent can read it; the dataset in it holds the answer keys, so podman.py
     masks these paths. Empty when no project dir is mounted or the dataset is
-    outside it. A dataset that *is* the project dir cannot be masked without
+    outside it or ``dataset.path`` is unset (no dataset to protect). A project
+    dir that is the dataset, or lies inside it, cannot be masked without
     emptying the mount: that is refused.
     """
     project_dir = env.get("AGENT_EVAL_PODMAN_PROJECT_DIR")
     if not project_dir or not Path(project_dir).is_dir():
         return []
+    protected = dataset_protected_paths(config)
+    if not protected:
+        return []
     project = Path(project_dir).resolve()
-    dataset = config.resolve_path(config.dataset.path or "").resolve()
-    if dataset == project:
+    dataset = protected[0]
+    if project == dataset or project.is_relative_to(dataset):
         raise ValueError(
-            "AGENT_EVAL_PODMAN_PROJECT_DIR is the eval dataset directory: the "
-            "container would expose the answer keys. Mount the project's "
-            "resources from a directory that does not hold the dataset.")
+            "AGENT_EVAL_PODMAN_PROJECT_DIR is the eval dataset directory or "
+            "inside it: the container would expose the answer keys. Mount the "
+            "project's resources from a directory that does not hold the dataset.")
     if not dataset.is_relative_to(project):
         return []
     return [str(dataset.relative_to(project))]

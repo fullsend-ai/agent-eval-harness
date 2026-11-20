@@ -46,7 +46,10 @@ import yaml
 from agent_eval.config import EvalConfig, load_raw, resolve_arguments
 from agent_eval.judges import BuiltinJudgeRegistry
 from agent_eval.tools.interception import generate_interception
-from agent_eval.workspace_provisioning import materialize_shared_files
+from agent_eval.workspace_provisioning import (
+    dataset_protected_paths,
+    materialize_shared_files,
+)
 
 _TEMPLATES = Path(__file__).resolve().parent / "templates"
 
@@ -83,16 +86,6 @@ def _task_label(config) -> str:
     if len(label) > 120:
         label = label[:119] + "…"
     return label
-
-
-def _dataset_protected_paths(config) -> list:
-    """The dataset directory: annotations and reference answers the agent must not see.
-
-    Only ``input.yaml`` and ``answers.yaml`` travel in ``environment/`` (the
-    agent's workspace); a shared ``workspace.files`` source must not pull the
-    rest of the dataset in through the back door.
-    """
-    return [config.resolve_path(config.dataset.path or "").resolve()]
 
 
 def _find_input_file(case_dir: Path):
@@ -415,7 +408,7 @@ def _write_multi_step_case_package(config, config_path, bundled_cfg, case_dir,
     # Shared {dest, source} workspace.files, resolved from the local checkout
     # and copied in so the file travels inside the task package.
     materialize_shared_files(
-        env_dir, config, protected_paths=_dataset_protected_paths(config))
+        env_dir, config, protected_paths=dataset_protected_paths(config))
     _generate_tool_interception(env_dir, config, config_path, workdir)
     return task_dir
 
@@ -556,7 +549,7 @@ def generate_tasks(
         # Shared {dest, source} workspace.files, resolved from the local
         # checkout and copied in so the file travels inside the task package.
         materialize_shared_files(
-            env_dir, config, protected_paths=_dataset_protected_paths(config))
+            env_dir, config, protected_paths=dataset_protected_paths(config))
 
         # Batch mode: create a 1-item batch.yaml so the same --input batch.yaml
         # argument works per-case in Harbor as it does in local batch runs.
