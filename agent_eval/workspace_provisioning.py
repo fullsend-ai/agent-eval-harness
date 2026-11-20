@@ -103,7 +103,8 @@ def dataset_root(config):
 def dataset_protected_paths(config, *, resolved=True):
     """The eval dataset, resolved: answer keys the agent must not see.
 
-    With ``dataset.path`` set, the dataset directory. With it empty, case
+    With ``dataset.path`` set, the dataset directory plus the resolved target
+    of each case directory that is a symlink leaving it. With it empty, case
     discovery scans the config directory, so protection covers what discovery
     finds there: each immediate subdirectory holding case files
     (``input.*``, ``answers.yaml``, ``annotations.yaml``). The config
@@ -117,7 +118,16 @@ def dataset_protected_paths(config, *, resolved=True):
     path = getattr(dataset, "path", "") if dataset is not None else ""
     root = dataset_root(config)
     if path:
-        return [fix(root)]
+        paths = [fix(root)]
+        if root.is_dir():
+            # Discovery follows a case directory that is a symlink, so its
+            # target (outside the dataset root) holds answer keys too.
+            real_root = _real(root)
+            paths += [
+                fix(d) for d in sorted(root.iterdir())
+                if d.is_dir() and not _is_protected(_real(d), [real_root])
+            ]
+        return paths
     if not root.is_dir():
         return []
     return [

@@ -299,6 +299,54 @@ class TestEmptyDatasetPath:
         assert not any(r.startswith(f"Read(/{project}/**)") for r in rules)
 
 
+class TestSymlinkedCaseDirectory:
+    """A case directory that links outside ``dataset.path`` is still a case:
+    discovery follows it, so its target holds answer keys that stay protected."""
+
+    @staticmethod
+    def _linked_project(tmp_path, monkeypatch, shared=None):
+        project, config = _project(tmp_path, monkeypatch, shared=shared)
+        target = project / "fixtures" / "case-002"
+        target.mkdir(parents=True)
+        (target / "input.yaml").write_text("prompt: hi\n")
+        (target / "annotations.yaml").write_text(f"expected: {KEY}\n")
+        (project / DATASET / "case-002").symlink_to(target)
+        return project, config, target
+
+    def test_target_is_protected_with_the_root(self, tmp_path, monkeypatch):
+        project, config, target = self._linked_project(tmp_path, monkeypatch)
+        protected = dataset_protected_paths(config)
+        assert protected == [(project / DATASET).resolve(), target.resolve()]
+
+    def test_shared_source_at_the_target_is_skipped(self, tmp_path, monkeypatch):
+        project, config, target = self._linked_project(
+            tmp_path, monkeypatch, shared=[
+                {"dest": "fixtures", "source": "fixtures"},
+                {"dest": "gold.yaml", "source": "fixtures/case-002/annotations.yaml"},
+                {"dest": "demo", "source": "skills/demo"},
+            ])
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        materialize_shared_files(
+            ws, config, protected_paths=dataset_protected_paths(config))
+
+        assert (ws / "demo" / "SKILL.md").is_file()
+        assert not (ws / "gold.yaml").exists()
+        assert not (ws / "fixtures" / "case-002").exists()
+
+    def test_podman_project_masks_the_target(self, tmp_path, monkeypatch):
+        project, config, _ = self._linked_project(tmp_path, monkeypatch)
+        hidden = _podman_project_hide_paths(
+            config, {"AGENT_EVAL_PODMAN_PROJECT_DIR": str(project)})
+        assert "fixtures/case-002" in hidden
+
+    def test_local_deny_rules_cover_the_target(self, tmp_path, monkeypatch):
+        project, config, target = self._linked_project(tmp_path, monkeypatch)
+        rules = workspace._dataset_deny_rules(config)
+        for tool in ("Read", "Edit", "Grep", "Glob"):
+            assert f"{tool}(/{target.resolve()}/**)" in rules
+
+
 class TestPodmanProjectInsideDataset:
     def test_project_dir_inside_dataset_is_refused(self, tmp_path, monkeypatch):
         project, config = _project(tmp_path, monkeypatch)
