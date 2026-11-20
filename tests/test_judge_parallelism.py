@@ -234,3 +234,42 @@ def test_pairwise_cli_flag_reaches_compare_runs(tmp_path, monkeypatch):
         except SystemExit as e:
             assert not e.code
     assert spy.max_workers[0] == 7
+
+
+# Issue #341: both keys are validated once, at load, so a typo fails before
+# any case runs and execution and judging see the same integer.
+
+_KEYS = ("parallelism", "judge_parallelism")
+
+
+def _load(tmp_path, key, value):
+    config_path = tmp_path / "eval.yaml"
+    config_path.write_text(
+        f"name: t\nexecution:\n  mode: case\n  {key}: {value}\n"
+        "judges:\n  - name: ok\n    check: \"return (True, 'ok')\"\n")
+    return EvalConfig.from_yaml(config_path)
+
+
+@pytest.mark.parametrize("key", _KEYS)
+@pytest.mark.parametrize("value", ['"four"', '"4"', "2.7", "true", ".inf", ".nan", "[2]"])
+def test_unusable_value_is_rejected_at_load(tmp_path, key, value):
+    with pytest.raises(ValueError, match=rf"execution\.{key} must be an integer"):
+        _load(tmp_path, key, value)
+
+
+@pytest.mark.parametrize("key", _KEYS)
+@pytest.mark.parametrize("value, stored, workers", [
+    ("null", None, 3),   # CPU default (patched to 3)
+    ("4", 4, 4),
+    ("2.0", 2, 2),
+    ("0", 0, 1),
+    ("-3", -3, 1),
+])
+def test_accepted_values_load_and_resolve_unchanged(tmp_path, key, value, stored, workers):
+    config = _load(tmp_path, key, value)
+    loaded = getattr(config.execution, key)
+    assert loaded == stored
+    assert loaded is None or type(loaded) is int
+    with patch("score.os.cpu_count", return_value=3):
+        got, _ = _workers(config, _cases(tmp_path / "cases", 20))
+    assert got == workers

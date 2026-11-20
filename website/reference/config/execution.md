@@ -42,6 +42,11 @@ execution:
     Explicit checks preserve `0` — set `max_budget_usd: 0` and you get a $0 cap, not
     the default.
 
+!!! note "`parallelism` and `judge_parallelism` are checked at load"
+    Each must be a whole number or `null`. A whole-number float such as `2.0` loads as `2`.
+    Anything else, including `2.7`, a quoted string like `"4"`, or `true`, fails at load
+    with an error naming the key. `0` and negative values still load and act as `1`.
+
 ## Choosing what to execute
 
 ```mermaid

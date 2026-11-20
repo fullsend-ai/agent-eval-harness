@@ -1187,6 +1187,19 @@ def _finite_number(value) -> bool:
             and math.isfinite(value))
 
 
+def _optional_int(value, key):
+    """`None`, or a whole number coerced to `int` (`2.0` -> 2).
+
+    Anything `int()` would change or reject — `"four"`, `"4"`, `2.7`, `true`,
+    `.inf` — is a load error naming `key`, so every consumer gets the same int.
+    """
+    if value is None:
+        return None
+    if _finite_number(value) and int(value) == value:
+        return int(value)
+    raise ValueError(f"{key} must be an integer or null, got: {value!r}")
+
+
 def _require_mapping(value, context):
     if value is None:
         return {}
@@ -2399,8 +2412,10 @@ class EvalConfig:
             arguments=exec_raw.get("arguments", ""),
             timeout=exec_raw.get("timeout"),
             max_budget_usd=exec_raw.get("max_budget_usd"),
-            parallelism=exec_raw.get("parallelism"),
-            judge_parallelism=exec_raw.get("judge_parallelism"),
+            parallelism=_optional_int(
+                exec_raw.get("parallelism"), "execution.parallelism"),
+            judge_parallelism=_optional_int(
+                exec_raw.get("judge_parallelism"), "execution.judge_parallelism"),
             env=exec_raw.get("env") or {},
             project_hooks=exec_raw.get("project_hooks", True),
             # Default to [] only when absent/null; any other value goes through
