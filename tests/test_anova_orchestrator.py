@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace as NS
 
+import pytest
 import yaml
 
 _scripts_dir = str(Path(__file__).parent.parent / "skills" / "eval-anova" / "scripts")
@@ -173,6 +174,37 @@ def test_main_run_then_analyze_writes_artifact(tmp_path, monkeypatch):
     artifact.unlink()
     assert O.main(["--config", cfg, "--analyze-only", "--no-report"]) == 0
     assert artifact.exists()
+
+
+@pytest.mark.parametrize("header,expected", [
+    ("name: foo-eval\n", "myskill"),   # skill wins over name
+    ("", "myskill"),                   # skill only
+    ("PROMPT", "foo-eval"),            # name only (prompt mode)
+])
+def test_main_uses_the_resolved_runs_dir(tmp_path, monkeypatch, header, expected):
+    """orchestrate.py writes runs + anova.json where the resolver says (issue #335)."""
+    from agent_eval.config import EvalConfig
+    from agent_eval.run_location import config_runs_dir
+
+    cfg = _project(tmp_path)
+    text = _EVAL_YAML
+    if header == "PROMPT":
+        text = "name: foo-eval\n" + text.replace("  skill: myskill\n",
+                                                 '  prompt: "{{ input.prompt }}"\n')
+    else:
+        text = header + text
+    Path(cfg).write_text(text)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("AGENT_EVAL_RUNS_DIR", "runs")  # relative, as by default
+    rec = []
+    monkeypatch.setattr(O, "_run_eval_for_condition", _stub(rec))
+
+    assert O.main(["--config", cfg, "--no-report"]) == 0
+    runs_dir = config_runs_dir(EvalConfig.from_yaml(cfg))
+    assert runs_dir == Path("runs") / expected
+    assert (tmp_path / runs_dir / "anova.json").is_file()
+    # each eval-run cell resolves its run dir under the same root
+    assert {r["env"]["AGENT_EVAL_RUNS_DIR"] for r in rec} == {str(tmp_path / "runs")}
 
 
 def test_correction_plumbing_config_then_cli_override(tmp_path, monkeypatch):

@@ -199,7 +199,8 @@ case "$verdict" in regression:*|missing:*) exit 1 ;; esac
 ```
 
 ```bash
-bash gate-anova.sh "$AGENT_EVAL_RUNS_DIR/<eval-name>/anova.json" model "$CANDIDATE_MODEL" "$BASELINE_MODEL"
+RUNS_DIR=$(python3 scripts/discover.py --runs-dir --config eval.yaml)
+bash gate-anova.sh "$RUNS_DIR/anova.json" model "$CANDIDATE_MODEL" "$BASELINE_MODEL"
 ```
 
 Three semantics are baked in deliberately:

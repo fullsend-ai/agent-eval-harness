@@ -22,7 +22,9 @@ export AGENT_EVAL_RUNS_DIR=eval/runs   # default
     (`execute.py`, `collect.py`, `score.py`, `report.py`) resolves it from `--config` +
     `--run-id` with one shared resolver (`agent_eval/run_location.py`), so never build
     the path yourself — print it with
-    `python3 scripts/discover.py --config <config> --run-id <id>`, or choose it
+    `python3 scripts/discover.py --config <config> --run-id <id>` (or, for the
+    `<eval-name>` directory holding all of the config's runs,
+    `python3 scripts/discover.py --runs-dir --config <config>`), or choose it
     outright with `--run-dir` (its basename is the run id; a conflicting `--run-id`
     is an error). On `execute.py` and `collect.py`, `--output` remains accepted as an
     alias of `--run-dir` and is no longer required; the run id is then the directory's

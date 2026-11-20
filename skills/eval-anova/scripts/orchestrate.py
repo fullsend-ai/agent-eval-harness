@@ -35,6 +35,7 @@ from typing import Any, Callable
 from agent_eval.config import EvalConfig
 from agent_eval.anova.corrections import DEFAULT_CORRECTION
 from agent_eval.anova.matrix import Condition, MatrixBuilder, _safe_id_segment
+from agent_eval.run_location import RunLocationError, config_runs_dir
 
 logger = logging.getLogger(__name__)
 
@@ -348,8 +349,13 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     config = EvalConfig.from_yaml(args.config)
-    runs_base = Path(os.environ.get("AGENT_EVAL_RUNS_DIR", "eval/runs")).resolve()
-    runs_dir = runs_base / config.eval_name()
+    # The harness's resolver names this directory (issue #335). absolute(), not
+    # resolve(): a symlinked <eval_name> dir must not move runs_dir.parent,
+    # which fan_out hands each eval-run cell as its AGENT_EVAL_RUNS_DIR.
+    try:
+        runs_dir = config_runs_dir(config).absolute()
+    except RunLocationError as e:
+        raise SystemExit(f"ERROR: {e}")
 
     if args.analyze_only:
         if not runs_dir.is_dir():
