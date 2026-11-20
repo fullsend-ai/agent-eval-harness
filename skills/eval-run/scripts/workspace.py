@@ -983,7 +983,8 @@ def _add_deny(settings, rules):
             deny.append(rule)
 
 
-_FILE_TOOL_ALLOW = re.compile(r"^(?:Read|Edit|Write|Grep|Glob|NotebookEdit)\((//[^)]*)\)$")
+_FILE_TOOL_ALLOW = re.compile(
+    r"^(?:Read|Edit|Write|Grep|Glob|NotebookEdit)\(((?://|~/|/|\./|\.\./)[^)]*)\)$")
 _GLOB_CHARS = re.compile(r"[*?\[{]")
 
 
@@ -1030,12 +1031,12 @@ def _apply_project_access(settings, config, workspace=None):
     settings, eval.yaml, ``runner.settings``) has been merged.
 
     Default (``execution.project_access: false``): no grant, and any
-    directory grant, or absolute file-tool allow rule, that overlaps the
+    directory grant, or path-scoped file-tool allow rule (``//abs``, ``~/``,
+    settings-relative ``/x`` and ``./``/``../``), that overlaps the
     dataset (contains it or sits inside it, by either its configured or its
     resolved path) is dropped with a warning. Opted in: the project root is
     granted as before, and the dataset is denied to the file tools.
-    Bash-based access and allow rules written relative to the settings file
-    stay out of reach of this filter.
+    Bash-based access stays out of reach of this filter.
     """
     perms = settings.setdefault("permissions", {})
     dirs = list(perms.get("additionalDirectories") or [])
@@ -1058,14 +1059,14 @@ def _apply_project_access(settings, config, workspace=None):
             ]
             allow = perms.get("allow")
             if allow:
-                perms["allow"] = filter_allow_rules(allow, config)
+                perms["allow"] = filter_allow_rules(allow, config, workspace)
     if dirs:
         perms["additionalDirectories"] = dirs
     else:
         perms.pop("additionalDirectories", None)
 
 
-def filter_allow_rules(allow, config):
+def filter_allow_rules(allow, config, workspace=None):
     """Drop the allow rules that expose the eval dataset (``project_access: false``).
 
     Shared by the staged workspace settings (:func:`_apply_project_access`) and
@@ -1085,7 +1086,7 @@ def filter_allow_rules(allow, config):
     return [
         rule for rule in allow
         if not _warn_dropped(
-            any(_allow_rule_exposes(p, datasets)
+            any(_allow_rule_exposes(p, datasets, workspace)
                 for p in compile_permission_rules([rule])),
             f"permissions.allow rule {rule!r}",
             "execution.project_access: true keeps it, with the dataset denied "
@@ -1093,14 +1094,42 @@ def filter_allow_rules(allow, config):
     ]
 
 
-def _allow_rule_exposes(rule, datasets):
-    """Whether an absolute file-tool allow rule's literal prefix overlaps the dataset."""
+def _allow_rule_exposes(rule, datasets, workspace=None):
+    """Whether a path-scoped file-tool allow rule may reach the dataset.
+
+    The rule's literal path prefix (up to its first wildcard) is compared with
+    the dataset. A wildcard that starts partway through a directory name
+    (``ev*``) leaves that name incomplete, so the containing directory is used
+    — erring toward dropping the rule. Handled spellings: ``//abs``, ``~/home``,
+    ``/rel`` (relative to the settings root, taken as the project root) and
+    ``./``/``../`` (relative to the project root and, when known, the
+    agent's *workspace*). Bare relative patterns (``notes/**``) resolve inside
+    the agent's own workspace and are not checked.
+    """
     m = _FILE_TOOL_ALLOW.match(rule) if isinstance(rule, str) else None
     if not m:
         return False
-    prefix = _GLOB_CHARS.split(m.group(1)[1:], maxsplit=1)[0].rstrip("/") or "/"
-    given = Path(os.path.abspath(prefix))
-    return _exposes_dataset([given, given.resolve()], datasets)
+    spec = m.group(1)
+    if spec.startswith("//"):
+        roots, rest = [Path("/")], spec[2:]
+    elif spec.startswith("~/"):
+        roots, rest = [Path.home()], spec[2:]
+    elif spec.startswith("/"):
+        roots, rest = [Path.cwd()], spec[1:]
+    else:
+        roots, rest = [Path.cwd()], spec
+        if workspace is not None:
+            roots.insert(0, Path(workspace))
+    glob = _GLOB_CHARS.search(rest)
+    prefix = rest[:glob.start()] if glob else rest
+    if glob and not prefix.endswith("/"):
+        prefix = prefix.rpartition("/")[0]
+    prefix = prefix.rstrip("/")
+    paths = []
+    for root in roots:
+        given = Path(os.path.abspath(root / prefix))
+        paths += [given, given.resolve()]
+    return _exposes_dataset(paths, datasets)
 
 
 def _warn_dropped(exposes, what, hint):

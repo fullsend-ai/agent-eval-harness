@@ -275,3 +275,70 @@ def test_path_based_allow_rule_over_dataset_dropped_from_overlay(tmp_path, monke
         ws, None, [], runner._permissions["allow"], None)
     allow = json.loads(overlay.read_text())["permissions"]["allow"]
     assert allow == ["Read(notes/**)"]
+
+
+# --- allow-rule spellings and partial-component wildcards -------------------
+
+@pytest.mark.parametrize("pattern", ["ev*/**", "ev?l/**", "ev[a-z]l/**", "e*"])
+def test_wildcard_inside_a_directory_name_is_dropped(tmp_path, monkeypatch, pattern):
+    """``Read(//project/ev*/**)`` reaches ``eval/``: a wildcard that starts
+    partway through a directory name must be checked against its container."""
+    keep = f"Read(/{tmp_path / 'elsewhere'}/ev*/**)"
+    rule = f"Read(/{tmp_path / 'project'}/{pattern})"
+    project = _project(tmp_path, monkeypatch, {"permissions": {"allow": [rule, keep]}})
+    perms = _isolated_settings(tmp_path, "subagent-only", _config(project))["permissions"]
+    assert perms["allow"] == [keep]
+    config = _allow_config(project, f"    - '{rule}'\n    - '{keep}'\n")
+    assert execute._resolve_permissions(config)["allow"] == [keep]
+
+
+def test_wildcard_that_cannot_match_dataset_still_drops_by_container(tmp_path, monkeypatch):
+    project = _project(tmp_path, monkeypatch)
+    rule = f"Read(/{tmp_path / 'project'}/src*/**)"
+    config = _allow_config(project, f"    - '{rule}'\n")
+    # 'src*' cannot name 'eval', but the container (the project root) holds
+    # the dataset; the filter errs toward dropping.
+    assert execute._resolve_permissions(config)["allow"] == []
+
+
+@pytest.mark.parametrize("spelling", [
+    "~/project/eval/cases/**",
+    "~/project/ev*/**",
+    "~/project/**",
+    "~/**",
+])
+def test_home_relative_allow_rule_over_dataset_is_dropped(tmp_path, monkeypatch, spelling):
+    elsewhere = "Read(~/other/**)"
+    rule = f"Read({spelling})"
+    project = _project(tmp_path, monkeypatch, {"permissions": {"allow": [rule, elsewhere]}})
+    monkeypatch.setenv("HOME", str(tmp_path))  # the project sits under $HOME
+    perms = _isolated_settings(tmp_path, "subagent-only", _config(project))["permissions"]
+    assert perms["allow"] == [elsewhere]
+    config = _allow_config(project, f"    - '{rule}'\n    - '{elsewhere}'\n")
+    assert execute._resolve_permissions(config)["allow"] == [elsewhere]
+
+
+@pytest.mark.parametrize("spelling", [
+    "/eval/cases/**",         # relative to the settings file / project root
+    "/eval/**",
+    "./eval/cases/**",
+    "../project/eval/**",     # from the workspace, back into the project
+])
+def test_relative_allow_rule_over_dataset_is_dropped(tmp_path, monkeypatch, spelling):
+    rule = f"Read({spelling})"
+    notes = "Read(notes/**)"
+    project = _project(tmp_path, monkeypatch, {"permissions": {"allow": [rule, notes]}})
+    perms = _isolated_settings(tmp_path, "subagent-only", _config(project))["permissions"]
+    assert perms["allow"] == [notes]
+    config = _allow_config(project, f"    - '{rule}'\n    - '{notes}'\n")
+    assert execute._resolve_permissions(config)["allow"][-1:] == [notes]
+    assert rule not in execute._resolve_permissions(config)["allow"]
+
+
+def test_equivalent_dataset_grants_kept_with_project_access(tmp_path, monkeypatch):
+    rules = ["Read(~/project/eval/cases/**)", "Read(/eval/cases/**)", "Read(ev*/**)"]
+    project = _project(tmp_path, monkeypatch)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    config = _allow_config(project, "".join(f"    - '{r}'\n" for r in rules),
+                           "  project_access: true\n")
+    assert execute._resolve_permissions(config)["allow"] == rules

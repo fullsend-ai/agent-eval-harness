@@ -137,7 +137,8 @@ def test_symlink_expansion_applies_to_allow_and_deny_alike(tmp_path, monkeypatch
     link.symlink_to(real)
     project = _project(tmp_path, monkeypatch, {"deny": [f"Edit({link}/project-private/**)"]})
     perms, _ = _build("subagent-only", tmp_path, project, _config(
-        project, f"permissions:\n  allow:\n    - Edit({link}/**)\n  deny:\n    - Edit({link}/private/**)\n"))
+        project, "dataset:\n  path: eval\n"  # single-slash rules are settings-relative: keep the dataset out of their way
+        f"permissions:\n  allow:\n    - Edit({link}/**)\n  deny:\n    - Edit({link}/private/**)\n"))
     assert {f"Edit({link}/**)", f"Edit({link.resolve()}/**)"} <= set(perms["allow"])
     assert {f"Edit({link}/private/**)", f"Edit({link.resolve()}/private/**)"} <= set(perms["deny"])
     assert {f"Edit({link}/project-private/**)", f"Edit({link.resolve()}/project-private/**)"} <= set(perms["deny"])
