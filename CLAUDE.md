@@ -216,7 +216,7 @@ activate the venv itself (`orchestrate.py::_child_env`).
 Projects create an `eval.yaml` config file. Each key has a full reference page at
 `website/reference/config/<key>.md` (`inputs.tools` → `inputs-tools.md`) — check it before
 changing a key's behavior, and update it when you do:
-- `execution` — `mode` (`case`/`batch`), `skill` or `prompt` (mutually exclusive), `arguments` template, `timeout`/`max_budget_usd`/`parallelism`, `env` (`$VAR` resolves from the caller), `project_hooks`, `symlinks` (local only). A top-level `skill:` is deprecated (auto-normalized to `execution.skill`).
+- `execution` — `mode` (`case`/`batch`), `skill` or `prompt` (mutually exclusive), `arguments` template, `timeout`/`max_budget_usd`/`parallelism`/`judge_parallelism` (concurrent cases while judging; defaults to `parallelism`, and `score.py judges --parallelism` wins over both), `env` (`$VAR` resolves from the caller), `project_hooks`, `symlinks` (local only). A top-level `skill:` is deprecated (auto-normalized to `execution.skill`).
 - `runner` — `type` (`claude-code`, `cursor`, `codex`, `fullsend`, …; unknown → rejected at load) plus runner-specific fields. `cursor` and `fullsend` are local-only and reject `inputs.tools`.
 - `models` — `skill`/`subagent`/`judge`/`hook` defaults (CLI flags override) and `judge_verdict`. The judge backend follows the judge model's provider, not `runner.type` (`agent_eval/prompt_backends.resolve_judge_backend`).
 - `mlflow` — `experiment`, optional `tracking_uri`/`tags`
