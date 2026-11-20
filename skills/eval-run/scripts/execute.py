@@ -385,6 +385,15 @@ def _resolve_permissions(config):
     """
     filtered = dict(config.permissions) if config.permissions else {}
 
+    # Without project_access the runner's allow rules (``--allowed-tools`` and
+    # the ``--settings`` overlay) must not re-grant what the staged settings
+    # drop: allow rules that expose the dataset. ``workspace_mode: repo`` runs
+    # in the checkout and is not staged, so it is left alone.
+    allow = filtered.get("allow")
+    if allow and getattr(config.runner, "workspace_mode", None) != "repo":
+        from workspace import filter_allow_rules
+        filtered["allow"] = filter_allow_rules(allow, config)
+
     return filtered
 
 

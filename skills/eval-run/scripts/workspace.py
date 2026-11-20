@@ -1058,16 +1058,39 @@ def _apply_project_access(settings, config, workspace=None):
             ]
             allow = perms.get("allow")
             if allow:
-                perms["allow"] = [
-                    rule for rule in allow
-                    if not _warn_dropped(
-                        _allow_rule_exposes(rule, datasets),
-                        f"permissions.allow rule {rule!r}", "")
-                ]
+                perms["allow"] = filter_allow_rules(allow, config)
     if dirs:
         perms["additionalDirectories"] = dirs
     else:
         perms.pop("additionalDirectories", None)
+
+
+def filter_allow_rules(allow, config):
+    """Drop the allow rules that expose the eval dataset (``project_access: false``).
+
+    Shared by the staged workspace settings (:func:`_apply_project_access`) and
+    the rules the runner passes on the command line or in its ``--settings``
+    overlay (``execute.py::_resolve_permissions``), so a dataset-overlapping
+    rule cannot come back at execution time. A path-based (dict) rule is
+    judged by the patterns it compiles to. Returns *allow* unchanged when the
+    config grants the project root (``project_access: true``) or has no dataset.
+    """
+    if getattr(config.execution, "project_access", False):
+        return list(allow)
+    datasets = []
+    for d in _dataset_dir_variants(config):
+        datasets += [d, d.resolve()]
+    if not datasets:
+        return list(allow)
+    return [
+        rule for rule in allow
+        if not _warn_dropped(
+            any(_allow_rule_exposes(p, datasets)
+                for p in compile_permission_rules([rule])),
+            f"permissions.allow rule {rule!r}",
+            "execution.project_access: true keeps it, with the dataset denied "
+            "to the file tools")
+    ]
 
 
 def _allow_rule_exposes(rule, datasets):

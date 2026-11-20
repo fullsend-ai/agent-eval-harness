@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from agent_eval.config import EvalConfig
 import workspace  # skills/eval-run/scripts (sys.path via conftest)
+import execute  # skills/eval-run/scripts (sys.path via conftest)
 
 
 TOOLS = "  arguments: ''\ninputs:\n  tools:\n    - match: AskUserQuestion\n      prompt: answer yes\n"
@@ -220,3 +221,57 @@ def test_project_access_must_be_boolean(tmp_path, monkeypatch):
 def test_project_access_defaults_false(tmp_path, monkeypatch):
     project = _project(tmp_path, monkeypatch)
     assert _config(project).execution.project_access is False
+
+
+def _allow_config(project, rules_yaml, execution_yaml="", runner_yaml="  type: claude-code\n"):
+    p = project / "eval.yaml"
+    p.write_text(
+        "name: t\nexecution:\n  skill: s\n" + execution_yaml
+        + "dataset:\n  path: eval/cases\n"
+        + "permissions:\n  allow:\n" + rules_yaml
+        + "runner:\n" + runner_yaml)
+    return EvalConfig.from_yaml(p)
+
+
+def test_runner_allow_rules_drop_dataset_overlap(tmp_path, monkeypatch):
+    """The rules the runner passes (--allowed-tools) get the same filter as the staged file."""
+    project = _project(tmp_path, monkeypatch)
+    elsewhere = f"Read(/{tmp_path / 'elsewhere'}/**)"
+    config = _allow_config(project, (
+        f"    - 'Read(/{project}/**)'\n    - 'Grep(/{project / 'eval' / 'cases'}/**)'\n"
+        f"    - '{elsewhere}'\n    - Skill\n"))
+    assert execute._resolve_permissions(config)["allow"] == [elsewhere, "Skill"]
+    # the eval.yaml object itself is not mutated
+    assert len(config.permissions["allow"]) == 4
+
+
+def test_runner_allow_rules_kept_with_project_access(tmp_path, monkeypatch):
+    project = _project(tmp_path, monkeypatch)
+    rule = f"Read(/{project}/**)"
+    config = _allow_config(project, f"    - '{rule}'\n", "  project_access: true\n")
+    assert execute._resolve_permissions(config)["allow"] == [rule]
+
+
+def test_runner_allow_rules_untouched_in_repo_mode(tmp_path, monkeypatch):
+    project = _project(tmp_path, monkeypatch)
+    rule = f"Read(/{project}/**)"
+    config = _allow_config(project, f"    - '{rule}'\n",
+                           runner_yaml="  type: claude-code\n  workspace_mode: repo\n")
+    assert execute._resolve_permissions(config)["allow"] == [rule]
+
+
+def test_path_based_allow_rule_over_dataset_dropped_from_overlay(tmp_path, monkeypatch):
+    """A path-based rule compiling to a dataset-overlapping pattern never reaches the overlay."""
+    project = _project(tmp_path, monkeypatch)
+    config = _allow_config(project, (
+        f"    - path: '/{project}/eval/cases/'\n      tools: [Read]\n"
+        "    - path: notes/\n      tools: [Read]\n"))
+    from agent_eval.agent.claude_code import ClaudeCodeRunner
+    runner = ClaudeCodeRunner.from_config(
+        config, permissions=execute._resolve_permissions(config))
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    overlay = runner._write_settings_overlay(
+        ws, None, [], runner._permissions["allow"], None)
+    allow = json.loads(overlay.read_text())["permissions"]["allow"]
+    assert allow == ["Read(notes/**)"]
