@@ -8,6 +8,11 @@ nowhere else: execute.py, collect.py, score.py and discover.py all call
 from one command to the next (issue #309: it used to build ``--output`` from
 the config ``name`` while the scorer looked under the skill).
 
+The directory one level up, which holds *all* of a config's runs
+(``$AGENT_EVAL_RUNS_DIR/<eval_name>``), is :func:`config_runs_dir` — eval-anova
+writes its matrix runs and ``anova.json`` there and eval-compare reads it, and
+``discover.py --runs-dir --config <cfg>`` prints it (issue #335).
+
 ``--run-dir`` names the directory outright and overrides the default. Its
 basename is the run id, so a ``--run-id`` that disagrees with it is a
 conflict, and conflicts fail rather than guess.
@@ -47,14 +52,19 @@ def _check_component(value: object, what: str) -> str:
     return value
 
 
+def config_runs_dir(config) -> Path:
+    """``$AGENT_EVAL_RUNS_DIR/<eval_name>``: the directory holding all of *config*'s runs."""
+    return runs_root() / _check_component(config.eval_name(), "eval name")
+
+
 def default_run_dir(config, run_id: str) -> Path:
     """``$AGENT_EVAL_RUNS_DIR/<eval_name>/<run_id>`` for *config*."""
-    eval_name = _check_component(config.eval_name(), "eval name")
+    runs_dir = config_runs_dir(config)
     _check_component(run_id, "run id")
     if not RUN_ID_PATTERN.fullmatch(run_id):
         raise RunLocationError(
             f"invalid --run-id {run_id!r}: the run id must match [A-Za-z0-9._-]+")
-    return runs_root() / eval_name / run_id
+    return runs_dir / run_id
 
 
 def resolve_run_dir(config, run_id: str | None = None,

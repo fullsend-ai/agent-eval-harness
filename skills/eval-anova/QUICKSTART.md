@@ -66,9 +66,12 @@ See `references/matrix-schema.md` for the full matrix schema.
 ## 5. Run it
     python3 ${CLAUDE_SKILL_DIR}/scripts/orchestrate.py --config eval/<name>/eval.yaml
 Each matrix cell runs `/eval-run` once, so every condition lands as a standard run under
-`eval/runs/<eval-name>/<run-id>/` (with its `summary.yaml` + a `condition.json`). The
-orchestrator then writes `eval/runs/<eval-name>/anova.json` and renders the `/eval-compare`
-comparison report (which includes the ANOVA/Pareto statistics section).
+`<runs-dir>/<run-id>/` (with its `summary.yaml` + a `condition.json`). The orchestrator then
+writes `<runs-dir>/anova.json` and renders the `/eval-compare` comparison report (which
+includes the ANOVA/Pareto statistics section). `<runs-dir>` is the directory holding all of
+the config's runs; print it rather than building it yourself:
+
+    python3 ${CLAUDE_SKILL_DIR}/../../scripts/discover.py --runs-dir --config eval/<name>/eval.yaml
 
 ## 6. Re-analyze without re-running
     python3 ${CLAUDE_SKILL_DIR}/scripts/orchestrate.py --config eval/<name>/eval.yaml --analyze-only
@@ -77,9 +80,9 @@ also works over runs produced elsewhere (e.g. a CI fan-out of `/eval-run`).
 
 ## 7. Render reports manually (optional)
     # Comparison (leaderboard, heatmap, + stats section when anova.json exists):
-    python3 ${CLAUDE_PLUGIN_ROOT}/skills/eval-compare/scripts/compare.py generate eval/runs/<eval-name>
+    python3 ${CLAUDE_PLUGIN_ROOT}/skills/eval-compare/scripts/compare.py generate <runs-dir>
     # Statistics-forward deep view for one experiment:
-    python3 ${CLAUDE_SKILL_DIR}/scripts/report.py eval/runs/<eval-name>   # reads anova.json
+    python3 ${CLAUDE_SKILL_DIR}/scripts/report.py <runs-dir>   # reads anova.json
 
 ## Notes
 - Use current model IDs (Opus 4.8 `claude-opus-4-8`, Sonnet 4.6 `claude-sonnet-4-6`,
