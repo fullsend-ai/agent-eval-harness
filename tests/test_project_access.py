@@ -342,3 +342,37 @@ def test_equivalent_dataset_grants_kept_with_project_access(tmp_path, monkeypatc
     config = _allow_config(project, "".join(f"    - '{r}'\n" for r in rules),
                            "  project_access: true\n")
     assert execute._resolve_permissions(config)["allow"] == rules
+
+
+# --- workspace-relative rules resolve per execution workspace ----------------
+
+def test_runner_allow_rule_relative_to_workspace_is_dropped(tmp_path, monkeypatch):
+    """A ``../`` rule that reaches the dataset only from the case workspace is
+    dropped from the staged settings, so it must not return via the runner."""
+    case_ws = tmp_path / "ws" / "cases" / "case-001"
+    case_ws.mkdir(parents=True)
+    rule = "Read(../../../project/eval/**)"   # tmp_path/project/eval from case_ws
+    project = _project(tmp_path, monkeypatch, {"permissions": {"allow": [rule]}})
+    config = _allow_config(project, f"    - '{rule}'\n")
+    # staged settings: dropped
+    settings = {"permissions": {"allow": [rule]}}
+    workspace._apply_project_access(settings, config, case_ws)
+    assert settings["permissions"]["allow"] == []
+    # runner permissions for that workspace: dropped too
+    assert execute._resolve_permissions(config, case_ws)["allow"] == []
+    # another directory resolves the same rule elsewhere: kept
+    other = tmp_path / "elsewhere"
+    other.mkdir()
+    assert execute._resolve_permissions(config, other)["allow"] == [rule]
+
+
+def test_per_case_runner_gets_permissions_for_its_own_workspace(tmp_path, monkeypatch):
+    """Case runners are built with permissions filtered against their workspace."""
+    deep = tmp_path / "ws" / "cases" / "case-001"
+    shallow = tmp_path / "ws" / "cases"
+    deep.mkdir(parents=True)
+    rule = "Read(../../../project/eval/**)"
+    project = _project(tmp_path, monkeypatch)
+    config = _allow_config(project, f"    - '{rule}'\n")
+    assert execute._resolve_permissions(config, deep)["allow"] == []
+    assert execute._resolve_permissions(config, shallow)["allow"] == [rule]
