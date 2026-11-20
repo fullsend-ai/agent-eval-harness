@@ -1,3 +1,10 @@
+# [1.68.0](https://github.com/fullsend-ai/agent-eval-harness/compare/v1.67.1...v1.68.0) (2026-11-20)
+
+
+### Features
+
+* **score:** add execution.judge_parallelism config override ([#336](https://github.com/fullsend-ai/agent-eval-harness/issues/336)) ([b054c0b](https://github.com/fullsend-ai/agent-eval-harness/commit/b054c0bd7fd888164aa7712edadcf12b92022e56)), closes [#329](https://github.com/fullsend-ai/agent-eval-harness/issues/329)
+
 ## [1.67.1](https://github.com/fullsend-ai/agent-eval-harness/compare/v1.67.0...v1.67.1) (2026-11-20)
 
 
