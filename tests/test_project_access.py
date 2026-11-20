@@ -104,16 +104,88 @@ def test_project_grant_containing_dataset_is_dropped(tmp_path, monkeypatch, caps
     # (with the carry-over's resolved twin) stay.
     assert perms["additionalDirectories"] == [
         str(other), "relative/dir", str(project / "relative" / "dir")]
-    assert "contains the eval dataset" in capsys.readouterr().err
+    assert "overlaps the eval dataset" in capsys.readouterr().err
 
 
 def test_project_dot_grant_resolving_to_root_is_dropped(tmp_path, monkeypatch):
     # '.' is carried verbatim (relative to the session) plus its resolution
     # against the project cwd — the project root, which holds the dataset.
+    # Both spellings go: removing only the absolute twin would leave the grant.
     project = _project(tmp_path, monkeypatch, {"permissions": {
         "additionalDirectories": ["."]}})
     perms = _isolated_settings(tmp_path, "subagent-only", _config(project))["permissions"]
-    assert perms["additionalDirectories"] == ["."]
+    assert "additionalDirectories" not in perms
+
+
+def test_relative_parent_grant_is_dropped(tmp_path, monkeypatch):
+    # '..' from the project is the tmp dir, an ancestor of the dataset.
+    project = _project(tmp_path, monkeypatch, {"permissions": {
+        "additionalDirectories": [".."]}})
+    perms = _isolated_settings(tmp_path, "subagent-only", _config(project))["permissions"]
+    assert "additionalDirectories" not in perms
+
+
+def test_relative_grant_resolving_against_workspace_is_dropped(tmp_path, monkeypatch):
+    # The agent runs in <tmp>/ws, so 'project' names the project root there.
+    project = _project(tmp_path, monkeypatch, {"permissions": {
+        "additionalDirectories": ["../project"]}})
+    perms = _isolated_settings(tmp_path, "subagent-only", _config(project))["permissions"]
+    assert "additionalDirectories" not in perms
+
+
+def test_grant_inside_dataset_is_dropped(tmp_path, monkeypatch):
+    project = _project(tmp_path, monkeypatch)
+    case = project / "eval" / "cases" / "case-001"
+    (project / ".claude").mkdir()
+    (project / ".claude" / "settings.json").write_text(json.dumps({"permissions": {
+        "additionalDirectories": [str(case)]}}))
+    perms = _isolated_settings(tmp_path, "subagent-only", _config(project))["permissions"]
+    assert "additionalDirectories" not in perms
+
+
+def test_symlinked_dataset_caught_by_configured_path(tmp_path, monkeypatch):
+    # The dataset lives outside the project but is reached through a link in
+    # it: a carried project-root grant exposes it through the link.
+    outside = (tmp_path / "datasets").resolve()
+    (outside / "case-001").mkdir(parents=True)
+    project = _project(tmp_path, monkeypatch, {"permissions": {
+        "additionalDirectories": [str(tmp_path / "project")]}})
+    (project / "linked").symlink_to(outside)
+    config = _config(project, dataset_path="linked")
+    perms = _isolated_settings(tmp_path, "subagent-only", config)["permissions"]
+    assert "additionalDirectories" not in perms
+
+
+def test_empty_dataset_path_protects_config_dir(tmp_path, monkeypatch):
+    # Case preparation reads an empty dataset.path as the config directory.
+    project = _project(tmp_path, monkeypatch, {"permissions": {
+        "additionalDirectories": [str(tmp_path / "project")]}})
+    config = _config(project, dataset_path="''")
+    perms = _isolated_settings(tmp_path, "subagent-only", config)["permissions"]
+    assert "additionalDirectories" not in perms
+    (tmp_path / "again").mkdir()
+    opted = _config(project, "  project_access: true\n", dataset_path="''")
+    perms = _isolated_settings(tmp_path / "again", "subagent-only", opted)["permissions"]
+    for rule in _deny_rules(project):
+        assert rule in perms["deny"]
+
+
+def test_file_tool_allow_rule_over_dataset_is_dropped(tmp_path, monkeypatch):
+    elsewhere = f"Read(/{tmp_path / 'elsewhere'}/**)"
+    project = _project(tmp_path, monkeypatch, {"permissions": {"allow": [
+        "Bash(ls)", f"Read(/{tmp_path / 'project'}/**)",
+        f"Grep(/{tmp_path / 'project' / 'eval'}/**)", elsewhere]}})
+    perms = _isolated_settings(tmp_path, "subagent-only", _config(project))["permissions"]
+    assert perms["allow"] == ["Bash(ls)", elsewhere]
+
+
+def test_runner_settings_cannot_readd_dataset_grant(tmp_path, monkeypatch):
+    project = _project(tmp_path, monkeypatch)
+    config = _config(project, runner_yaml=(
+        "  type: claude-code\n  settings:\n    permissions:\n"
+        f"      additionalDirectories: ['{project}']\n"))
+    perms = _isolated_settings(tmp_path, "subagent-only", config)["permissions"]
+    assert "additionalDirectories" not in perms
 
 
 def test_dataset_outside_project_root(tmp_path, monkeypatch):

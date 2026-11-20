@@ -75,6 +75,7 @@ one `judge`.
           <span class="sd-f">parallelism</span>
           <span class="sd-f">judge_parallelism</span>
           <span class="sd-f">env</span>
+          <span class="sd-f">project_access</span>
           <span class="sd-f">symlinks</span>
         </div>
       </div>
@@ -378,7 +379,7 @@ thresholds:
 <div class="grid cards" markdown>
 
 - [**extends**](config/extends.md) — layer a profile over a base config; merge policy and `!replace`
-- [**execution**](config/execution.md) — mode, skill/prompt, arguments, timeout, budget, parallelism, judge_parallelism, env, symlinks
+- [**execution**](config/execution.md) — mode, skill/prompt, arguments, timeout, budget, parallelism, judge_parallelism, env, project_access, symlinks
 - [**runner**](config/runner.md) — type, effort, permission_mode, settings, plugin_dirs, env, system_prompt, command, workspace_mode
 - [**models**](config/models.md) — skill, subagent, judge, hook roles and precedence
 - [**models.providers**](config/providers.md) — the `openrouter` block behind `provider:/` ids: keys, routing, enforcement

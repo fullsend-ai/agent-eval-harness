@@ -430,8 +430,10 @@ Per case (or once per batch) the runner:
    and a failure is reported as a failed case (exit `-1`).
 2. **Rewrites the workspace `.claude/settings.json`** for this runner. The harness
    writes `env`, its own hook entries (the `SubagentStop` transcript capture and
-   the `PreToolUse` interception hooks) and `permissions.additionalDirectories` for
-   the other runners; they name host paths and values that mean nothing in the
+   the `PreToolUse` interception hooks) and, for the other runners,
+   `permissions.additionalDirectories` — written only with
+   [`execution.project_access: true`](../reference/config/execution.md#granting-the-project-root)
+   or for carried-over grants that do not contain the dataset; they name host paths and values that mean nothing in the
    sandbox, and fullsend uploads the file with the repository, so the runner removes
    all three for the duration of the run and puts the original file back
    afterwards, so a later non-fullsend step in the same workspace keeps its hooks,
