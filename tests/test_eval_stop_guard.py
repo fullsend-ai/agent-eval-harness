@@ -405,6 +405,8 @@ def test_early_pidfile_argv_scrape(tmp_path, monkeypatch, argv, expected):
 
 
 # ── Overlapping executors in one reused run dir (#337) ─────────────────────
+# Current executors lock the run dir so a second one is refused; the markers
+# below stand in for overlapping older (pre-lock) executors the guard still sees.
 
 @pytest.fixture
 def live_proc_b():

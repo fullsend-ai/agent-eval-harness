@@ -423,8 +423,9 @@ def _release_pidfile():
     rewrites of that file, batch input copies and ``after_all`` hooks all run
     after it, and dropping the marker earlier would let a second executor into
     the run dir while this one can still write results and artifacts. The guard
-    cannot infer completion from the result's mtime either: concurrent executors
-    in a reused run dir share one ``run_result.json``.
+    cannot infer completion from the result's mtime either: a run dir is reused
+    across attempts, so a ``run_result.json`` left by an earlier executor says
+    nothing about this one.
 
     The name embeds our own pid, so the file is ours to delete: no other live
     process can hold that name, and a concurrent executor's marker is untouched.

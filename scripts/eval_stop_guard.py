@@ -40,10 +40,11 @@ CLI-version-proof and self-scoping:
     that file exists and the racing orchestrator ends its turn immediately after
     launch — and removes it when it exits, after all of its post-result
     finalization. One file per executor, so an executor can
-    only ever remove its own marker. ``execute.py`` also refuses to start in a
-    run dir where another live executor's marker exists, so two live executors
-    do not normally share one run dir (their results would collide); the guard
-    still tolerates several markers, e.g. from a mid-upgrade older executor.
+    only ever remove its own marker. ``execute.py`` also takes an exclusive
+    lock on the run dir and refuses to start where another live executor holds
+    it, so two current executors never share one run dir (their results would
+    collide); the guard still tolerates several markers, e.g. from a
+    mid-upgrade older executor that predates the lock.
   * this hook scans ``$AGENT_EVAL_RUNS_DIR`` (default ``eval/runs``) under the
     session cwd for those pidfiles, and treats a run as *live* when any of them
     names a pid that is still alive (``os.kill(pid, 0)``) whose creation marker
@@ -328,8 +329,10 @@ def _live_eval_runs(cwd):
 
     A run dir counts as live when *any* of its pidfiles names a process that is
     still running and whose creation marker still matches (not a reused pid).
-    Several executors may share one reused run dir, each with its own
-    ``execute.<pid>.pid``; it stays live until the last of them is done. Any
+    Current executors hold an exclusive run-dir lock, so a run dir normally has
+    one live marker; older executors (which predate the lock) may still share
+    one, each with its own ``execute.<pid>.pid``, and the dir stays live until
+    the last of them is done. Any
     error on a given pidfile just skips it — the guard fails open, never closed.
     """
     live = []
@@ -358,10 +361,10 @@ def _live_eval_runs(cwd):
                 continue
             # A per-executor pidfile is removed by its executor when it exits,
             # so its presence alone means "not finished". It must NOT be
-            # second-guessed by run_result.json:
-            # concurrent executors in a reused run dir share that one file, so
-            # a result written by whichever finished first would otherwise mark
-            # the others finished while they are still running.
+            # second-guessed by run_result.json: older executors that predate
+            # the run-dir lock can share a reused run dir and its one result
+            # file, so a result written by whichever finished first would
+            # otherwise mark the others finished while they are still running.
             #
             # The legacy shared execute.pid (older executors) is not removed
             # per executor, so keep its rule: "finished" means a result written by
