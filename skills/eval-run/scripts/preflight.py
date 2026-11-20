@@ -37,6 +37,12 @@ from agent_eval.run_location import runs_root as _runs_base
 # State directories that skills write to between runs
 STATE_DIRS = ["tmp"]
 
+# What a run directory directly contains. An explicit --run-dir is only cleaned
+# when it carries one, so a runs root or an eval-name directory (which hold only
+# run subdirectories) is never removed by mistake.
+RUN_MARKERS = ["run_result.json", "summary.yaml", "collection.json",
+               "console.log", "execute.pid"]
+
 
 def _is_dangerous_path(path: Path) -> bool:
     """Reject paths that are too dangerous to clean.
@@ -46,6 +52,12 @@ def _is_dangerous_path(path: Path) -> bool:
     """
     resolved = path.resolve()
     return resolved in {Path.home().resolve(), Path("/").resolve()}
+
+
+def _has_run_marker(path: Path) -> bool:
+    """True when *path* is itself a run directory (not a parent of run directories)."""
+    return (any((path / m).is_file() for m in RUN_MARKERS)
+            or (path / "cases").is_dir())
 
 
 def _find_files(directory: Path) -> list[Path]:
@@ -200,6 +212,11 @@ def main():
         if (_is_dangerous_path(run_path)
                 or project_root.resolve().is_relative_to(run_path.resolve())):
             print(f"  SKIPPED (dangerous): {run_dir}", file=sys.stderr)
+            refused.append(str(run_dir))
+        elif args.run_dir and run_path.is_dir() and not _has_run_marker(run_path):
+            print(f"  SKIPPED (not a run directory): {run_dir} holds none of "
+                  f"{', '.join(RUN_MARKERS)} or a cases/ subdirectory",
+                  file=sys.stderr)
             refused.append(str(run_dir))
         elif run_path.exists():
             shutil.rmtree(run_path)

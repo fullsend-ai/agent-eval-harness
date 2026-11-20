@@ -231,10 +231,92 @@ def test_preflight_never_cleans_the_project_itself(tmp_path, runs):
     cfg = _config(project, _SKILL_AND_NAME)
     proc = _run(SCRIPTS / "preflight.py", "--config", cfg, "--run-dir", ".",
                 "--clean", "--force", cwd=project)
-    assert "SKIPPED (dangerous)" in proc.stderr, proc.stdout + proc.stderr
+    assert "must be below the current directory" in proc.stderr, proc.stdout + proc.stderr
     assert proc.returncode != 0
     assert "CLEAN" not in proc.stdout
     assert cfg.is_file()
+
+
+@pytest.mark.parametrize("spec", [".", "..", "cwd"])
+def test_run_dir_must_be_below_the_current_directory(tmp_path, runs, monkeypatch, spec):
+    """``.``/``..``/the cwd would write run artifacts into the project or above it."""
+    config = EvalConfig.from_yaml(_config(tmp_path, _SKILL_AND_NAME))
+    cwd = tmp_path / "proj" / "sub"
+    cwd.mkdir(parents=True)
+    monkeypatch.chdir(cwd)
+    target = str(cwd) if spec == "cwd" else spec
+    with pytest.raises(RunLocationError, match="must be below the current directory"):
+        resolve_run_dir(config, None, target)
+    # A directory below the cwd is still fine.
+    assert resolve_run_dir(config, None, "r1") == (Path("r1"), "r1")
+
+
+def test_execute_does_not_write_a_pidfile_for_run_dir_dot(tmp_path, runs):
+    project = tmp_path / "proj"
+    project.mkdir()
+    cfg = _config(project, _SKILL_AND_NAME)
+    proc = _run(SCRIPTS / "execute.py", "--config", cfg, "--workspace", "ws",
+                "--model", "m", "--run-dir", ".", cwd=project)
+    assert proc.returncode != 0
+    assert "must be below the current directory" in proc.stderr
+    assert not (project / "execute.pid").exists()
+    assert not (project / "cases").exists()
+
+
+def _mk_run(path):
+    path.mkdir(parents=True)
+    (path / "run_result.json").write_text("{}\n")
+
+
+def _clean(cfg, run_dir, cwd):
+    return _run(SCRIPTS / "preflight.py", "--config", cfg, "--run-dir", run_dir,
+                "--clean", "--force", cwd=cwd)
+
+
+def test_preflight_never_cleans_a_runs_root(tmp_path, runs):
+    project = tmp_path / "proj"
+    project.mkdir()
+    cfg = _config(project, _SKILL_AND_NAME)
+    made = [project / "runs" / ev / rid for ev in ("plugin:foo", "other")
+            for rid in ("r1", "r2")]
+    for d in made:
+        _mk_run(d)
+    proc = _clean(cfg, project / "runs", project)
+    assert proc.returncode != 0, proc.stdout + proc.stderr
+    assert "CLEAN" not in proc.stdout
+    assert "not a run directory" in proc.stderr
+    assert all(d.is_dir() and (d / "run_result.json").is_file() for d in made)
+
+
+def test_preflight_never_cleans_an_eval_name_directory(tmp_path, runs):
+    project = tmp_path / "proj"
+    project.mkdir()
+    # A plain eval name: "plugin:foo" fails the run-id pattern in the resolver
+    # before the marker rule is reached, so it would not exercise the rule.
+    cfg = _config(project, _PROMPT_NAME_ONLY)
+    evaldir = project / "runs" / "foo-eval"
+    _mk_run(evaldir / "r1")
+    _mk_run(evaldir / "baseline")
+    proc = _clean(cfg, evaldir, project)
+    assert proc.returncode != 0, proc.stdout + proc.stderr
+    assert "CLEAN" not in proc.stdout
+    assert (evaldir / "baseline" / "run_result.json").is_file()
+    assert (evaldir / "r1" / "run_result.json").is_file()
+
+
+def test_preflight_still_cleans_a_marked_run_directory(tmp_path, runs):
+    project = tmp_path / "proj"
+    project.mkdir()
+    cfg = _config(project, _SKILL_AND_NAME)
+    run = project / "runs" / "plugin:foo" / "r1"
+    _mk_run(run)
+    sibling = project / "runs" / "plugin:foo" / "baseline"
+    _mk_run(sibling)
+    proc = _clean(cfg, run, project)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert proc.stdout.rstrip().endswith("CLEAN")
+    assert not run.exists()
+    assert sibling.is_dir()
 
 
 def test_preflight_cleans_a_run_inside_a_state_directory(tmp_path, runs):
@@ -362,6 +444,26 @@ def test_run_dir_basename_must_be_a_valid_run_id(tmp_path, runs, bad):
     config = EvalConfig.from_yaml(_config(tmp_path, _SKILL_AND_NAME))
     with pytest.raises(RunLocationError, match=r"\[A-Za-z0-9\._-\]"):
         resolve_run_dir(config, None, tmp_path / "ci" / bad)
+
+
+@pytest.mark.parametrize("bad", ["my run", "run:1", "run#1", "résumé", "a$b"])
+def test_run_id_must_be_a_valid_run_id(tmp_path, runs, bad):
+    """--run-id gets the same rule as a --run-dir basename (workspace.py's)."""
+    config = EvalConfig.from_yaml(_config(tmp_path, _SKILL_AND_NAME))
+    with pytest.raises(RunLocationError, match=r"\[A-Za-z0-9\._-\]"):
+        resolve_run_dir(config, bad)
+    with pytest.raises(RunLocationError, match=r"\[A-Za-z0-9\._-\]"):
+        default_run_dir(config, bad)
+
+
+def test_execute_rejects_an_invalid_run_id_without_creating_a_directory(tmp_path, runs):
+    cfg = _config(tmp_path, _SKILL_AND_NAME)
+    proc = _run(SCRIPTS / "execute.py", "--config", cfg, "--workspace", "ws",
+                "--model", "m", "--run-id", "my run", cwd=tmp_path)
+    assert proc.returncode != 0
+    assert "must match [A-Za-z0-9._-]+" in proc.stderr
+    assert not runs.exists()
+    assert not (tmp_path / "my run").exists()
 
 
 @pytest.mark.parametrize("script,extra", [

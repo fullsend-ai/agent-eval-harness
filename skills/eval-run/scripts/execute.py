@@ -163,7 +163,13 @@ def _early_pidfile(argv):
         # An invalid run id is rejected by main() (run_location.RUN_ID_PATTERN,
         # not imported here to keep this write ahead of the agent_eval imports);
         # do not create its directory.
-        if not re.fullmatch(r"[A-Za-z0-9._-]+", directory.resolve().name):
+        resolved = directory.resolve()
+        if not re.fullmatch(r"[A-Za-z0-9._-]+", resolved.name):
+            return
+        # Likewise for the working directory or an ancestor of it (--run-dir .):
+        # the resolver rejects it, so do not drop a pidfile there first.
+        cwd = Path.cwd().resolve()
+        if resolved == cwd or resolved in cwd.parents:
             return
         directory.mkdir(parents=True, exist_ok=True)
         _write_pidfile(directory)

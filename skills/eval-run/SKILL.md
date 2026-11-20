@@ -31,7 +31,7 @@ Parse `$ARGUMENTS`:
 | `--mount <source:target[:ro or rw]>` | no | — | Repeatable Podman bind mount; defaults to read-only (only with `--runner harbor`) |
 | `--cpus <n>` / `--memory-mb <MiB>` | no | Harbor defaults | Hard resource limits per Harbor environment |
 
-If `--runner harbor`: after config discovery, **skip to the Harbor runner section** below. Steps 2–6 are replaced by one `run.py` call.
+If `--runner harbor`: finish Step 0 and Step 1, then **skip to the Harbor runner section** below. Steps 2–6 are replaced by one `run.py` call.
 
 ### Config Discovery
 

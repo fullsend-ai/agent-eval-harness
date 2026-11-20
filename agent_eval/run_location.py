@@ -50,7 +50,11 @@ def _check_component(value: object, what: str) -> str:
 def default_run_dir(config, run_id: str) -> Path:
     """``$AGENT_EVAL_RUNS_DIR/<eval_name>/<run_id>`` for *config*."""
     eval_name = _check_component(config.eval_name(), "eval name")
-    return runs_root() / eval_name / _check_component(run_id, "run id")
+    _check_component(run_id, "run id")
+    if not RUN_ID_PATTERN.fullmatch(run_id):
+        raise RunLocationError(
+            f"invalid --run-id {run_id!r}: the run id must match [A-Za-z0-9._-]+")
+    return runs_root() / eval_name / run_id
 
 
 def resolve_run_dir(config, run_id: str | None = None,
@@ -64,7 +68,14 @@ def resolve_run_dir(config, run_id: str | None = None,
     """
     if run_dir:
         path = Path(run_dir)
-        name = path.resolve().name
+        resolved = path.resolve()
+        cwd = Path.cwd().resolve()
+        if resolved == cwd or resolved in cwd.parents:
+            raise RunLocationError(
+                f"invalid --run-dir {str(run_dir)!r} ({str(resolved)!r}): the run "
+                f"directory must be below the current directory ({str(cwd)!r}), "
+                f"not the directory itself or one of its ancestors")
+        name = resolved.name
         _check_component(name, "run directory basename")
         if not RUN_ID_PATTERN.fullmatch(name):
             raise RunLocationError(
