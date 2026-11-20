@@ -37,6 +37,16 @@ from agent_eval.run_location import runs_root as _runs_base
 # State directories that skills write to between runs
 STATE_DIRS = ["tmp"]
 
+# Files directly under a state directory that a skill owns and overwrites
+# itself (Step 0 of eval-run, eval-optimize and eval-analyze; eval-mlflow's
+# schema mapping). They are the current invocation's state — or a parent
+# /eval-optimize loop's — not stale artifacts, so they are neither reported
+# nor cleaned.
+OWNED_STATE_FILES = frozenset({
+    "eval-config.yaml", "optimize-config.yaml",
+    "analyze-config.yaml", "schema_mapping.json",
+})
+
 # What a run directory directly contains. An explicit --run-dir is only cleaned
 # when it carries one, so a runs root or an eval-name directory (which hold only
 # run subdirectories) is never removed by mistake.
@@ -67,6 +77,29 @@ def _find_files(directory: Path) -> list[Path]:
     if directory.is_file():
         return [directory]
     return sorted(f for f in directory.rglob("*") if f.is_file())
+
+
+def _is_owned_state(path: Path, state_path: Path) -> bool:
+    """True for a skill-owned state file directly under *state_path*."""
+    return path.parent == state_path and path.name in OWNED_STATE_FILES
+
+
+def _remove_files(files: list[Path], root: Path) -> None:
+    """Unlink *files*, then prune directories below *root* left empty.
+
+    *root* itself is kept. Only the reported files are removed, so anything
+    excluded from the report (the owned state files) survives the clean.
+    """
+    for f in files:
+        f.unlink(missing_ok=True)
+    for f in files:
+        parent = f.parent
+        while parent != root and parent.is_relative_to(root):
+            try:
+                parent.rmdir()
+            except OSError:
+                break  # not empty (or already gone along another path)
+            parent = parent.parent
 
 
 def main():
@@ -133,7 +166,8 @@ def main():
     # 1. State directories (tmp/)
     for state_dir in STATE_DIRS:
         state_path = project_root / state_dir
-        files = _find_files(state_path)
+        files = [f for f in _find_files(state_path)
+                 if not _is_owned_state(f, state_path)]
         if files:
             dirty[state_dir] = files
 
@@ -201,8 +235,8 @@ def main():
         if path.is_file():
             path.unlink()
         elif path.is_dir():
-            shutil.rmtree(path)
-            path.mkdir(parents=True, exist_ok=True)
+            # File-granular: remove what was reported, never the owned state.
+            _remove_files(files, path)
         print(f"  cleaned: {label}")
 
     if run_exists and args.run_id:
