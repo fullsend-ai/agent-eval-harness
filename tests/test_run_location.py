@@ -15,6 +15,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import yaml
 
 from agent_eval.config import EvalConfig
 from agent_eval.run_location import (RunLocationError, default_run_dir,
@@ -351,6 +352,106 @@ def test_preflight_refuses_to_clean_a_symlinked_run_dir(tmp_path, runs):
     assert "Traceback" not in proc.stderr
     assert (real / "summary.yaml").exists()
     assert (state / "stale.txt").exists()  # nothing cleaned before refusing
+
+
+def _step0_state(project):
+    """What /eval-optimize and /eval-run Step 0 leave in tmp/ (issue #339)."""
+    state_py = ROOT / "agent_eval" / "state.py"
+    for args in (("tmp/optimize-config.yaml", "target_judge=done"),
+                 ("tmp/eval-config.yaml", "model=opus", "run_id=r1")):
+        proc = _run(state_py, "init", *args, cwd=project)
+        assert proc.returncode == 0, proc.stderr
+
+
+def _read_state(project, name):
+    proc = _run(ROOT / "agent_eval" / "state.py", "read", f"tmp/{name}", cwd=project)
+    assert proc.returncode == 0, proc.stderr
+    return yaml.safe_load(proc.stdout)
+
+
+def test_preflight_ignores_the_skills_own_state_files(tmp_path, runs):
+    """Step 0's own tmp/eval-config.yaml is not a stale artifact."""
+    project = tmp_path / "proj"
+    project.mkdir()
+    cfg = _config(project, _SKILL_AND_NAME)
+    _step0_state(project)
+    proc = _run(SCRIPTS / "preflight.py", "--config", cfg, "--run-id", "r1",
+                cwd=project)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert proc.stdout.strip() == "CLEAN"
+
+
+def test_preflight_clean_keeps_the_skills_own_state_files(tmp_path, runs):
+    """--clean removes what it reported, never a (parent) skill's state."""
+    project = tmp_path / "proj"
+    project.mkdir()
+    cfg = _config(project, _SKILL_AND_NAME)
+    _step0_state(project)
+    stale = project / "tmp" / "old" / "stale.txt"
+    stale.parent.mkdir()
+    stale.write_text("x")
+    check = _run(SCRIPTS / "preflight.py", "--config", cfg, "--run-id", "r1",
+                 cwd=project)
+    assert check.returncode == 1 and "DIRTY" in check.stdout
+    assert "tmp: 1 files — stale.txt" in check.stdout
+    proc = _run(SCRIPTS / "preflight.py", "--config", cfg, "--run-id", "r1",
+                "--clean", "--force", cwd=project)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert proc.stdout.rstrip().endswith("CLEAN")
+    assert not stale.exists() and not stale.parent.exists()
+    assert (project / "tmp").is_dir()
+    assert _read_state(project, "eval-config.yaml") == {"model": "opus", "run_id": "r1"}
+    assert _read_state(project, "optimize-config.yaml") == {"target_judge": "done"}
+
+
+@pytest.mark.parametrize("target", ["external", "project"])
+def test_preflight_refuses_a_symlinked_state_directory(tmp_path, runs, target):
+    project = tmp_path / "proj"
+    project.mkdir()
+    (project / "keep.txt").write_text("x")
+    external = tmp_path / "external"
+    external.mkdir()
+    (external / "other.txt").write_text("x")
+    (project / "tmp").symlink_to(
+        external if target == "external" else project, target_is_directory=True)
+    cfg = _config(project, _SKILL_AND_NAME)
+    for extra in ((), ("--clean", "--force")):
+        proc = _run(SCRIPTS / "preflight.py", "--config", cfg, *extra, cwd=project)
+        assert proc.returncode == 1 and "symlink" in proc.stderr
+        assert "CLEAN" not in proc.stdout and "Traceback" not in proc.stderr
+    assert (external / "other.txt").exists()
+    assert (project / "keep.txt").exists()
+
+
+def test_preflight_refuses_to_clean_a_run_dir_that_is_a_state_directory(tmp_path, runs):
+    """A run dir equal to tmp/ must not be removed along with the owned state."""
+    project = tmp_path / "proj"
+    project.mkdir()
+    cfg = _config(project, _SKILL_AND_NAME)
+    _step0_state(project)
+    (project / "tmp" / "summary.yaml").write_text("judges: {}\n")
+    proc = _run(SCRIPTS / "preflight.py", "--config", cfg, "--run-dir", "tmp",
+                "--clean", "--force", cwd=project)
+    assert proc.returncode != 0, proc.stdout + proc.stderr
+    assert "CLEAN" not in proc.stdout
+    assert "Traceback" not in proc.stderr
+    assert "state directory" in proc.stderr and "tmp" in proc.stderr
+    assert _read_state(project, "eval-config.yaml") == {"model": "opus", "run_id": "r1"}
+    assert _read_state(project, "optimize-config.yaml") == {"target_judge": "done"}
+
+
+def test_preflight_cleans_a_state_run_with_an_empty_subdirectory(tmp_path, runs):
+    project = tmp_path / "proj"
+    run = project / "tmp" / "r1"
+    (run / "artifacts").mkdir(parents=True)
+    (run / "summary.yaml").write_text("judges: {}\n")
+    cfg = _config(project, _SKILL_AND_NAME)
+    proc = _run(SCRIPTS / "preflight.py", "--config", cfg, "--run-dir", run,
+                "--clean", "--force", cwd=project)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "not a run directory" not in proc.stderr
+    assert proc.stdout.rstrip().endswith("CLEAN")
+    assert not run.exists()
 
 
 def _render_params(eval_params):

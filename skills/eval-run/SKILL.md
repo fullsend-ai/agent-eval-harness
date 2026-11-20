@@ -105,7 +105,7 @@ python3 ${CLAUDE_SKILL_DIR}/scripts/preflight.py \
   [--baseline <baseline-id>]
 ```
 
-The script checks `tmp/` state files, whether `<run-dir>` already has results, and (with `--baseline`) that the baseline run exists.
+The script checks `tmp/` for stale files (not skills' own state), whether `<run-dir>` already has results, and (with `--baseline`) that the baseline run exists.
 
 - **`CLEAN`**: proceed to workspace setup.
 - **`DIRTY`**: report the findings and ask the user to choose — *force clean* (`preflight.py --clean --force`, then proceed), *change run-id* (append a suffix like `-opus-v2`, then re-run preflight with `--clean` on the new id), or *abort* for manual cleanup.

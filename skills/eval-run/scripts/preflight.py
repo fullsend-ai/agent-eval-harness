@@ -37,6 +37,16 @@ from agent_eval.run_location import runs_root as _runs_base
 # State directories that skills write to between runs
 STATE_DIRS = ["tmp"]
 
+# Files directly under a state directory that a skill owns and overwrites
+# itself (Step 0 of eval-run, eval-optimize and eval-analyze; eval-mlflow's
+# schema mapping). They are the current invocation's state — or a parent
+# /eval-optimize loop's — not stale artifacts, so they are neither reported
+# nor cleaned.
+OWNED_STATE_FILES = frozenset({
+    "eval-config.yaml", "optimize-config.yaml",
+    "analyze-config.yaml", "schema_mapping.json",
+})
+
 # What a run directory directly contains. An explicit --run-dir is only cleaned
 # when it carries one, so a runs root or an eval-name directory (which hold only
 # run subdirectories) is never removed by mistake.
@@ -67,6 +77,33 @@ def _find_files(directory: Path) -> list[Path]:
     if directory.is_file():
         return [directory]
     return sorted(f for f in directory.rglob("*") if f.is_file())
+
+
+def _is_owned_state(path: Path, state_path: Path) -> bool:
+    """True for a skill-owned state file directly under *state_path*."""
+    return path.parent == state_path and path.name in OWNED_STATE_FILES
+
+
+def _remove_files(files: list[Path], root: Path) -> None:
+    """Unlink *files*, then prune directories below *root* left empty.
+
+    *root* itself is kept. Only the reported files are removed, so anything
+    excluded from the report (the owned state files) survives the clean.
+    """
+    real_root = root.resolve()
+    # Never unlink through a symlinked directory component: a file whose real
+    # parent lies outside *root* is left alone.
+    files = [f for f in files if f.parent.resolve().is_relative_to(real_root)]
+    for f in files:
+        f.unlink(missing_ok=True)
+    for f in files:
+        parent = f.parent
+        while parent != root and parent.is_relative_to(root):
+            try:
+                parent.rmdir()
+            except OSError:
+                break  # not empty (or already gone along another path)
+            parent = parent.parent
 
 
 def main():
@@ -133,7 +170,16 @@ def main():
     # 1. State directories (tmp/)
     for state_dir in STATE_DIRS:
         state_path = project_root / state_dir
-        files = _find_files(state_path)
+        # A symlinked state directory would make the scan and the file-granular
+        # clean follow the link and unlink files outside the project's state.
+        # Refuse before scanning or cleaning anything, even with --force.
+        if state_path.is_symlink():
+            print(f"ERROR: {state_dir} is a symlink; refusing to scan or clean "
+                  f"it. Remove the link by hand or replace it with a real "
+                  f"directory.", file=sys.stderr)
+            sys.exit(1)
+        files = [f for f in _find_files(state_path)
+                 if not _is_owned_state(f, state_path)]
         if files:
             dirty[state_dir] = files
 
@@ -175,6 +221,25 @@ def main():
               file=sys.stderr)
         sys.exit(1)
 
+    # Decide whether the run directory may be removed *before* any file is
+    # deleted: cleaning an enclosing state directory removes the run's markers
+    # (summary.yaml, ...) and must not turn the run into "not a run directory".
+    run_skip_reason = None
+    if run_exists and args.run_id:
+        run_path = project_root / run_dir
+        # An explicit --run-dir can name anything; never remove the project
+        # (or a directory containing it) along with the run.
+        if (_is_dangerous_path(run_path)
+                or project_root.resolve().is_relative_to(run_path.resolve())):
+            run_skip_reason = "dangerous"
+        # A run directory that *is* a state directory would be removed whole,
+        # taking the skills' own state files the file-granular clean keeps.
+        elif any(run_path.resolve() == (project_root / sd).resolve()
+                 for sd in STATE_DIRS):
+            run_skip_reason = "state directory"
+        elif args.run_dir and run_path.is_dir() and not _has_run_marker(run_path):
+            run_skip_reason = "not a run directory"
+
     # Confirm before cleaning — require --force in non-interactive mode
     targets = sorted(dirty.keys())
     if run_exists:
@@ -201,19 +266,20 @@ def main():
         if path.is_file():
             path.unlink()
         elif path.is_dir():
-            shutil.rmtree(path)
-            path.mkdir(parents=True, exist_ok=True)
+            # File-granular: remove what was reported, never the owned state.
+            _remove_files(files, path)
         print(f"  cleaned: {label}")
 
     if run_exists and args.run_id:
         run_path = project_root / run_dir
-        # An explicit --run-dir can name anything; never remove the project
-        # (or a directory containing it) along with the run.
-        if (_is_dangerous_path(run_path)
-                or project_root.resolve().is_relative_to(run_path.resolve())):
+        if run_skip_reason == "dangerous":
             print(f"  SKIPPED (dangerous): {run_dir}", file=sys.stderr)
             refused.append(str(run_dir))
-        elif args.run_dir and run_path.is_dir() and not _has_run_marker(run_path):
+        elif run_skip_reason == "state directory":
+            print(f"  SKIPPED (state directory): {run_dir} holds skills' own "
+                  f"state", file=sys.stderr)
+            refused.append(str(run_dir))
+        elif run_skip_reason == "not a run directory":
             print(f"  SKIPPED (not a run directory): {run_dir} holds none of "
                   f"{', '.join(RUN_MARKERS)} or a cases/ subdirectory",
                   file=sys.stderr)
