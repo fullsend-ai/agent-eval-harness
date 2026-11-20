@@ -1,3 +1,10 @@
+## [1.68.4](https://github.com/fullsend-ai/agent-eval-harness/compare/v1.68.3...v1.68.4) (2026-11-20)
+
+
+### Bug Fixes
+
+* use RunResult.to_case_result in in-repo case results ([b009c1b](https://github.com/fullsend-ai/agent-eval-harness/commit/b009c1ba0a21c42146c63dcfee96cb474e5b867d))
+
 ## [1.68.3](https://github.com/fullsend-ai/agent-eval-harness/compare/v1.68.2...v1.68.3) (2026-11-20)
 
 
