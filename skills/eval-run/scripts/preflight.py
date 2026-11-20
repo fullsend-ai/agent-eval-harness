@@ -90,6 +90,10 @@ def _remove_files(files: list[Path], root: Path) -> None:
     *root* itself is kept. Only the reported files are removed, so anything
     excluded from the report (the owned state files) survives the clean.
     """
+    real_root = root.resolve()
+    # Never unlink through a symlinked directory component: a file whose real
+    # parent lies outside *root* is left alone.
+    files = [f for f in files if f.parent.resolve().is_relative_to(real_root)]
     for f in files:
         f.unlink(missing_ok=True)
     for f in files:
@@ -166,6 +170,14 @@ def main():
     # 1. State directories (tmp/)
     for state_dir in STATE_DIRS:
         state_path = project_root / state_dir
+        # A symlinked state directory would make the scan and the file-granular
+        # clean follow the link and unlink files outside the project's state.
+        # Refuse before scanning or cleaning anything, even with --force.
+        if state_path.is_symlink():
+            print(f"ERROR: {state_dir} is a symlink; refusing to scan or clean "
+                  f"it. Remove the link by hand or replace it with a real "
+                  f"directory.", file=sys.stderr)
+            sys.exit(1)
         files = [f for f in _find_files(state_path)
                  if not _is_owned_state(f, state_path)]
         if files:
@@ -209,6 +221,20 @@ def main():
               file=sys.stderr)
         sys.exit(1)
 
+    # Decide whether the run directory may be removed *before* any file is
+    # deleted: cleaning an enclosing state directory removes the run's markers
+    # (summary.yaml, ...) and must not turn the run into "not a run directory".
+    run_skip_reason = None
+    if run_exists and args.run_id:
+        run_path = project_root / run_dir
+        # An explicit --run-dir can name anything; never remove the project
+        # (or a directory containing it) along with the run.
+        if (_is_dangerous_path(run_path)
+                or project_root.resolve().is_relative_to(run_path.resolve())):
+            run_skip_reason = "dangerous"
+        elif args.run_dir and run_path.is_dir() and not _has_run_marker(run_path):
+            run_skip_reason = "not a run directory"
+
     # Confirm before cleaning — require --force in non-interactive mode
     targets = sorted(dirty.keys())
     if run_exists:
@@ -241,13 +267,10 @@ def main():
 
     if run_exists and args.run_id:
         run_path = project_root / run_dir
-        # An explicit --run-dir can name anything; never remove the project
-        # (or a directory containing it) along with the run.
-        if (_is_dangerous_path(run_path)
-                or project_root.resolve().is_relative_to(run_path.resolve())):
+        if run_skip_reason == "dangerous":
             print(f"  SKIPPED (dangerous): {run_dir}", file=sys.stderr)
             refused.append(str(run_dir))
-        elif args.run_dir and run_path.is_dir() and not _has_run_marker(run_path):
+        elif run_skip_reason == "not a run directory":
             print(f"  SKIPPED (not a run directory): {run_dir} holds none of "
                   f"{', '.join(RUN_MARKERS)} or a cases/ subdirectory",
                   file=sys.stderr)

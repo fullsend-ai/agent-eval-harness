@@ -129,7 +129,7 @@ Skills write to the **project directory** (not just the workspace), so stale art
 from a previous run can contaminate results — wrong IDs, stale reports, inflated file
 counts. Step 2 guards against this and against overwriting prior runs.
 
-`preflight.py` inspects `tmp/` state files, checks whether
+`preflight.py` inspects `tmp/` for stale files (not skills' own state), checks whether
 `$AGENT_EVAL_RUNS_DIR/<eval-name>/<run-id>` already has results, and (with `--baseline`)
 verifies the baseline run-id exists.
 

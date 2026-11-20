@@ -404,6 +404,39 @@ def test_preflight_clean_keeps_the_skills_own_state_files(tmp_path, runs):
     assert _read_state(project, "optimize-config.yaml") == {"target_judge": "done"}
 
 
+@pytest.mark.parametrize("target", ["external", "project"])
+def test_preflight_refuses_a_symlinked_state_directory(tmp_path, runs, target):
+    project = tmp_path / "proj"
+    project.mkdir()
+    (project / "keep.txt").write_text("x")
+    external = tmp_path / "external"
+    external.mkdir()
+    (external / "other.txt").write_text("x")
+    (project / "tmp").symlink_to(
+        external if target == "external" else project, target_is_directory=True)
+    cfg = _config(project, _SKILL_AND_NAME)
+    for extra in ((), ("--clean", "--force")):
+        proc = _run(SCRIPTS / "preflight.py", "--config", cfg, *extra, cwd=project)
+        assert proc.returncode == 1 and "symlink" in proc.stderr
+        assert "CLEAN" not in proc.stdout and "Traceback" not in proc.stderr
+    assert (external / "other.txt").exists()
+    assert (project / "keep.txt").exists()
+
+
+def test_preflight_cleans_a_state_run_with_an_empty_subdirectory(tmp_path, runs):
+    project = tmp_path / "proj"
+    run = project / "tmp" / "r1"
+    (run / "artifacts").mkdir(parents=True)
+    (run / "summary.yaml").write_text("judges: {}\n")
+    cfg = _config(project, _SKILL_AND_NAME)
+    proc = _run(SCRIPTS / "preflight.py", "--config", cfg, "--run-dir", run,
+                "--clean", "--force", cwd=project)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "not a run directory" not in proc.stderr
+    assert proc.stdout.rstrip().endswith("CLEAN")
+    assert not run.exists()
+
+
 def _render_params(eval_params):
     sys.path.insert(0, str(SCRIPTS))
     try:
