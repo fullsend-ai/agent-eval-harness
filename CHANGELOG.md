@@ -1,3 +1,10 @@
+## [1.68.1](https://github.com/fullsend-ai/agent-eval-harness/compare/v1.68.0...v1.68.1) (2026-11-20)
+
+
+### Bug Fixes
+
+* **config:** validate execution parallelism keys at load ([#342](https://github.com/fullsend-ai/agent-eval-harness/issues/342)) ([63705dc](https://github.com/fullsend-ai/agent-eval-harness/commit/63705dc486a703ac35b59d12694a97b647a87d48)), closes [#341](https://github.com/fullsend-ai/agent-eval-harness/issues/341)
+
 # [1.68.0](https://github.com/fullsend-ai/agent-eval-harness/compare/v1.67.1...v1.68.0) (2026-11-20)
 
 
