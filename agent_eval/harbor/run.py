@@ -21,6 +21,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import tomllib
 from pathlib import Path
 
@@ -40,7 +41,14 @@ from agent_eval.harbor import tasks as tasks_mod
 from agent_eval.harbor.reward import _load_score_module
 from agent_eval.providers.base import ConfigError
 from agent_eval.providers.env import MANAGED_ENV_KEYS, settings_env_block
-from agent_eval.workspace_provisioning import dataset_protected_paths
+from agent_eval.workspace_provisioning import (
+    dataset_fingerprints,
+    dataset_protected_paths,
+    find_dataset_copies,
+    _is_protected,
+    _make_ignore,
+    _real,
+)
 from agent_eval.providers.openrouter.plan import build_plan, effective_roles, plan_is_active
 
 SESSION_FACTORY = None       # tests inject a ProviderSession subclass with fake timing
@@ -496,8 +504,18 @@ def _validate_task_package_reuse(tasks_dir: Path, config: EvalConfig, *,
     """Reject pre-generated packages whose provenance mismatches this run."""
     required = set(config.thresholds or {})
     requested_mode = "deterministic-only" if no_llm_judges else "full"
+    prints = dataset_fingerprints(
+        dataset_protected_paths(config), exclude=[tasks_dir])
     for task_dir in sorted(d for d in tasks_dir.iterdir() if d.is_dir()
                            and (d / "task.toml").is_file()):
+        # A package staged before the dataset was filtered out (or by hand)
+        # may carry answer keys into the container: never reuse it.
+        copies = find_dataset_copies(task_dir, prints)
+        if copies:
+            raise ValueError(
+                f"Pre-generated Harbor task {task_dir} contains a copy of eval "
+                f"dataset file {copies[0].relative_to(task_dir)} (answer keys); "
+                "regenerate it with --regenerate --image IMAGE")
         try:
             task = tomllib.loads((task_dir / "task.toml").read_text())
         except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
@@ -656,32 +674,88 @@ def _write_report(config_path: Path, output_dir: Path, summary: dict,
         print(f"WARNING: report generation failed: {exc}", file=sys.stderr)
 
 
+def _reaches_protected(root: Path, protected: list[Path]) -> bool:
+    """*root* holds the dataset, directly or through a link inside the tree."""
+    if any(p.is_relative_to(root) for p in protected):
+        return True
+    for dirpath, dirnames, filenames in os.walk(root):
+        for name in (*dirnames, *filenames):
+            path = Path(dirpath) / name
+            if path.is_symlink():
+                target = _real(path)
+                if _is_protected(target, protected) or any(
+                        p.is_relative_to(target) for p in protected):
+                    return True
+    return False
+
+
+def _dataset_free_skill_roots(config, roots: list[Path], stage_dir: Path) -> list[Path]:
+    """Skill roots for ``--skill`` with the dataset (answer keys) left out.
+
+    Harbor uploads each root into the trial container. A root that is, or lies
+    inside, the dataset is refused; one that holds the dataset (or links to it)
+    is replaced by a copy made without it, staged under *stage_dir*.
+    """
+    protected = dataset_protected_paths(config)
+    safe: list[Path] = []
+    for i, root in enumerate(roots):
+        real = _real(root)
+        if _is_protected(real, protected):
+            raise ValueError(
+                f"Skill root {root} is the eval dataset directory or inside "
+                "it: Harbor would upload the answer keys into the container.")
+        if not _reaches_protected(real, protected):
+            safe.append(root)
+            continue
+        staged = stage_dir / f"{i}-{root.name}"
+        print(f"WARNING: skill root {root} holds the eval dataset; uploading a "
+              "copy without it", file=sys.stderr)
+        shutil.copytree(real, staged, ignore=_make_ignore(protected))
+        safe.append(staged)
+    return safe
+
+
+def _refuse_dataset_mounts(config, mounts: list[dict]) -> None:
+    """Refuse an explicit ``--mount`` that would expose the dataset.
+
+    A bind mount is the host directory itself, so it cannot be filtered: one
+    that is the dataset, lies inside it, or holds it is refused.
+    """
+    protected = dataset_protected_paths(config)
+    for mount in mounts or []:
+        source = _real(mount["source"])
+        if _is_protected(source, protected) or any(
+                p.is_relative_to(source) for p in protected):
+            raise ValueError(
+                f"--mount source {mount['source']} is, holds, or lies inside the "
+                "eval dataset directory: the container would expose the answer "
+                "keys. Mount a directory that does not contain the dataset.")
+
+
 def _podman_project_hide_paths(config, env) -> list[str]:
     """Dataset path(s) inside ``AGENT_EVAL_PODMAN_PROJECT_DIR``, relative to it.
 
     The project directory is bind-mounted into every trial container, where the
     agent can read it; the dataset in it holds the answer keys, so podman.py
     masks these paths. Empty when no project dir is mounted or the dataset is
-    outside it or ``dataset.path`` is unset (no dataset to protect). A project
-    dir that is the dataset, or lies inside it, cannot be masked without
-    emptying the mount: that is refused.
+    outside it. A project dir that is the dataset, or lies inside it, cannot be
+    masked without emptying the mount: that is refused.
     """
     project_dir = env.get("AGENT_EVAL_PODMAN_PROJECT_DIR")
     if not project_dir or not Path(project_dir).is_dir():
         return []
     protected = dataset_protected_paths(config)
-    if not protected:
-        return []
     project = Path(project_dir).resolve()
-    dataset = protected[0]
-    if project == dataset or project.is_relative_to(dataset):
-        raise ValueError(
-            "AGENT_EVAL_PODMAN_PROJECT_DIR is the eval dataset directory or "
-            "inside it: the container would expose the answer keys. Mount the "
-            "project's resources from a directory that does not hold the dataset.")
-    if not dataset.is_relative_to(project):
-        return []
-    return [str(dataset.relative_to(project))]
+    hide: list[str] = []
+    for dataset in protected:
+        if project == dataset or project.is_relative_to(dataset):
+            raise ValueError(
+                "AGENT_EVAL_PODMAN_PROJECT_DIR is the eval dataset directory or "
+                "inside it: the container would expose the answer keys. Mount the "
+                "project's resources from a directory that does not hold the dataset.")
+        if dataset.is_relative_to(project):
+            hide.append(str(dataset.relative_to(project)))
+    return hide
 
 
 def run_eval_on_harbor(
@@ -845,8 +919,9 @@ def _run_eval_on_harbor(
     # (harbor/agents/base.py), and both stock agents copy it into the location
     # their CLI reads. Gating this on one agent would silently run a
     # claude-code trial without the very skills under test.
-    for root in _resolve_harbor_skill_roots(config, agent_name):
-        cmd += ["--skill", str(root)]
+    # Roots holding the eval dataset are staged without it (below, after the
+    # checks that can still fail), so only dataset-free paths are uploaded.
+    skill_roots = _resolve_harbor_skill_roots(config, agent_name)
     for kwarg in _harbor_agent_kwargs(config, agent_name):
         cmd += ["--agent-kwarg", kwarg]
     agent_env_args, harbor_env = _harbor_agent_env_args(config, plan)
@@ -856,6 +931,7 @@ def _run_eval_on_harbor(
             raise ValueError(
                 "Host bind mounts are supported only by the Podman Harbor "
                 "environment; Kubernetes/OpenShift require cluster-visible storage")
+        _refuse_dataset_mounts(config, mounts)
         cmd += ["--mounts", json.dumps(mounts, separators=(",", ":"))]
     if cpus is not None:
         cmd += ["--override-cpus", str(cpus)]
@@ -863,6 +939,13 @@ def _run_eval_on_harbor(
         cmd += ["--override-memory-mb", str(memory_mb)]
     if env_import_path:
         cmd += ["--environment-import-path", env_import_path]
+    skill_stage = Path(tempfile.mkdtemp(prefix="agent-eval-skills-"))
+    try:
+        for root in _dataset_free_skill_roots(config, skill_roots, skill_stage):
+            cmd += ["--skill", str(root)]
+    except BaseException:
+        shutil.rmtree(skill_stage, ignore_errors=True)
+        raise
     print(f"harbor: {_display_command(cmd)}", file=sys.stderr)
     import signal
     child_env = os.environ.copy()
@@ -881,10 +964,17 @@ def _run_eval_on_harbor(
         if plan.runner == "harbor-k8s":
             child_env.update(_k8s_plan_child_env(plan, session, output_dir, keep_api_key=keep_api_key))
     child_env.update(harbor_env)
-    hide = _podman_project_hide_paths(config, child_env)
-    if hide:
-        child_env["AGENT_EVAL_PODMAN_PROJECT_HIDE"] = os.pathsep.join(hide)
-    proc = subprocess.Popen(cmd, env=child_env)
+    # The isolation metadata podman.py requires with a project mount: always
+    # set under one (``[]`` when the dataset is outside it), never inherited.
+    child_env.pop("AGENT_EVAL_PODMAN_PROJECT_HIDE", None)
+    try:
+        hide = _podman_project_hide_paths(config, child_env)
+        if child_env.get("AGENT_EVAL_PODMAN_PROJECT_DIR"):
+            child_env["AGENT_EVAL_PODMAN_PROJECT_HIDE"] = json.dumps(hide)
+        proc = subprocess.Popen(cmd, env=child_env)
+    except BaseException:
+        shutil.rmtree(skill_stage, ignore_errors=True)
+        raise
     def _forward_signal(signum, frame):
         try:
             proc.send_signal(signum)
@@ -899,6 +989,7 @@ def _run_eval_on_harbor(
     finally:
         signal.signal(signal.SIGTERM, prev_term)
         signal.signal(signal.SIGINT, prev_int)
+        shutil.rmtree(skill_stage, ignore_errors=True)
     if proc.returncode != 0:
         print(f"harbor run exited {proc.returncode}", file=sys.stderr)
         return proc.returncode

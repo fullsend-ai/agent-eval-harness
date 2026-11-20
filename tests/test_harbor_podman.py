@@ -269,12 +269,58 @@ def test_start_masks_dataset_inside_project_mount(tmp_path, monkeypatch):
     env._podman = fake_podman
     env._upload_environment_dir_after_start = fake_upload
     monkeypatch.setenv("AGENT_EVAL_PODMAN_PROJECT_DIR", str(project))
-    monkeypatch.setenv("AGENT_EVAL_PODMAN_PROJECT_HIDE", "evals/cases")
+    monkeypatch.setenv("AGENT_EVAL_PODMAN_PROJECT_HIDE", '["evals/cases"]')
     asyncio.run(PodmanEnvironment.start(env, force_build=False))
 
     run_args = calls[-1]
     assert f"{project.resolve()}:/opt/project:ro" in run_args
     mount = run_args.index("--mount")
     assert run_args[mount + 1] == (
-        "type=tmpfs,destination=/opt/project/evals/cases,ro=true")
+        "type=tmpfs,destination=/opt/project/evals/cases,ro=true,notmpcopyup")
     assert run_args.index(f"{project.resolve()}:/opt/project:ro") < mount
+
+
+def _start_with_project(tmp_path, monkeypatch):
+    project = tmp_path / "project"
+    project.mkdir()
+    env = _startable_environment(tmp_path, [])
+    calls = []
+
+    async def fake_podman(args, **kwargs):
+        calls.append(args)
+        return SimpleNamespace(return_code=0, stderr="")
+
+    async def fake_upload():
+        return None
+
+    env._podman = fake_podman
+    env._upload_environment_dir_after_start = fake_upload
+    monkeypatch.setenv("AGENT_EVAL_PODMAN_PROJECT_DIR", str(project))
+    return env, calls
+
+
+def test_start_refuses_project_mount_without_mask_metadata(tmp_path, monkeypatch):
+    # A direct ``harbor run`` never passes through harbor/run.py: the podman
+    # environment itself refuses a project mount it cannot mask.
+    env, calls = _start_with_project(tmp_path, monkeypatch)
+    monkeypatch.delenv("AGENT_EVAL_PODMAN_PROJECT_HIDE", raising=False)
+    monkeypatch.delenv("AGENT_EVAL_PODMAN_PROJECT_UNSAFE_ALLOW", raising=False)
+    with pytest.raises(ValueError, match="answer keys"):
+        asyncio.run(PodmanEnvironment.start(env, force_build=False))
+    assert not [c for c in calls if c and c[0] == "run"]
+
+
+def test_start_accepts_an_empty_mask_list(tmp_path, monkeypatch):
+    # run.py sets ``[]`` when the dataset is outside the project directory.
+    env, calls = _start_with_project(tmp_path, monkeypatch)
+    monkeypatch.setenv("AGENT_EVAL_PODMAN_PROJECT_HIDE", "[]")
+    asyncio.run(PodmanEnvironment.start(env, force_build=False))
+    assert "--mount" not in calls[-1]
+
+
+def test_start_unsafe_opt_in_allows_unmasked_project_mount(tmp_path, monkeypatch):
+    env, calls = _start_with_project(tmp_path, monkeypatch)
+    monkeypatch.delenv("AGENT_EVAL_PODMAN_PROJECT_HIDE", raising=False)
+    monkeypatch.setenv("AGENT_EVAL_PODMAN_PROJECT_UNSAFE_ALLOW", "1")
+    asyncio.run(PodmanEnvironment.start(env, force_build=False))
+    assert "--mount" not in calls[-1]

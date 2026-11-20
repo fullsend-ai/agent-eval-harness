@@ -286,14 +286,13 @@ def _create_per_case_workspace(workspace, case_dirs, config, args):
         _copy_input_files(case_dir, case_ws, config)
         # Materialize shared {dest, source} workspace.files entries (e.g. a
         # live SKILL.md in a plugin) as real files in the case workspace.
-        # The fullsend runner uploads this workspace as the sandbox's target
-        # repo, so a shared source must not carry the dataset (answer keys)
-        # into it; other runners keep the unfiltered copy.
+        # The dataset (answer keys) never enters a case workspace through a
+        # shared source, whatever runner executes it: a --agent override or a
+        # pipeline step can hand this workspace to a sandboxed runner (fullsend
+        # uploads it as the target repo), so the filter does not depend on the
+        # declared runner.
         materialize_shared_files(
-            case_ws, config,
-            protected_paths=(dataset_protected_paths(config)
-                             if getattr(config.runner, "type", None) == "fullsend"
-                             else ()))
+            case_ws, config, protected_paths=dataset_protected_paths(config))
 
         # Create output directories
         for output in config.outputs:
@@ -952,17 +951,21 @@ def _carry_over_permissions(settings, workspace=None):
 
 
 def _dataset_dir_variants(config):
-    """The dataset directory as configured and resolved (``[]`` if unset).
+    """The dataset directories as configured and resolved.
 
-    Both spellings are returned when they differ (``/tmp`` vs
-    ``/private/tmp`` on macOS) so a rule covers whichever the agent uses.
+    These are the paths case discovery protects (``dataset_protected_paths``):
+    the dataset directory, or with an empty ``dataset.path`` the case
+    directories next to ``eval.yaml``. Both spellings are returned when they
+    differ (``/tmp`` vs ``/private/tmp`` on macOS) so a rule covers whichever
+    the agent uses.
     """
-    path = getattr(getattr(config, "dataset", None), "path", "")
-    if not path:
-        return []
-    given = Path(os.path.abspath(config.resolve_path(path)))
-    real = given.resolve()
-    return [given] if real == given else [given, real]
+    out = []
+    for given, real in zip(dataset_protected_paths(config, resolved=False),
+                           dataset_protected_paths(config)):
+        out.append(given)
+        if real != given:
+            out.append(real)
+    return out
 
 
 def _dataset_deny_rules(config):

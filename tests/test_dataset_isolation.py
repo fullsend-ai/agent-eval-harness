@@ -6,7 +6,9 @@ no dataset content. Local runners are not covered: they have no filesystem
 isolation, so a permission rule alone cannot protect the answer key there.
 """
 
+import json
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -135,23 +137,84 @@ class TestPodmanMask:
     def test_mask_args(self, monkeypatch):
         from agent_eval.harbor.podman import _project_hide_args
         monkeypatch.setenv("AGENT_EVAL_PODMAN_PROJECT_HIDE",
-                           os.pathsep.join(["evals/cases", "x/y"]))
+                           json.dumps(["evals/cases", "x/y"]))
         assert _project_hide_args("/opt/project") == [
-            "--mount", "type=tmpfs,destination=/opt/project/evals/cases,ro=true",
-            "--mount", "type=tmpfs,destination=/opt/project/x/y,ro=true",
+            "--mount",
+            "type=tmpfs,destination=/opt/project/evals/cases,ro=true,notmpcopyup",
+            "--mount",
+            "type=tmpfs,destination=/opt/project/x/y,ro=true,notmpcopyup",
         ]
 
-    @pytest.mark.parametrize("bad", ["/abs", "../up", "a/../b", ".", "a,b"])
-    def test_mask_rejects_bad_paths(self, monkeypatch, bad):
+    def test_mask_path_with_a_colon_is_one_path(self, monkeypatch):
+        # os.pathsep-joined metadata used to split this into two masks.
+        from agent_eval.harbor.podman import _project_hide_args
+        monkeypatch.setenv("AGENT_EVAL_PODMAN_PROJECT_HIDE",
+                           json.dumps(["evals:v2/cases"]))
+        assert _project_hide_args("/opt/project") == [
+            "--mount",
+            "type=tmpfs,destination=/opt/project/evals:v2/cases,ro=true,notmpcopyup",
+        ]
+
+    @pytest.mark.parametrize("bad", [
+        '["/abs"]', '["../up"]', '["a/../b"]', '["."]', '["a,b"]', '[""]',
+        "not-json", '{"a": 1}', "[1]", "evals/cases",
+    ])
+    def test_mask_rejects_bad_metadata(self, monkeypatch, bad):
         from agent_eval.harbor.podman import _project_hide_args
         monkeypatch.setenv("AGENT_EVAL_PODMAN_PROJECT_HIDE", bad)
         with pytest.raises(ValueError):
             _project_hide_args("/opt/project")
 
-    def test_no_mask_by_default(self, monkeypatch):
+    @pytest.mark.parametrize("value", [None, "", "  "])
+    def test_missing_metadata_refuses_the_mount(self, monkeypatch, value):
+        from agent_eval.harbor.podman import _project_hide_args
+        if value is None:
+            monkeypatch.delenv("AGENT_EVAL_PODMAN_PROJECT_HIDE", raising=False)
+        else:
+            monkeypatch.setenv("AGENT_EVAL_PODMAN_PROJECT_HIDE", value)
+        monkeypatch.delenv("AGENT_EVAL_PODMAN_PROJECT_UNSAFE_ALLOW", raising=False)
+        with pytest.raises(ValueError, match="answer keys"):
+            _project_hide_args("/opt/project")
+
+    def test_unsafe_opt_in_is_explicit(self, monkeypatch):
         from agent_eval.harbor.podman import _project_hide_args
         monkeypatch.delenv("AGENT_EVAL_PODMAN_PROJECT_HIDE", raising=False)
+        monkeypatch.setenv("AGENT_EVAL_PODMAN_PROJECT_UNSAFE_ALLOW", "yes")
+        with pytest.raises(ValueError):
+            _project_hide_args("/opt/project")
+        monkeypatch.setenv("AGENT_EVAL_PODMAN_PROJECT_UNSAFE_ALLOW", "1")
         assert _project_hide_args("/opt/project") == []
+
+    @pytest.mark.skipif(shutil.which("podman") is None, reason="podman not installed")
+    def test_actual_mount_hides_the_dataset_from_bash(self, tmp_path, monkeypatch):
+        """A real ``podman run``: the masked directory is empty, Bash included.
+
+        The project is bind-mounted read-only and the dataset overlaid with the
+        tmpfs the environment builds; ``tmpcopyup`` would have copied the
+        underlying files into it.
+        """
+        from agent_eval.harbor.podman import _project_hide_args
+        image = os.environ.get(
+            "AGENT_EVAL_TEST_PODMAN_IMAGE", "docker.io/library/busybox")
+        if subprocess.run(["podman", "image", "exists", image]).returncode != 0:
+            pytest.skip(f"image {image} is not available locally")
+        project = tmp_path / "project"
+        case = project / "evals" / "cases" / "case-001"
+        case.mkdir(parents=True)
+        (case / "annotations.yaml").write_text(f"expected: {KEY}\n")
+        (project / "SKILL.md").write_text("# skill\n")
+        monkeypatch.setenv(
+            "AGENT_EVAL_PODMAN_PROJECT_HIDE", json.dumps(["evals/cases"]))
+        mask = _project_hide_args("/opt/project")
+        out = subprocess.run(
+            ["podman", "run", "--rm", "-v", f"{project}:/opt/project:ro", *mask,
+             image, "sh", "-c",
+             f"grep -rl {KEY} /opt/project; "
+             "find /opt/project -name annotations.yaml; "
+             "ls -A /opt/project/evals/cases; cat /opt/project/SKILL.md"],
+            capture_output=True, text=True)
+        assert KEY not in out.stdout and "annotations.yaml" not in out.stdout
+        assert "# skill" in out.stdout
 
 
 class TestFullsend:

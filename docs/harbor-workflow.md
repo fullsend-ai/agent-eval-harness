@@ -26,7 +26,7 @@ podman push <registry>/<project>-eval:latest
 ```
 
 For Podman (local dev), project resources can be bind-mounted instead:
-`AGENT_EVAL_PODMAN_PROJECT_DIR=.`
+`AGENT_EVAL_PODMAN_PROJECT_DIR=.` (under `/eval-run --runner harbor`, which masks the dataset inside it; a direct `harbor run` refuses the mount without that metadata)
 
 Large read-only datasets should be mounted rather than copied into every task:
 

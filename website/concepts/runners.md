@@ -417,7 +417,10 @@ Per case (or once per batch) the runner:
    a link to it is dropped, and a linked tree that contains it (for example
    `skills/<x>/evals/cases` under a linked `skills/`) is copied without it. Shared
    `workspace.files` sources get the same treatment: one inside the dataset is skipped, and a
-   directory source that contains it is copied without it. `.claude` settings
+   directory source that contains it is copied without it, whichever runner the
+   workspace was staged for (an `--agent fullsend` override or a fullsend pipeline step
+   included). At the upload itself, any file that is a byte-identical copy of a dataset
+   file is deleted before the upload. `.claude` settings
    files and `.claude` directories, however reached, are never copied; only the
    workspace's own top-level settings link is, because the rewrite of step 2 has already
    seen it. The decision is by what an entry resolves to as well as by where it lands:

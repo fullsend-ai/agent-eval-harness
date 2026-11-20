@@ -15,6 +15,7 @@ Only Linux containers are supported. The image is taken from
 """
 
 import asyncio
+import json
 import re
 import shlex
 from pathlib import Path, PurePosixPath
@@ -142,21 +143,49 @@ def _environment_args(environment: dict[str, str]) -> list[str]:
     return args
 
 
-def _project_hide_args(project_mount: str) -> list[str]:
-    """``--mount`` args masking ``AGENT_EVAL_PODMAN_PROJECT_HIDE`` under the project mount.
+PROJECT_HIDE_ENV = "AGENT_EVAL_PODMAN_PROJECT_HIDE"
+PROJECT_UNSAFE_ENV = "AGENT_EVAL_PODMAN_PROJECT_UNSAFE_ALLOW"
 
-    The variable holds ``os.pathsep``-separated paths relative to the project
-    directory (set by ``harbor.run``). Each is overlaid with an empty tmpfs.
+
+def _project_hide_args(project_mount: str) -> list[str]:
+    """``--mount`` args masking the dataset under the project mount.
+
+    ``AGENT_EVAL_PODMAN_PROJECT_HIDE`` is the isolation metadata ``harbor.run``
+    computes for the run: a JSON list of paths relative to the project
+    directory (``[]`` when the dataset is not inside it). Each path is overlaid
+    with an empty tmpfs, created ``notmpcopyup`` so the runtime does not copy
+    the masked directory's content into it.
+
+    A project mount without that metadata is refused: a direct
+    ``harbor run`` would otherwise mount the whole project, dataset included.
+    ``AGENT_EVAL_PODMAN_PROJECT_UNSAFE_ALLOW=1`` is the explicit opt-in for a
+    project directory that holds no answer keys.
     """
+    raw = os.environ.get(PROJECT_HIDE_ENV)
+    if raw is None or not raw.strip():
+        if os.environ.get(PROJECT_UNSAFE_ENV) == "1":
+            return []
+        raise ValueError(
+            f"Refusing to mount AGENT_EVAL_PODMAN_PROJECT_DIR: {PROJECT_HIDE_ENV} "
+            "is not set, so the eval dataset (answer keys) cannot be masked. "
+            "Run through `harbor/run.py` (/eval-run --runner harbor), or set "
+            f"{PROJECT_UNSAFE_ENV}=1 if the directory holds no dataset.")
+    try:
+        rels = json.loads(raw)
+    except ValueError as exc:
+        raise ValueError(f"{PROJECT_HIDE_ENV} is not valid JSON: {exc}") from exc
+    if not isinstance(rels, list) or not all(isinstance(r, str) for r in rels):
+        raise ValueError(f"{PROJECT_HIDE_ENV} must be a JSON list of paths")
     args: list[str] = []
-    for rel in filter(None, os.environ.get("AGENT_EVAL_PODMAN_PROJECT_HIDE", "").split(os.pathsep)):
+    for rel in rels:
         path = PurePosixPath(rel)
         if path.is_absolute() or ".." in path.parts or path.parts in ((), (".",)):
             raise ValueError(f"Refusing to mask invalid project path {rel!r}")
         target = PurePosixPath(project_mount, *path.parts)
         if "," in str(target):
             raise ValueError(f"Cannot mask project path containing a comma: {rel!r}")
-        args += ["--mount", f"type=tmpfs,destination={target},ro=true"]
+        args += ["--mount",
+                 f"type=tmpfs,destination={target},ro=true,notmpcopyup"]
     return args
 
 

@@ -78,7 +78,11 @@ from agent_eval.actions_mask import (
     redact_actions_masks_in_data,
 )
 from agent_eval.config import resolve_env_value, workspace_source_roots
-from agent_eval.workspace_provisioning import dataset_protected_paths
+from agent_eval.workspace_provisioning import (
+    dataset_fingerprints,
+    dataset_protected_paths,
+    find_dataset_copies,
+)
 from .base import EvalRunner, RunResult, terminate_process_group
 from .stream_capture import (
     count_subagent_turns, extract_usage, message_ids_for_run,
@@ -422,6 +426,22 @@ class FullsendRunner(EvalRunner):
         # dataset (annotations.yaml, reference answers) is evaluation material.
         self._protected_paths = [Path(p).resolve() for p in (protected_paths or [])]
 
+    def _drop_dataset_copies(self, workspace: Path) -> None:
+        """Delete real copies of dataset files from the tree about to be uploaded.
+
+        Staging filters the dataset out of the workspace, but whatever route a
+        copy took here (a ``--agent fullsend`` override of another declared
+        runner, a pipeline step, a shared directory copied before this runner
+        ran), the upload is the boundary that matters: a file byte-identical to
+        a dataset file never reaches the sandbox.
+        """
+        if not self._protected_paths:
+            return
+        prints = dataset_fingerprints(self._protected_paths, exclude=[workspace])
+        for path in find_dataset_copies(workspace, prints):
+            _warn_protected(path)
+            path.unlink()
+
     @property
     def name(self) -> str:
         return "fullsend"
@@ -546,6 +566,7 @@ class FullsendRunner(EvalRunner):
                 roots = (None if self._allowed_roots is None
                          else [*self._allowed_roots, workspace])
                 materialize_symlinks(workspace, roots, self._protected_paths)
+                self._drop_dataset_copies(workspace)
                 output_dir = _run_base(workspace)
             except (OSError, ValueError, shutil.Error) as e:
                 return RunResult(

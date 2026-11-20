@@ -306,6 +306,27 @@ def _render_multistep_task_toml(*, task_name, task_desc, eval_name, case_id,
     return "\n".join(lines) + "\n"
 
 
+def _reset_task_dir(task_dir: Path, cases_root: Path) -> None:
+    """Delete a case's previous task package so regeneration starts clean.
+
+    Refused when the package directory is a dataset case directory itself (the
+    tasks directory is the dataset) or holds the dataset: removing it would
+    delete cases.
+    """
+    if not task_dir.exists() and not task_dir.is_symlink():
+        return
+    real, root = task_dir.resolve(), cases_root.resolve()
+    if real == root or real.parent == root or root.is_relative_to(real):
+        raise ValueError(
+            f"Harbor task package {task_dir} is, or holds, a dataset case "
+            f"directory under {cases_root}; choose a tasks directory outside "
+            "the dataset")
+    if task_dir.is_symlink() or task_dir.is_file():
+        task_dir.unlink()
+    else:
+        shutil.rmtree(task_dir)
+
+
 def _write_multi_step_case_package(config, config_path, bundled_cfg, case_dir,
                                    case_id, input_file, input_data, out_dir,
                                    image, workdir, agent_timeout,
@@ -472,6 +493,10 @@ def generate_tasks(
         input_data = {}
         if input_file:
             input_data = yaml.safe_load(input_file.read_text()) or {}
+
+        # Regeneration replaces a case's package outright: whatever an earlier
+        # run staged in it (an answer key included) must not survive.
+        _reset_task_dir(out_dir / case_id, cases_root)
 
         # Multi-step pipeline → schema 1.4 [[steps]] package.
         if config.execution.steps:

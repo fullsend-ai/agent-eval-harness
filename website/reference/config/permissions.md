@@ -241,9 +241,10 @@ permissions:
 !!! tip "Answer-key protection is why path rules exist"
     Prompt-mode evals and `workspace_mode: repo` runs execute the agent inside
     the real repository, where the dataset, `eval.yaml`, and reference outputs
-    live. Path-based deny rules stop the agent from reading its own answer key.
-    See [tool interception](../../concepts/tool-interception.md) and
-    [runners](../../concepts/runners.md).
+    live. Path-based deny rules are defense in depth for the file tools only:
+    they do not keep the answer key from the agent (see the warning above, and
+    [isolation and the answer key](../../concepts/runners.md#isolation-and-the-answer-key)).
+    See also [tool interception](../../concepts/tool-interception.md).
 
 ## See also
 
