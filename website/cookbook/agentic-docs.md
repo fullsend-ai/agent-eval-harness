@@ -237,7 +237,8 @@ plus symlinks to root-level files, so it cannot exercise `ai-docs/` navigation.
 Once the whole repo is visible, so is the **answer key** — `eval.yaml`,
 `eval.md`, and the generated cases under `eval/` all contain the expected files
 and correct answers. Without a guard, an agent could simply read
-`annotations.yaml` instead of navigating the docs. Block those paths:
+`annotations.yaml` instead of navigating the docs. Deny those paths to file
+tools as defense in depth:
 
 ```yaml title="eval.yaml (permissions)"
 permissions:
@@ -248,11 +249,11 @@ permissions:
     - "Read(tmp/**)"       # scratch that may leak intermediate state
 ```
 
-!!! danger "The guard only matters with `workspace_mode: repo`"
-    In the default isolated workspace the answer key isn't present, so the deny
-    rules are effectively a no-op there. They are *load-bearing* precisely when
-    `workspace_mode: repo` exposes the repo. See the
-    [permissions reference](../reference/config/permissions.md).
+!!! danger "Deny rules are not a sandbox"
+    Local runners grant access to the project root even in isolated workspaces.
+    Deny rules cannot prevent every Bash subprocess from reading the answer key,
+    whether or not `workspace_mode: repo` is set. Keep grading material outside
+    the agent's sandbox; see [Isolation and the answer key](../concepts/runners.md#isolation-and-the-answer-key).
 
 ## Step 6 — the judge pairing
 
