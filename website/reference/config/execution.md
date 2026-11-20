@@ -16,6 +16,7 @@ execution:
   # env:
   #   JIRA_TOKEN: $JIRA_TOKEN   # $VAR resolved from the caller's environment
   # project_hooks: true     # carry the project's .claude/settings.json hooks (default)
+  # project_access: false   # grant isolated workspaces the project root (default: no)
   # symlinks: [types]       # extra top-level project entries linked into each workspace
 ```
 
@@ -33,6 +34,7 @@ execution:
 | `judge_parallelism` | int \| null | `null` → `parallelism` | How many cases are judged at once, independent of `parallelism`. See [Gotchas](#gotchas). |
 | `env` | map | `{}` | Env vars injected into each workspace's `.claude/settings.json`. See [env](#injecting-environment-variables). |
 | `project_hooks` | bool | `true` | Append the project's `.claude/settings.json` `hooks` to each workspace's settings. See [project hooks](#carrying-the-projects-hooks). |
+| `project_access` | bool | `false` | Grant each isolated workspace read access to the project root (`permissions.additionalDirectories`). See [project access](#granting-the-project-root). |
 | `symlinks` | list of names | `[]` | Additional top-level project entries, files or directories, to link into each staged workspace in addition to the defaults. See [staging extra project entries](#staging-extra-project-entries). |
 | `steps` | list | `[]` | Multi-step pipeline — sequential agent invocations sharing the case workspace. Replaces `skill`/`prompt`. See [Multi-step pipelines](#multi-step-pipelines). |
 
@@ -261,6 +263,39 @@ execution:
   project_hooks: false     # measure the skill without its production hooks
 ```
 
+## Granting the project root
+
+The eval's dataset usually lives inside the project: every case's `annotations.yaml`,
+reference outputs and other material the judges compare against. Granting an isolated
+workspace the project root puts that path in the session's init event
+(`additional_directories`), and Bash is not path-scoped, so the agent under test can go
+looking, find its own case's answer key and copy it. The resulting pass looks exactly like
+a real one, and it changes from run to run depending on whether the agent explores.
+
+So an isolated workspace (per-case or batch) gets **no** project-root grant by default. It
+reads what is staged into it: the case input, `dataset.workspace.files`, the
+[linked project entries](#staging-extra-project-entries) and staged plugins. A directory
+grant carried over from the project's own `.claude/settings.json` that contains the
+dataset directory is dropped too, with one warning per run.
+
+Set `project_access: true` when the skill really needs to read project files beyond the
+staged ones:
+
+```yaml
+execution:
+  project_access: true     # grant the project root; the dataset is denied to file tools
+```
+
+The project root is then added to `permissions.additionalDirectories` as before, and
+`Read`, `Edit`, `Grep` and `Glob` on the dataset directory are denied. That deny is a
+second layer, not a guarantee: Bash is not path-scoped, so `cat` or `find` can still reach
+the dataset once its path is known. Keep the dataset outside the project root, or leave
+this key off, when the answer keys must stay unreachable.
+
+[`runner.workspace_mode: repo`](runner.md) runs the agent in the checkout itself, so it
+ignores this key: the project root stays granted, and the same dataset deny rules are
+added. Like the permission carry-over, this applies to local workspaces only.
+
 ## Staging extra project entries
 
 An isolated workspace is not the checkout: `workspace.py` links a fixed set of top-level
@@ -331,6 +366,7 @@ These errors are raised at **config load time** (`EvalConfig.from_yaml`), not mi
 | `mode` not in `case`/`batch` | `execution.mode must be one of ['case', 'batch']` |
 | Both `skill` and `prompt` set | `execution.skill and execution.prompt are mutually exclusive` |
 | `project_hooks` not a boolean | `execution.project_hooks must be a boolean` |
+| `project_access` not a boolean | `execution.project_access must be a boolean` |
 | `symlinks` not a list of names | `execution.symlinks must be a list of names` |
 | A `symlinks` entry with a separator, `..` or empty | `execution.symlinks[] must be a single path segment …` |
 | A `symlinks` entry naming a harness-written path | `execution.symlinks entry 'hooks' is reserved: …` |

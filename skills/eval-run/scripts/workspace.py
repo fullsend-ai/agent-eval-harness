@@ -619,8 +619,10 @@ def _create_repo_mode_settings(case_ws, project_root, config):
         if pattern not in allow_list:
             allow_list.append(pattern)
 
-    # Grant access to project root for reading
+    # Grant access to project root for reading — but not to the dataset in it
+    # (the agent's own answer keys, #345)
     perms.setdefault("additionalDirectories", []).append(repo_str)
+    _add_deny(settings, _dataset_deny_rules(config))
 
     # Add SubagentStop hook to capture transcripts
     from agent_eval.agent.stream_capture import setup_subagent_hook
@@ -939,6 +941,88 @@ def _carry_over_permissions(settings, workspace=None):
         ).extend(dirs)
 
 
+# Carried-over directory grants already warned about (once per run, not per case).
+_WARNED_GRANTS = set()
+
+
+def _dataset_dir_variants(config):
+    """The dataset directory as configured and resolved (``[]`` if unset).
+
+    Both spellings are returned when they differ (``/tmp`` vs
+    ``/private/tmp`` on macOS) so a rule covers whichever the agent uses.
+    """
+    path = getattr(getattr(config, "dataset", None), "path", "")
+    if not path:
+        return []
+    given = Path(os.path.abspath(config.resolve_path(path)))
+    real = given.resolve()
+    return [given] if real == given else [given, real]
+
+
+def _dataset_deny_rules(config):
+    """File-tool deny rules covering the eval's dataset — its answer keys.
+
+    A rule path starting with ``//`` is absolute in Claude Code (a single
+    ``/`` is relative to the settings file). Bash is not path-scoped, so this
+    is a second layer, not a guarantee: the first is not disclosing the path.
+    """
+    return [
+        f"{tool}(/{d}/**)"
+        for d in _dataset_dir_variants(config)
+        for tool in ("Read", "Edit", "Grep", "Glob")
+    ]
+
+
+def _add_deny(settings, rules):
+    deny = settings.setdefault("permissions", {}).setdefault("deny", [])
+    for rule in rules:
+        if rule not in deny:
+            deny.append(rule)
+
+
+def _apply_project_access(settings, config):
+    """Grant an isolated workspace the project root — only on opt-in.
+
+    The project root holds the eval's dataset (``annotations.yaml``,
+    reference outputs). A grant lands in the session's init event as
+    ``additional_directories``, and Bash is not path-scoped, so an agent
+    under test can follow it, find its case's answer key and copy it (#345).
+
+    Default (``execution.project_access: false``): no grant, and a
+    directory grant carried over from the project's own settings that
+    contains the dataset is dropped with a warning. Opted in: the project
+    root is granted as before, and the dataset is denied to the file tools.
+    """
+    perms = settings.setdefault("permissions", {})
+    dirs = list(perms.get("additionalDirectories") or [])
+    if getattr(config.execution, "project_access", False):
+        project_root = str(Path.cwd().resolve())
+        if project_root not in dirs:
+            dirs.append(project_root)
+        _add_deny(settings, _dataset_deny_rules(config))
+    else:
+        datasets = [d.resolve() for d in _dataset_dir_variants(config)]
+        kept = []
+        for entry in dirs:
+            granted = Path(entry).expanduser()
+            if granted.is_absolute() and any(
+                    d.is_relative_to(granted.resolve()) for d in datasets):
+                _warn_once(
+                    _WARNED_GRANTS, entry,
+                    f"not granting additionalDirectories entry {entry!r} from "
+                    "the project's .claude/settings.json: it contains the "
+                    "eval dataset (set execution.project_access: true to "
+                    "grant the project root)",
+                )
+                continue
+            kept.append(entry)
+        dirs = kept
+    if dirs:
+        perms["additionalDirectories"] = dirs
+    else:
+        perms.pop("additionalDirectories", None)
+
+
 def _carry_over_hooks(settings, config):
     """Append the project's settings hooks to the run settings.
 
@@ -1093,11 +1177,8 @@ def _setup_subagent_only_hook(workspace, config):
     _carry_over_permissions(settings, workspace)
     _merge_harness_permissions(settings, config, workspace)
 
-    # Grant project root access
-    project_root = str(Path.cwd().resolve())
-    settings.setdefault("permissions", {}).setdefault(
-        "additionalDirectories", []
-    ).append(project_root)
+    # The project root (and the dataset in it) only on opt-in
+    _apply_project_access(settings, config)
 
     # Add SubagentStop hook
     from agent_eval.agent.stream_capture import setup_subagent_hook
@@ -1151,11 +1232,8 @@ def _setup_tool_hooks(workspace, config):
     _carry_over_permissions(settings, workspace)
     _merge_harness_permissions(settings, config, workspace)
 
-    # Grant access to the project root so symlinked resources can be read.
-    project_root = str(Path.cwd().resolve())
-    settings.setdefault("permissions", {}).setdefault(
-        "additionalDirectories", []
-    ).append(project_root)
+    # The project root (and the dataset in it) only on opt-in
+    _apply_project_access(settings, config)
 
     # Add SubagentStop hook to capture background agent transcripts.
     from agent_eval.agent.stream_capture import setup_subagent_hook

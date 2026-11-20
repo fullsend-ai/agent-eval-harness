@@ -47,7 +47,10 @@ and gives each its own throwaway workspace under
   carried over, the harness's own hooks, injected env, and the synthesized
   `enabledPlugins` denylist that keeps the operator's installed plugins out of
   case sessions — see [Runners](runners.md) and
-  [`execution.project_hooks`](../reference/config/execution.md#carrying-the-projects-hooks)),
+  [`execution.project_hooks`](../reference/config/execution.md#carrying-the-projects-hooks);
+  no read grant on the project root, which holds the dataset, unless
+  [`execution.project_access`](../reference/config/execution.md#granting-the-project-root)
+  opts in),
 - staged copies of out-of-workspace `runner.plugin_dirs` under
   `.staged-plugins/` (claude-code runner — see [Runners](runners.md)),
 - an initialized git repo so [lifecycle hooks](lifecycle-hooks.md) and `collect`
