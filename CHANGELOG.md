@@ -1,3 +1,10 @@
+## [1.68.3](https://github.com/fullsend-ai/agent-eval-harness/compare/v1.68.2...v1.68.3) (2026-11-20)
+
+
+### Bug Fixes
+
+* **eval:** release the Fullsend Actions mask redaction ([#343](https://github.com/fullsend-ai/agent-eval-harness/issues/343)) ([ab2d36d](https://github.com/fullsend-ai/agent-eval-harness/commit/ab2d36dcc63d37b2450552bfee573b5b6a647e99))
+
 ## [1.68.2](https://github.com/fullsend-ai/agent-eval-harness/compare/v1.68.1...v1.68.2) (2026-11-20)
 
 
