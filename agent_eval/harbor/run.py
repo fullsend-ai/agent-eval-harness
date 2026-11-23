@@ -44,7 +44,7 @@ from agent_eval.providers.env import MANAGED_ENV_KEYS, settings_env_block
 from agent_eval.workspace_provisioning import (
     STAGING_VERSION,
     dataset_protected_paths,
-    _is_protected,
+    is_protected,
     _make_ignore,
     _real,
 )
@@ -683,7 +683,7 @@ def _reaches_protected(root: Path, protected: list[Path]) -> bool:
             path = Path(dirpath) / name
             if path.is_symlink():
                 target = _real(path)
-                if _is_protected(target, protected) or any(
+                if is_protected(target, protected) or any(
                         p.is_relative_to(target) for p in protected):
                     return True
     return False
@@ -700,7 +700,7 @@ def _dataset_free_skill_roots(config, roots: list[Path], stage_dir: Path) -> lis
     safe: list[Path] = []
     for i, root in enumerate(roots):
         real = _real(root)
-        if _is_protected(real, protected):
+        if is_protected(real, protected):
             raise ValueError(
                 f"Skill root {root} is the eval dataset directory or inside "
                 "it: Harbor would upload the answer keys into the container.")
@@ -724,7 +724,7 @@ def _refuse_dataset_mounts(config, mounts: list[dict]) -> None:
     protected = dataset_protected_paths(config)
     for mount in mounts or []:
         source = _real(mount["source"])
-        if _is_protected(source, protected) or any(
+        if is_protected(source, protected) or any(
                 p.is_relative_to(source) for p in protected):
             raise ValueError(
                 f"--mount source {mount['source']} is, holds, or lies inside the "
@@ -765,13 +765,13 @@ def _project_git_metadata(project: Path, masked: list[Path]) -> list[Path]:
         here = Path(dirpath)
         dirnames[:] = [d for d in dirnames
                        if d != ".git"
-                       and not _is_protected(_real(here / d), masked)]
+                       and not is_protected(_real(here / d), masked)]
         if ".git" in filenames or (here / ".git").is_symlink() \
                 or (here / ".git").is_dir():
             target = _git_dir_of(here / ".git")
             if (target is not None and target.is_relative_to(project)
                     and target != project
-                    and not _is_protected(target, masked)):
+                    and not is_protected(target, masked)):
                 found.append(target)
     # A directory inside another one that is masked needs no mask of its own
     # (and could not be created inside the empty overlay).
@@ -807,7 +807,11 @@ def _podman_project_hide_paths(config, env) -> list[str]:
             hidden.append(dataset)
     if hidden:
         hidden += _project_git_metadata(project, hidden)
-    return [str(p.relative_to(project)) for p in hidden]
+    # Two symlinked case dirs can resolve to the same directory (or one into
+    # a child of the other's target): one mask per path, the outermost.
+    return [str(p.relative_to(project))
+            for p in sorted(set(hidden))
+            if not any(o != p and p.is_relative_to(o) for o in hidden)]
 
 
 def run_eval_on_harbor(
@@ -995,52 +999,48 @@ def _run_eval_on_harbor(
     try:
         for root in _dataset_free_skill_roots(config, skill_roots, skill_stage):
             cmd += ["--skill", str(root)]
-    except BaseException:
-        shutil.rmtree(skill_stage, ignore_errors=True)
-        raise
-    print(f"harbor: {_display_command(cmd)}", file=sys.stderr)
-    import signal
-    child_env = os.environ.copy()
-    if plan is not None:
-        # Host Vertex/Bedrock/Anthropic variables never enter the container:
-        # scrubbed here (podman's forwarding runs inside this child) and
-        # excluded again by podman.py from the same list — belt and braces.
-        keep_api_key = _openrouter_judge_configured(config, judge_model)
-        excluded = _plan_child_env_exclusions(plan, keep_api_key=keep_api_key)
-        child_env = {k: v for k, v in child_env.items() if k not in excluded}
-        child_env["AGENT_EVAL_PODMAN_PLAN_EXCLUDE"] = ",".join(sorted(excluded))
-        if keep_api_key:
-            # The verifier reads the key under its configured name, which
-            # podman's static forwarding list may not know.
-            child_env["AGENT_EVAL_PODMAN_PLAN_FORWARD"] = plan.key_env
-        if plan.runner == "harbor-k8s":
-            child_env.update(_k8s_plan_child_env(plan, session, output_dir, keep_api_key=keep_api_key))
-    child_env.update(harbor_env)
-    # The isolation metadata podman.py requires with a project mount: always
-    # set under one (``[]`` when the dataset is outside it), never inherited.
-    child_env.pop("AGENT_EVAL_PODMAN_PROJECT_HIDE", None)
-    try:
+        print(f"harbor: {_display_command(cmd)}", file=sys.stderr)
+        import signal
+        child_env = os.environ.copy()
+        if plan is not None:
+            # Host Vertex/Bedrock/Anthropic variables never enter the container:
+            # scrubbed here (podman's forwarding runs inside this child) and
+            # excluded again by podman.py from the same list — belt and braces.
+            keep_api_key = _openrouter_judge_configured(config, judge_model)
+            excluded = _plan_child_env_exclusions(plan, keep_api_key=keep_api_key)
+            child_env = {k: v for k, v in child_env.items() if k not in excluded}
+            child_env["AGENT_EVAL_PODMAN_PLAN_EXCLUDE"] = ",".join(sorted(excluded))
+            if keep_api_key:
+                # The verifier reads the key under its configured name, which
+                # podman's static forwarding list may not know.
+                child_env["AGENT_EVAL_PODMAN_PLAN_FORWARD"] = plan.key_env
+            if plan.runner == "harbor-k8s":
+                child_env.update(_k8s_plan_child_env(plan, session, output_dir, keep_api_key=keep_api_key))
+        child_env.update(harbor_env)
+        # The isolation metadata podman.py requires with a project mount: always
+        # set under one (``[]`` when the dataset is outside it), never inherited.
+        child_env.pop("AGENT_EVAL_PODMAN_PROJECT_HIDE", None)
         hide = _podman_project_hide_paths(config, child_env)
         if child_env.get("AGENT_EVAL_PODMAN_PROJECT_DIR"):
             child_env["AGENT_EVAL_PODMAN_PROJECT_HIDE"] = json.dumps(hide)
         proc = subprocess.Popen(cmd, env=child_env)
-    except BaseException:
-        shutil.rmtree(skill_stage, ignore_errors=True)
-        raise
-    def _forward_signal(signum, frame):
+        def _forward_signal(signum, frame):
+            try:
+                proc.send_signal(signum)
+            except (ProcessLookupError, OSError):
+                # Harbor may exit in the window between the signal arriving and
+                # the forward; the wait()/result mapping below must still run.
+                pass
+        prev_term = signal.signal(signal.SIGTERM, _forward_signal)
+        prev_int = signal.signal(signal.SIGINT, _forward_signal)
         try:
-            proc.send_signal(signum)
-        except (ProcessLookupError, OSError):
-            # Harbor may exit in the window between the signal arriving and
-            # the forward; the wait()/result mapping below must still run.
-            pass
-    prev_term = signal.signal(signal.SIGTERM, _forward_signal)
-    prev_int = signal.signal(signal.SIGINT, _forward_signal)
-    try:
-        proc.wait()
+            proc.wait()
+        finally:
+            signal.signal(signal.SIGTERM, prev_term)
+            signal.signal(signal.SIGINT, prev_int)
     finally:
-        signal.signal(signal.SIGTERM, prev_term)
-        signal.signal(signal.SIGINT, prev_int)
+        # Every exit after the stage directory exists — a failed check, a
+        # refused launch, a signal, a normal wait — removes it.
         shutil.rmtree(skill_stage, ignore_errors=True)
     if proc.returncode != 0:
         print(f"harbor run exited {proc.returncode}", file=sys.stderr)

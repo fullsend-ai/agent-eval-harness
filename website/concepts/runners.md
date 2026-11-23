@@ -595,6 +595,22 @@ depends on the runner:
 Use an isolated setup whenever an agent that finds the answers would invalidate the
 result.
 
+### Unsupported isolation layouts
+
+The filtering applied when a workspace is staged (dataset paths dropped from copies
+and uploads, Git metadata dropped next to them) does **not** support these layouts:
+
+- **A symlink nested inside a case directory whose target lies outside the protected
+  roots.** Such a link is not resolved when protected paths are computed, so its
+  target is not protected and the agent may be able to read answer keys through it.
+- **Git metadata under a name other than `.git`, inside a copied source tree,
+  referred to by a `gitdir` file.** Only entries named `.git` are dropped, so such
+  metadata can be copied and give the agent access to answer keys in its committed
+  history.
+
+If your layout matches either condition, answer keys may be reachable by the agent.
+Keep those targets outside any tree the agent can see, or use a supported layout.
+
 ## Choosing a runner
 
 === "Test a Claude Code skill"

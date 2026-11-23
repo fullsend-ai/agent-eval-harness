@@ -62,11 +62,12 @@ def _make_ignore(protected):
         if protected:
             skip |= {
                 n for n in names
-                if n not in skip and _is_protected(_real(Path(dirpath) / n), protected)
+                if n not in skip and is_protected(_real(Path(dirpath) / n), protected)
             }
             if ".git" in names:
                 here = _real(Path(dirpath))
                 if any(p == here or p.is_relative_to(here) for p in protected):
+                    # Unsupported: gitdir targets inside the copied tree are not excluded.
                     skip.add(".git")
         return skip
 
@@ -112,6 +113,8 @@ def dataset_protected_paths(config, *, resolved=True):
     protecting it would drop every shared source and skill root under it.
 
     ``resolved=False`` returns the paths as spelled, without following links.
+
+    Unsupported: nested case symlinks to targets outside the protected roots.
     """
     fix = (lambda p: p.resolve()) if resolved else (lambda p: p)
     dataset = getattr(config, "dataset", None)
@@ -125,7 +128,7 @@ def dataset_protected_paths(config, *, resolved=True):
             real_root = _real(root)
             paths += [
                 fix(d) for d in sorted(root.iterdir())
-                if d.is_dir() and not _is_protected(_real(d), [real_root])
+                if d.is_dir() and not is_protected(_real(d), [real_root])
             ]
         return paths
     if not root.is_dir():
@@ -136,7 +139,7 @@ def dataset_protected_paths(config, *, resolved=True):
     ]
 
 
-def _is_protected(path, protected):
+def is_protected(path, protected):
     """*path* (resolved) is, or lies inside, a protected path."""
     return any(path == p or path.is_relative_to(p) for p in protected)
 
@@ -237,7 +240,7 @@ def materialize_shared_files(
                 f"the project/plugin roots",
             )
             continue
-        if _is_protected(resolved, protected):
+        if is_protected(resolved, protected):
             _warn_skip(entry.dest, "source is inside the protected eval dataset")
             continue
         dst = target_dir / dest_rel

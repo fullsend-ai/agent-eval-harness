@@ -80,6 +80,7 @@ from agent_eval.actions_mask import (
 from agent_eval.config import resolve_env_value, workspace_source_roots
 from agent_eval.workspace_provisioning import (
     dataset_protected_paths,
+    is_protected,
     staged_workspace_error,
 )
 from .base import EvalRunner, RunResult, terminate_process_group
@@ -1962,11 +1963,6 @@ def _runs_workspace_hook(command: str, hook_dirs: list) -> bool:
     return False
 
 
-def _is_protected(path: Path, protected) -> bool:
-    """``path`` (resolved) is, or lies inside, a protected path."""
-    return any(path == p or p in path.parents for p in protected)
-
-
 def materialize_symlinks(workspace: Path, allowed_roots: Optional[list] = None,
                          protected: Optional[list] = None) -> None:
     """Replace every symlink at the workspace top level and under ``.claude/``
@@ -2081,7 +2077,7 @@ def _materialize_link(path: Path, allowed_roots: Optional[list] = None,
         _warn_outside_roots(path)
         path.unlink()
         return
-    if _is_protected(target, protected or ()):
+    if is_protected(target, protected or ()):
         _warn_protected(path)
         path.unlink()
         return
@@ -2158,7 +2154,7 @@ def _copy_tree(src: Path, dest: Path, allowed_roots, active: tuple,
             if not _within_roots(real, allowed_roots):
                 _warn_outside_roots(entry)
                 continue
-        if protected and _is_protected(_resolve_link(real) or real, protected):
+        if protected and is_protected(_resolve_link(real) or real, protected):
             _warn_protected(entry)
             continue
         # Decide by source identity too, whether or not the entry is a link:

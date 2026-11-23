@@ -278,6 +278,36 @@ class TestLaunch:
         assert captured["skill_listing"] == ""
         assert not captured["skill_root"].exists()
 
+    def test_skill_stage_directory_is_removed_when_launch_fails_midway(
+            self, tmp_path, monkeypatch):
+        # Between the staging (mkdtemp) and the harbor child, more than the
+        # two formerly guarded blocks can raise: whatever sits in between
+        # (here the command display) must not leak the staged directory.
+        project, cfg_path, config = _project(tmp_path)
+        gen.generate_tasks(config, cfg_path, tmp_path / "tasks", image="img:1")
+        real_mkdtemp = run_mod.tempfile.mkdtemp
+        staged = []
+
+        def spy_mktemp(*args, **kwargs):
+            path = real_mkdtemp(*args, **kwargs)
+            staged.append(Path(path))
+            return path
+
+        def boom(cmd):
+            raise RuntimeError("launch failed")
+
+        monkeypatch.setattr(run_mod.tempfile, "mkdtemp", spy_mktemp)
+        monkeypatch.setattr(run_mod, "_display_command", boom)
+
+        with pytest.raises(RuntimeError, match="launch failed"):
+            run_mod.run_eval_on_harbor(
+                cfg_path, image=None, model="m", output_dir=tmp_path / "out",
+                tasks_dir=tmp_path / "tasks", jobs_dir=tmp_path / "jobs",
+                harbor_bin="harbor")
+
+        assert staged
+        assert not staged[0].exists()
+
     def test_project_mount_gets_json_mask_metadata(self, tmp_path, monkeypatch):
         project, cfg_path, config = _project(tmp_path)
         gen.generate_tasks(config, cfg_path, tmp_path / "tasks", image="img:1")
@@ -524,3 +554,48 @@ class TestGitHistory:
             ws, config, protected_paths=dataset_protected_paths(config))
 
         assert (ws / "plugin" / ".git").is_dir()
+
+
+class TestProjectMaskDeduplication:
+    """Two case dirs symlinked into one shared tree: one mask, the outermost.
+
+    ``dataset_protected_paths`` resolves each symlinked case dir separately,
+    so two links into the same target (or one into a child of the other's
+    target) would otherwise repeat or nest the same mask.
+    """
+
+    def _gold(self, project: Path) -> Path:
+        gold = project / "shared" / "gold"
+        (gold / "inner").mkdir(parents=True)
+        (gold / "answers.yaml").write_text(f"expected: {KEY}\n")
+        (gold / "inner" / "answers.yaml").write_text(f"expected: {KEY}\n")
+        return gold
+
+    def test_cases_symlinked_to_the_same_target_are_masked_once(
+            self, tmp_path):
+        project, _cfg_path, config = _project(tmp_path)
+        gold = self._gold(project)
+        ds = project / DATASET
+        (ds / "case-002").symlink_to(gold)
+        (ds / "case-003").symlink_to(gold)
+
+        hidden = run_mod._podman_project_hide_paths(
+            config, {"AGENT_EVAL_PODMAN_PROJECT_DIR": str(project)})
+
+        assert hidden.count("shared/gold") == 1
+        view = container_view(project, hidden, tmp_path / "view")
+        assert bash_finds_key(view) == ""
+
+    def test_a_target_nested_under_another_needs_no_mask_of_its_own(
+            self, tmp_path):
+        project, _cfg_path, config = _project(tmp_path)
+        gold = self._gold(project)
+        ds = project / DATASET
+        (ds / "case-002").symlink_to(gold)
+        (ds / "case-003").symlink_to(gold / "inner")
+
+        hidden = run_mod._podman_project_hide_paths(
+            config, {"AGENT_EVAL_PODMAN_PROJECT_DIR": str(project)})
+
+        assert "shared/gold" in hidden
+        assert "shared/gold/inner" not in hidden
