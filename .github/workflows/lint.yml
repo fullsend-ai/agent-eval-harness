@@ -23,3 +23,20 @@ jobs:
       with:
         strict: 'true'
 
+  harness-eval:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      with:
+        persist-credentials: false
+
+    - name: Install harness-eval
+      run: pip install -q "harness-eval==7.10.0"
+
+    - name: Run harness-eval lint
+      run: harness-eval harness-lint . --preset recommended --fail-on-error --baseline .harness-eval-baseline.json
+
