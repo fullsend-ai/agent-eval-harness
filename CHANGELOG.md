@@ -1,3 +1,10 @@
+# [1.69.0](https://github.com/fullsend-ai/agent-eval-harness/compare/v1.68.4...v1.69.0) (2026-11-23)
+
+
+### Features
+
+* **eval-anova:** resolve the per-config runs dir in the harness ([#344](https://github.com/fullsend-ai/agent-eval-harness/issues/344)) ([a574039](https://github.com/fullsend-ai/agent-eval-harness/commit/a5740398d3c4087903ff190f30fe80e08007bd85)), closes [#309](https://github.com/fullsend-ai/agent-eval-harness/issues/309) [#335](https://github.com/fullsend-ai/agent-eval-harness/issues/335)
+
 ## [1.68.4](https://github.com/fullsend-ai/agent-eval-harness/compare/v1.68.3...v1.68.4) (2026-11-20)
 
 
