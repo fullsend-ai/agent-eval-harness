@@ -906,6 +906,58 @@ def test_oversized_marker_is_not_read_whole(tmp_path, monkeypatch, live_proc):
     assert execute._live_peer_executor(tmp_path, os.getpid()) is None
 
 
+def test_fifo_marker_does_not_hang_guard(tmp_path, monkeypatch, live_proc):
+    """Guard-side pair of ``test_fifo_marker_does_not_hang_startup``: a FIFO at a
+    matching marker path is skipped, not blocked on, and a live marker beside it
+    is still found. Run in a daemon thread so a regression is a failed
+    assertion rather than a hung CI job."""
+    import threading
+
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("needs mkfifo")
+    runs = tmp_path / "eval" / "runs"
+    fifo_dir = runs / "evalname" / "run-fifo"
+    fifo_dir.mkdir(parents=True)
+    os.mkfifo(fifo_dir / "execute.4242.pid")
+    ct = guard._process_create_time(live_proc.pid)
+    live_dir = runs / "evalname" / "run-live"
+    live_dir.mkdir(parents=True)
+    (live_dir / f"execute.{live_proc.pid}.pid").write_text(
+        json.dumps({"pid": live_proc.pid, "create_time": ct}))
+    monkeypatch.setenv("AGENT_EVAL_RUNS_DIR", str(runs))
+
+    result = {}
+    t = threading.Thread(
+        target=lambda: result.update(live=guard._live_eval_runs(str(tmp_path))),
+        daemon=True)
+    t.start()
+    t.join(timeout=5)
+    try:
+        assert not t.is_alive(), "Stop guard hung on a FIFO marker"
+        assert result["live"] == [str(live_dir)]
+    finally:
+        if t.is_alive():
+            # Unblock the stuck open so the thread can finish.
+            fd = os.open(fifo_dir / "execute.4242.pid", os.O_WRONLY | os.O_NONBLOCK)
+            os.close(fd)
+
+
+def test_oversized_marker_is_not_read_whole_by_guard(tmp_path, monkeypatch, live_proc):
+    """Guard-side pair of ``test_oversized_marker_is_not_read_whole``: a marker
+    of several megabytes is skipped (capped read, truncated JSON), not parsed,
+    even though it names a live process."""
+    runs = tmp_path / "eval" / "runs"
+    run_dir = runs / "evalname" / "run-big"
+    run_dir.mkdir(parents=True)
+    ct = guard._process_create_time(live_proc.pid)
+    (run_dir / f"execute.{live_proc.pid}.pid").write_text(
+        '{"pid": %d, "create_time": %s, "pad": "%s"}'
+        % (live_proc.pid, json.dumps(ct), "x" * (4 * 1024 * 1024)))
+    monkeypatch.setenv("AGENT_EVAL_RUNS_DIR", str(runs))
+
+    assert guard._live_eval_runs(str(tmp_path)) == []
+
+
 def test_marker_name_must_match_recorded_pid(tmp_path, live_proc):
     """``execute.999.pid`` claiming another live pid is not an executor marker."""
     import execute

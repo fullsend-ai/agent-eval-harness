@@ -121,6 +121,10 @@ STATE_DIRNAME = "agent-eval-stop-guard"
 # Comfortably longer than any eval (the CI step caps at 3h).
 MAX_PIDFILE_AGE_S = 24 * 3600
 _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
+# A marker is a few dozen bytes of JSON; never read more than this from one.
+# Matches ``_PIDFILE_MAX_BYTES`` in execute.py.
+MAX_PIDFILE_BYTES = 4096
 # execute.py writes one ``execute.<pid>.pid`` per executor; older versions wrote
 # a single shared ``execute.pid``, still recognised so a mid-upgrade run is
 # guarded too.
@@ -248,14 +252,22 @@ def _within(root, path):
 def _open_read_nofollow(path):
     """Open ``path`` for reading, refusing a final-component symlink.
 
+    ``O_NONBLOCK`` keeps a FIFO planted at a marker path from blocking the open
+    (the Stop hook runs every turn, so a blocked open would hang the session),
+    and the descriptor must then be a regular file. Mirrors ``execute.py``'s
+    peer-marker reader.
+
     Returns a text file object, or ``None`` on any failure (missing file, a
-    symlink swapped in via TOCTOU, permission error, …).
+    symlink swapped in via TOCTOU, not a regular file, permission error, …).
     """
     try:
-        fd = os.open(path, os.O_RDONLY | _NOFOLLOW)
+        fd = os.open(path, os.O_RDONLY | _NOFOLLOW | _NONBLOCK)
     except OSError:
         return None
     try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            os.close(fd)
+            return None
         return os.fdopen(fd, encoding="utf-8", errors="replace")
     except OSError:
         os.close(fd)
@@ -292,7 +304,7 @@ def _read_pidfile(path):
         return None
     try:
         with fh:
-            data = json.load(fh)
+            data = json.loads(fh.read(MAX_PIDFILE_BYTES))
     except (ValueError, TypeError, OSError):
         return None
     return data if isinstance(data, dict) else None
