@@ -23,8 +23,8 @@ eval-anova is **not** its own executor — it wraps `/eval-run` in a matrix loop
 
 - **eval-run** stays the single-condition primitive (one model/config → one run with a
   `summary.yaml`). eval-anova runs it **once per matrix cell** (condition × replication), so every
-  cell is a standard run under `$AGENT_EVAL_RUNS_DIR/<eval-name>/`, tagged with a `condition.json`
-  recording its factor levels.
+  cell is a standard run under the config's runs directory (`<runs-dir>`, below), tagged with a
+  `condition.json` recording its factor levels.
 - **Statistics** are computed over those runs' `summary.yaml` files (`analyze.py` →
   `anova.json`): each case's composite uses the harness's canonical reward composition (the
   eval.yaml `reward:` section, else boolean-gate + normalised-numeric average), then
@@ -79,14 +79,18 @@ git repo (a per-user temp dir is used as a fallback when unset).
 
 ## Reports
 
-The orchestrator invokes `/eval-compare` automatically. To (re-)render from existing artifacts:
+The orchestrator invokes `/eval-compare` automatically. To (re-)render from existing artifacts,
+get `<runs-dir>` — the directory holding the config's runs and `anova.json` — from the harness;
+don't derive it yourself:
 
 ```bash
+python3 ${CLAUDE_SKILL_DIR}/../../scripts/discover.py --runs-dir --config <config>
+
 # Comparison report (leaderboard, heatmap, + the ANOVA/Pareto stats section if anova.json exists):
-python3 ${CLAUDE_PLUGIN_ROOT}/skills/eval-compare/scripts/compare.py generate $AGENT_EVAL_RUNS_DIR/<eval-name>
+python3 ${CLAUDE_PLUGIN_ROOT}/skills/eval-compare/scripts/compare.py generate <runs-dir>
 
 # Statistics-forward deep view for one experiment (condition means, F / p / η², per-case matrix):
-python3 ${CLAUDE_SKILL_DIR}/scripts/report.py $AGENT_EVAL_RUNS_DIR/<eval-name>   # reads anova.json
+python3 ${CLAUDE_SKILL_DIR}/scripts/report.py <runs-dir>   # reads anova.json
 ```
 
 Both read only on-disk artifacts (`summary.yaml` / `anova.json`) and never re-run the experiment.

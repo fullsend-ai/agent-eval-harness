@@ -18,8 +18,8 @@ import pytest
 import yaml
 
 from agent_eval.config import EvalConfig
-from agent_eval.run_location import (RunLocationError, default_run_dir,
-                                     resolve_run_dir)
+from agent_eval.run_location import (RunLocationError, config_runs_dir,
+                                     default_run_dir, resolve_run_dir)
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS = ROOT / "skills" / "eval-run" / "scripts"
@@ -98,6 +98,55 @@ def test_discover_prints_the_directory_the_scripts_use(tmp_path, runs):
     assert proc.returncode == 0, proc.stderr
     config = EvalConfig.from_yaml(cfg)
     assert Path(proc.stdout.strip()) == resolve_run_dir(config, "r1")[0]
+
+
+_SKILL_ONLY = """\
+execution:
+  skill: plugin:foo
+dataset:
+  path: cases
+"""
+
+
+@pytest.mark.parametrize("text,expected", [
+    (_SKILL_AND_NAME, "plugin:foo"),   # skill wins over name
+    (_SKILL_ONLY, "plugin:foo"),
+    (_PROMPT_NAME_ONLY, "foo-eval"),
+])
+def test_config_runs_dir_is_the_parent_of_every_run(tmp_path, runs, text, expected):
+    """The per-config runs directory (issue #335): same precedence, one place."""
+    config = EvalConfig.from_yaml(_config(tmp_path, text))
+    assert config_runs_dir(config) == runs / expected
+    assert default_run_dir(config, "r1").parent == config_runs_dir(config)
+
+
+@pytest.mark.parametrize("text", [_SKILL_AND_NAME, _SKILL_ONLY, _PROMPT_NAME_ONLY])
+def test_discover_prints_the_config_runs_dir(tmp_path, runs, text):
+    cfg = _config(tmp_path, text)
+    proc = _run(ROOT / "scripts" / "discover.py", "--runs-dir", "--config", cfg,
+                cwd=tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    assert Path(proc.stdout.strip()) == config_runs_dir(EvalConfig.from_yaml(cfg))
+
+
+@pytest.mark.parametrize("extra", [(), ("--config", "CFG", "--run-id", "r1")])
+def test_discover_runs_dir_rejects_missing_config_or_a_run_id(tmp_path, runs, extra):
+    cfg = _config(tmp_path, _SKILL_AND_NAME)
+    args = [cfg if a == "CFG" else a for a in extra]
+    proc = _run(ROOT / "scripts" / "discover.py", "--runs-dir", *args, cwd=tmp_path)
+    assert proc.returncode != 0
+    assert proc.stdout == ""
+
+
+def test_eval_anova_never_builds_the_runs_dir():
+    for doc in ("SKILL.md", "QUICKSTART.md"):
+        text = (ROOT / "skills" / "eval-anova" / doc).read_text()
+        assert "<eval-name>" not in text, doc
+        assert "discover.py --runs-dir --config" in text, doc
+    src = (ROOT / "skills" / "eval-anova" / "scripts" / "orchestrate.py").read_text()
+    assert "config_runs_dir(config)" in src
+    assert "eval_name()" not in src
+    assert 'os.environ.get("AGENT_EVAL_RUNS_DIR"' not in src
 
 
 def test_discover_requires_both_config_and_run_id(tmp_path, runs):

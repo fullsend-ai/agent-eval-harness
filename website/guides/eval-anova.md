@@ -274,11 +274,14 @@ There are **two** ways to read the results, both purely from on-disk artifacts �
 neither re-runs the experiment:
 
 ```bash
+# The config's runs directory ($AGENT_EVAL_RUNS_DIR/<eval-name>), as the harness resolves it:
+RUNS_DIR=$(python3 scripts/discover.py --runs-dir --config eval.yaml)
+
 # Comparison report — leaderboard + heatmap + the Statistical Significance section when anova.json exists:
-python3 ${CLAUDE_PLUGIN_ROOT}/skills/eval-compare/scripts/compare.py generate $AGENT_EVAL_RUNS_DIR/<eval-name>
+python3 ${CLAUDE_PLUGIN_ROOT}/skills/eval-compare/scripts/compare.py generate "$RUNS_DIR"
 
 # Stats-forward deep view for one experiment (anova-report.html + anova-report.md next to anova.json):
-python3 ${CLAUDE_SKILL_DIR}/scripts/report.py $AGENT_EVAL_RUNS_DIR/<eval-name>
+python3 ${CLAUDE_SKILL_DIR}/scripts/report.py "$RUNS_DIR"
 ```
 
 The deep report opens with a headline badge — **SIGNIFICANT** / **not
