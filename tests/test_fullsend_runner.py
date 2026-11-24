@@ -1795,7 +1795,7 @@ def _read_calls(calls):
 
 def test_prepare_runs_once_before_every_case(tmp_path, fake_bin):
     """Case mode prepares the fullsend environment exactly once, before any
-    case — including under in-process case concurrency — with the same
+    case, when at least two selected cases run concurrently — with the same
     binary, dir and starting env the runs use (#348)."""
     project = _fullsend_case_project(tmp_path)
     env, record, calls = _prepare_env(fake_bin, tmp_path,
@@ -1822,6 +1822,37 @@ def test_prepare_runs_once_before_every_case(tmp_path, fake_bin):
         assert (output_dir / "cases" / case_id / "run_result.json").is_file()
 
 
+def test_prepare_skipped_for_a_single_selected_case(tmp_path, fake_bin):
+    """One selected case has no concurrent cold-pull race, however high the
+    requested parallelism: prepare is skipped and the case just runs
+    (#348)."""
+    project = _fullsend_case_project(tmp_path)
+    import shutil
+    shutil.rmtree(project / "cases" / "case-002")
+    env, record, calls = _prepare_env(fake_bin, tmp_path,
+                                      FAKE_FULLSEND_ARTIFACTS="1")
+    exec_result, output_dir, workspace = _run_execute(project, env,
+                                                      parallelism=15)
+    assert exec_result.returncode == 0, exec_result.stderr
+    entries = _read_calls(calls)
+    assert [e["argv"][0] for e in entries] == ["run"]  # no prepare
+    assert (output_dir / "cases" / "case-001" / "run_result.json").is_file()
+
+
+def test_prepare_skipped_for_sequential_cases(tmp_path, fake_bin):
+    """A sequential run (parallelism 1) has no concurrent cold-pull race
+    either: prepare is skipped and every case just runs (#348)."""
+    project = _fullsend_case_project(tmp_path)
+    env, record, calls = _prepare_env(fake_bin, tmp_path,
+                                      FAKE_FULLSEND_ARTIFACTS="1")
+    exec_result, output_dir, workspace = _run_execute(project, env)
+    assert exec_result.returncode == 0, exec_result.stderr
+    entries = _read_calls(calls)
+    assert [e["argv"][0] for e in entries] == ["run", "run"]  # no prepare
+    for case_id in ("case-001", "case-002"):
+        assert (output_dir / "cases" / case_id / "run_result.json").is_file()
+
+
 def test_before_all_env_reaches_prepare_and_cases(tmp_path, fake_bin):
     """A before_all hook's env output reaches the fullsend prepare (which
     runs after the suite-level hook outputs) and every case run (#348)."""
@@ -1837,7 +1868,7 @@ def test_before_all_env_reaches_prepare_and_cases(tmp_path, fake_bin):
     (project / "eval.yaml").write_text(yaml.dump(cfg))
     env, record, calls = _prepare_env(fake_bin, tmp_path,
                                       FAKE_FULLSEND_ARTIFACTS="1")
-    exec_result, output_dir, workspace = _run_execute(project, env)
+    exec_result, output_dir, workspace = _run_execute(project, env, parallelism=2)
     assert exec_result.returncode == 0, exec_result.stderr
     entries = _read_calls(calls)
     prepares = [e for e in entries if e["argv"][0] == "prepare"]
@@ -1857,7 +1888,7 @@ def test_prepare_does_not_inherit_fullsend_task(tmp_path, fake_bin):
     env, record, calls = _prepare_env(fake_bin, tmp_path,
                                       FAKE_FULLSEND_ARTIFACTS="1",
                                       FULLSEND_TASK="/stale.skill other-run")
-    exec_result, output_dir, workspace = _run_execute(project, env)
+    exec_result, output_dir, workspace = _run_execute(project, env, parallelism=2)
     assert exec_result.returncode == 0, exec_result.stderr
     entries = _read_calls(calls)
     prepares = [e for e in entries if e["argv"][0] == "prepare"]
@@ -1893,7 +1924,7 @@ def test_prepare_failure_fails_the_run_before_any_case(tmp_path, fake_bin):
                                       FAKE_FULLSEND_MASK="masked-value-123456",
                                       FAKE_FULLSEND_PREPARE_ERR_TEXT=
                                       "widget assembly failed unexpectedly")
-    exec_result, output_dir, workspace = _run_execute(project, env)
+    exec_result, output_dir, workspace = _run_execute(project, env, parallelism=2)
     assert exec_result.returncode == 1
     assert "preparation failed before any case ran" in exec_result.stderr
     # Actionable text survives: the alert-shaped cause and an arbitrary line
@@ -1950,7 +1981,7 @@ def test_prepare_autodetects_forge_and_keeps_run_extra_args(tmp_path, fake_bin):
     env, record, calls = _prepare_env(fake_bin, tmp_path,
                                       FAKE_FULLSEND_ARTIFACTS="1",
                                       GITHUB_ACTIONS="true")
-    exec_result, output_dir, workspace = _run_execute(project, env)
+    exec_result, output_dir, workspace = _run_execute(project, env, parallelism=2)
     assert exec_result.returncode == 0, exec_result.stderr
 
     entries = _read_calls(calls)

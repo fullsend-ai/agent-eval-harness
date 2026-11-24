@@ -374,8 +374,12 @@ load time on `execution.prompt` configs and on an agent judge's `agent.runner`
 ```
 
 In case mode the harness first runs `<binary> prepare <agent> --fullsend-dir <abs
-fullsend_dir>` **once, before the cases** — not in batch mode, whose single
-invocation has no concurrent pulls to race. It uses the same resolved binary,
+fullsend_dir>` **once, before the cases** — but only when at least two
+selected cases actually run concurrently (`--parallelism` /
+`execution.parallelism` greater than 1 and more than one selected case): a
+single case or a sequential run has no concurrent pull to race, so prepare is
+skipped there. Batch mode has a single invocation and does not prepare either.
+The preparation uses the same resolved binary,
 agent, directory and the environment the cases start from (`execution.env`,
 `runner.env` and `before_all` hook `env` outputs), so fullsend resolves and
 warms the image from that starting environment, once instead of once per

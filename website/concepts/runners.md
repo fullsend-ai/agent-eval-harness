@@ -405,6 +405,8 @@ runner:
 agent's own credentials on the host (for rfe-creator: a Vertex service-account key).
 
 In case mode, before the first case, the harness runs `fullsend prepare <agent>` once
+— only when at least two selected cases run concurrently; a single case or a
+sequential run (parallelism 1) skips it —
 with the same binary, agent, `--fullsend-dir` and the environment the cases
 start from (`execution.env`, `runner.env`, `before_all` hook env), so
 the sandbox image is resolved and warmed from that starting environment,
