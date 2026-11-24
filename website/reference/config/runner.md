@@ -376,9 +376,17 @@ load time on `execution.prompt` configs and on an agent judge's `agent.runner`
 In case mode the harness first runs `<binary> prepare <agent> --fullsend-dir <abs
 fullsend_dir>` **once, before the cases** — not in batch mode, whose single
 invocation has no concurrent pulls to race. It uses the same resolved binary,
-agent, directory and environment the runs use (including `before_all` hook
-`env` outputs), so fullsend resolves and warms the sandbox image the way
-`run` will, once instead of once per concurrent case.
+agent, directory and the environment the cases start from (`execution.env`,
+`runner.env` and `before_all` hook `env` outputs), so fullsend resolves and
+warms the image from that starting environment, once instead of once per
+concurrent case.
+
+**Per-case hook env is not part of the prepared context.** `before_each`
+hooks run after prepare, so environment values they set or change — in
+particular ones affecting the sandbox image resolution (e.g.
+`FULLSEND_SANDBOX_IMAGE`) or the registry authentication the pull needs —
+reach the cases but not the preparation. Put such shared values in
+`runner.env` / `execution.env` or in a `before_all` hook instead.
 
 `runner.extra_args` is **not** passed to prepare — the harness does not guess
 which of them are image-relevant, and fullsend auto-detects the forge from the

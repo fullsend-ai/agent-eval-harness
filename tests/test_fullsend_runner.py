@@ -1796,7 +1796,7 @@ def _read_calls(calls):
 def test_prepare_runs_once_before_every_case(tmp_path, fake_bin):
     """Case mode prepares the fullsend environment exactly once, before any
     case — including under in-process case concurrency — with the same
-    binary/dir/env contract the runs use (#348)."""
+    binary, dir and starting env the runs use (#348)."""
     project = _fullsend_case_project(tmp_path)
     env, record, calls = _prepare_env(fake_bin, tmp_path,
                                       FAKE_FULLSEND_ARTIFACTS="1")
@@ -1847,6 +1847,28 @@ def test_before_all_env_reaches_prepare_and_cases(tmp_path, fake_bin):
     # The suite hook's env reached the preparation and every case.
     assert prepares[0]["env"]["BEFORE_ALL_VAR"] == "from_before_all"
     assert all(r["env"]["BEFORE_ALL_VAR"] == "from_before_all" for r in runs)
+
+
+def test_prepare_does_not_inherit_fullsend_task(tmp_path, fake_bin):
+    """A FULLSEND_TASK inherited by the harness process (some other run's
+    task) must not reach the prepare child — prepare runs no agent — while
+    each case still gets its own task (#348)."""
+    project = _fullsend_case_project(tmp_path)
+    env, record, calls = _prepare_env(fake_bin, tmp_path,
+                                      FAKE_FULLSEND_ARTIFACTS="1",
+                                      FULLSEND_TASK="/stale.skill other-run")
+    exec_result, output_dir, workspace = _run_execute(project, env)
+    assert exec_result.returncode == 0, exec_result.stderr
+    entries = _read_calls(calls)
+    prepares = [e for e in entries if e["argv"][0] == "prepare"]
+    runs = [e for e in entries if e["argv"][0] == "run"]
+    assert len(prepares) == 1
+    assert len(runs) == 2
+    # The inherited task never reached the prepare child...
+    assert prepares[0]["env_task"] is None
+    # ...and every case ran its own task, not the inherited one.
+    for run in runs:
+        assert run["env_task"].startswith("/rfe.speedrun")
 
 
 def test_prepare_failure_fails_the_run_before_any_case(tmp_path, fake_bin):

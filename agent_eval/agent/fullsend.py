@@ -356,19 +356,14 @@ class FullsendPrepareError(RuntimeError):
 
 
 def _prepare_console_note(stdout: str, stderr: str, env: dict) -> str:
-    """A failed ``fullsend prepare``'s console for the error message:
-    ``:\\n`` plus the output, redacted and bounded. GitHub's
-    ``::stop-commands::`` can disable ``::add-mask::``, so the harness masks
-    for itself: the mask values declared in the output are collected across
-    both streams *before* any formatting (a declaration must not be
-    neutralised first and its value lost), merged with the values of the
-    credential-named variables of fullsend's environment, and replaced
-    wherever they appear. Terminal control sequences are stripped first, as
-    the live filter strips them; each line is cut and pattern-redacted by
-    :func:`_present` (which also neutralises the ``::add-mask::`` commands
-    themselves), the whole bounded to
-    :data:`_MAX_PREPARE_OUTPUT_CHARS`. Actionable error text passes
-    through."""
+    """Redact captured preparation output before including it in an error.
+
+    An outer workflow ``::stop-commands::`` can prevent GitHub from registering
+    Fullsend's masks, so collect valid declarations locally. The collector still
+    honours stop/resume blocks inside Fullsend's output: declarations inside
+    those blocks are not masks, matching GitHub. Also mask credential-named
+    environment values and bound the result.
+    """
     secrets = tuple(sorted(
         set(_secret_values(env))
         | set(actions_mask_values_across_streams(stdout or "", stderr or "")),
@@ -594,13 +589,19 @@ class FullsendRunner(EvalRunner):
         """Run ``fullsend prepare <agent>`` once, before the cases (#348).
 
         The same resolved binary, agent, ``--fullsend-dir`` and environment
-        :meth:`execute` uses — the image can depend on ``execution.env`` /
-        ``runner.env`` (``FULLSEND_SANDBOX_IMAGE``) and hook ``env`` outputs —
-        so fullsend resolves the image the way ``run`` will and pulls it once
-        instead of once per concurrent case. ``runner.extra_args`` is not
+        the cases start from — the image can depend on ``execution.env`` /
+        ``runner.env`` (``FULLSEND_SANDBOX_IMAGE``) and ``before_all`` hook
+        ``env`` outputs — so fullsend resolves the image from that starting
+        environment and pulls it once instead of once per concurrent case.
+        ``before_each`` hook env is *not* part of it (prepare has already
+        run by the time per-case hooks execute): environment values that
+        affect the image resolution or the registry authentication the pull
+        needs belong in ``runner.env`` / ``execution.env`` or a
+        ``before_all`` hook, not per case. ``runner.extra_args`` is not
         passed to prepare (the harness does not guess which of them are
-        image-relevant); fullsend auto-detects the forge from the CI
-        environment, so a GitHub Actions workflow needs no flag, and
+        image-relevant), so an option that changes the image may make the
+        runs resolve a different one; fullsend auto-detects the forge from
+        the CI environment, so a GitHub Actions workflow needs no flag, and
         a warning says when extra_args are present.
 
         Everything else is :meth:`_run`, the run path's own machinery: the
@@ -624,9 +625,11 @@ class FullsendRunner(EvalRunner):
         cmd = [self._binary, "prepare", self._agent,
                "--fullsend-dir", self._fullsend_dir]
         env = os.environ.copy()
-        entries = self._env_entries("", extra_env)
-        entries.pop("FULLSEND_TASK", None)
-        env.update(entries)
+        env.update(self._env_entries("", extra_env))
+        # Popped from env, not just the entries: a FULLSEND_TASK inherited
+        # from the caller names some other run's task, and prepare runs no
+        # agent. (Each case's own task overwrites it on the run path.)
+        env.pop("FULLSEND_TASK", None)
         env.pop(_SENTINEL, None)
         ensure_harness_root(env)
         # cwd is immaterial: prepare takes only absolute paths, and _run

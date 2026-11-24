@@ -405,9 +405,14 @@ runner:
 agent's own credentials on the host (for rfe-creator: a Vertex service-account key).
 
 In case mode, before the first case, the harness runs `fullsend prepare <agent>` once
-with the same binary, agent, `--fullsend-dir` and environment the runs use, so
-the sandbox image is resolved and warmed once instead of once per concurrent
-case. `runner.extra_args` is not passed to prepare (fullsend auto-detects the
+with the same binary, agent, `--fullsend-dir` and the environment the cases
+start from (`execution.env`, `runner.env`, `before_all` hook env), so
+the sandbox image is resolved and warmed from that starting environment,
+once instead of once per concurrent case. `before_each` hook env is not part
+of that environment (per-case hooks run after prepare): values affecting the
+image resolution or the registry authentication belong in `runner.env` /
+`execution.env` or `before_all`, not per case. `runner.extra_args` is not
+passed to prepare (fullsend auto-detects the
 forge from the CI environment); when `extra_args` are present a `WARNING`
 notes that they may make prepare resolve a different image than the runs. A
 preparation failure fails the run before any case starts (a `fullsend` without

@@ -2040,13 +2040,14 @@ def _execute_per_case(args, config, runner, runner_cls,
 
         # A runner that exposes prepare() (fullsend) gets it run once, before
         # any case, after the suite-level hook outputs, with the same binary
-        # and environment the cases run with: concurrent cold pulls of the
-        # sandbox image have exhausted runner disk space (#348). A
-        # preparation failure fails the run before a case starts — every
-        # case would hit the same broken environment — so it is never
-        # silently bypassed. Multi-step pipelines are not prepared: their
-        # steps may override the runner per step, so the top-level runner's
-        # image is not necessarily what runs.
+        # and the environment the cases start from (execution/runner env plus
+        # before_all hook env — before_each env is not part of it, prepare
+        # has already run by then): concurrent cold pulls of the sandbox
+        # image are a possible contributor to runner disk exhaustion (#348).
+        # A preparation failure fails the run before a case starts, so it is
+        # never silently bypassed. Multi-step pipelines are not prepared:
+        # their steps may override the runner per step, so the top-level
+        # runner's image is not necessarily what runs.
         prepare = getattr(runner, "prepare", None)
         if (case_order and not config.execution.steps
                 and callable(prepare)):
