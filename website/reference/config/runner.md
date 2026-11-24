@@ -373,6 +373,37 @@ load time on `execution.prompt` configs and on an agent judge's `agent.runner`
   [--model <model>] [--effort <effort>] --output-dir <workspace>/.fullsend-runs <extra_args>
 ```
 
+In case mode the harness first runs `<binary> prepare <agent> --fullsend-dir <abs
+fullsend_dir>` **once, before the cases** — not in batch mode, whose single
+invocation has no concurrent pulls to race. It uses the same resolved binary,
+agent, directory and environment the runs use (including `before_all` hook
+`env` outputs), so fullsend resolves and warms the sandbox image the way
+`run` will, once instead of once per concurrent case.
+
+`runner.extra_args` is **not** passed to prepare — the harness does not guess
+which of them are image-relevant, and fullsend auto-detects the forge from the
+CI environment (a GitHub Actions workflow needs no flag). When
+`extra_args` are present the harness prints a `WARNING`: options that change
+the image — an explicit `--forge` on another platform, an `--event-file` or
+`--env-file` — may make prepare resolve a different sandbox image than the
+runs.
+
+A preparation failure — including a `fullsend` too old to provide the
+`prepare` subcommand — fails the run before any case starts; it is never
+silently skipped. What fullsend printed on stdout and stderr is captured and
+included in the failure error, redacted and bounded: terminal control
+sequences are stripped, and the values of the credential-named variables of
+fullsend's environment and of the Actions `::add-mask::` declarations in the
+output are masked — GitHub's `::stop-commands::` can disable `add-mask`, so
+the harness masks them itself. The preflight runs through the same capture
+and process-group teardown as a run, bounded at 1800 s independently of
+`execution.timeout`, so a hung preparation cannot eat the job.
+
+**Scope.** Requires a `fullsend` that provides `prepare` (see fullsend's
+`prepare` documentation). Multi-step pipelines (`execution.steps`) are **not**
+prepared: their steps may override the runner per step, so the top-level
+runner's image is not necessarily what runs.
+
 The process environment carries `FULLSEND_TASK="/<skill> <args>"`,
 `AGENT_EVAL_SUBAGENT_MODEL` (only when a subagent model is set; the agent definition
 must reference it, or the runner warns), and every `execution.env`, `runner.env` and

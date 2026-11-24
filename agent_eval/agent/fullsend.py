@@ -115,7 +115,13 @@ PROVENANCE_KEYS = (
     "fullsend_agent", "fullsend_version", "openshell_version", "sandbox_image",
     "sandbox_image_source", "sandbox_arch", "agent_harness_commit",
 )
+
+
 _PROBE_TIMEOUT_S = 15
+_MAX_PREPARE_OUTPUT_CHARS = 4000
+# Bound for `fullsend prepare`, independent of execution.timeout (a case
+# may allow four hours): a hung preflight must not eat the job.
+_PREPARE_TIMEOUT_S = 1800
 _MAX_CONSOLE_SCAN_CHARS = 2_000_000
 _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 # fullsend's console line naming the sandbox image it resolved, e.g.
@@ -345,6 +351,37 @@ _CONTROL_RE = re.compile(
 _DETAIL_INDENT = " " * 4
 
 
+class FullsendPrepareError(RuntimeError):
+    """``fullsend prepare`` failed (or could not run) before any case."""
+
+
+def _prepare_console_note(stdout: str, stderr: str, env: dict) -> str:
+    """A failed ``fullsend prepare``'s console for the error message:
+    ``:\\n`` plus the output, redacted and bounded. GitHub's
+    ``::stop-commands::`` can disable ``::add-mask::``, so the harness masks
+    for itself: the mask values declared in the output are collected across
+    both streams *before* any formatting (a declaration must not be
+    neutralised first and its value lost), merged with the values of the
+    credential-named variables of fullsend's environment, and replaced
+    wherever they appear. Terminal control sequences are stripped first, as
+    the live filter strips them; each line is cut and pattern-redacted by
+    :func:`_present` (which also neutralises the ``::add-mask::`` commands
+    themselves), the whole bounded to
+    :data:`_MAX_PREPARE_OUTPUT_CHARS`. Actionable error text passes
+    through."""
+    secrets = tuple(sorted(
+        set(_secret_values(env))
+        | set(actions_mask_values_across_streams(stdout or "", stderr or "")),
+        key=lambda value: (-len(value), value)))
+    console = "\n".join(
+        _present(_CONTROL_RE.sub("", line).rstrip(), secrets)
+        for line in (stdout or "").splitlines() + (stderr or "").splitlines()
+        if line.strip())
+    if not console:
+        return ""
+    return ":\n" + console[-_MAX_PREPARE_OUTPUT_CHARS:]
+
+
 class FullsendRunner(EvalRunner):
     """Runs a skill by invoking ``fullsend run <agent>`` on the workspace."""
 
@@ -551,6 +588,63 @@ class FullsendRunner(EvalRunner):
             # steps, which still need the harness hooks, env and directory
             # grants.
             _restore_settings(workspace, original_settings)
+
+    def prepare(self, extra_env: Optional[dict] = None,
+                timeout_s: Optional[float] = None) -> None:
+        """Run ``fullsend prepare <agent>`` once, before the cases (#348).
+
+        The same resolved binary, agent, ``--fullsend-dir`` and environment
+        :meth:`execute` uses — the image can depend on ``execution.env`` /
+        ``runner.env`` (``FULLSEND_SANDBOX_IMAGE``) and hook ``env`` outputs —
+        so fullsend resolves the image the way ``run`` will and pulls it once
+        instead of once per concurrent case. ``runner.extra_args`` is not
+        passed to prepare (the harness does not guess which of them are
+        image-relevant); fullsend auto-detects the forge from the CI
+        environment, so a GitHub Actions workflow needs no flag, and
+        a warning says when extra_args are present.
+
+        Everything else is :meth:`_run`, the run path's own machinery: the
+        same console capture (live, credential-masked forwarding under the
+        log prefix), the same process-group teardown on timeout or
+        interrupt, and a bounded wait independent of ``execution.timeout``
+        (:data:`_PREPARE_TIMEOUT_S`), so a hung preflight cannot eat the
+        job. Raises :class:`FullsendPrepareError` on any failure (non-zero
+        exit, timeout, launch error); the caller fails the run before any
+        case starts rather than letting every case hit the same broken
+        environment.
+        """
+        if self._extra_args:
+            # Values are not echoed: an extra_arg can carry anything.
+            with _print_lock:
+                print("  WARNING: fullsend prepare does not receive "
+                      "runner.extra_args; when they change the image "
+                      "(an explicit --forge on another platform, an "
+                      "--event-file or --env-file), prepare may resolve a "
+                      "different sandbox image than the runs", flush=True)
+        cmd = [self._binary, "prepare", self._agent,
+               "--fullsend-dir", self._fullsend_dir]
+        env = os.environ.copy()
+        entries = self._env_entries("", extra_env)
+        entries.pop("FULLSEND_TASK", None)
+        env.update(entries)
+        env.pop(_SENTINEL, None)
+        ensure_harness_root(env)
+        # cwd is immaterial: prepare takes only absolute paths, and _run
+        # supplies the run's capture, masking and process-group teardown
+        # unchanged.
+        returncode, console_out, console_err, _duration, note = self._run(
+            cmd, Path.cwd(), env,
+            _PREPARE_TIMEOUT_S if timeout_s is None else timeout_s)
+        if returncode != 0:
+            # The captured console — not only the live stream, which drops
+            # arbitrary error lines and may not even be on (no log prefix) —
+            # reaches the error, redacted and bounded by
+            # _prepare_console_note (GitHub's ::stop-commands:: can disable
+            # add-mask, so the harness masks for itself).
+            raise FullsendPrepareError(
+                "fullsend prepare failed"
+                + (f"\n{note}" if note else "")
+                + _prepare_console_note(console_out, console_err, env))
 
     def _launch(self, target, args, workspace, output_dir, model, timeout_s,
                 extra_env) -> RunResult:

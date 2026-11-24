@@ -404,6 +404,21 @@ runner:
 **Prerequisites.** fullsend ≥ 0.48, a running OpenShell gateway with podman, and the
 agent's own credentials on the host (for rfe-creator: a Vertex service-account key).
 
+In case mode, before the first case, the harness runs `fullsend prepare <agent>` once
+with the same binary, agent, `--fullsend-dir` and environment the runs use, so
+the sandbox image is resolved and warmed once instead of once per concurrent
+case. `runner.extra_args` is not passed to prepare (fullsend auto-detects the
+forge from the CI environment); when `extra_args` are present a `WARNING`
+notes that they may make prepare resolve a different image than the runs. A
+preparation failure fails the run before any case starts (a `fullsend` without
+the `prepare` subcommand fails the same way — never silently bypassed), with
+fullsend's captured output included in the error, redacted and bounded
+(credential-named environment values and Actions `::add-mask::` values
+masked), and is bounded at 1800 s independently of
+`execution.timeout`. Batch mode has a single invocation and does not prepare;
+multi-step pipelines are not prepared either (their steps may override the
+runner per step).
+
 Per case (or once per batch) the runner:
 
 1. **Materialises the workspace.** fullsend uploads the target repository as a tar
