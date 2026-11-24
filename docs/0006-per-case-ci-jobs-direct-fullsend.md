@@ -36,7 +36,7 @@ flowchart LR
 Proposed CLIs — **none exist yet; names and flags are illustrative**:
 
 ```text
-agent-eval-ci plan      --config eval.yaml --out plan.json
+agent-eval-ci plan      --config eval.yaml --run-id <id> --out plan.json
 agent-eval-ci case      --plan plan.json --case <id> [--run-dir <dir>]
 agent-eval-ci aggregate --plan plan.json --run-id <id> [--logs <dir>]
 ```
@@ -45,11 +45,11 @@ Run-dir resolution always goes through [#325](https://github.com/fullsend-ai/age
 
 ### Plan
 
-`plan` resolves refs, mints the run ID, and uses the existing workspace staging path to prepare the selected cases before running `before_all` with that ID. It writes a plan file (run ID, case list, resolved refs). `before_all` outputs are not shared with case jobs for now; credentials needed by case jobs must be supplied separately. Slices and fetched logs are access-protected.
+`plan` reuses the existing case discovery (`workspace.py`'s dataset subdirectories plus case filter), takes the run ID from the caller as `workspace.py` does, and writes a plan file: run ID, case list, and the project and harness checkout commits when available. It stages nothing and runs no hooks; configs declaring `before_all` or `after_all` are rejected before side effects. Slices and fetched logs are access-protected.
 
 ### Case
 
-`case` runs one case independently and rerunnably through the existing execution path — `execute.py` and the configured runner — preserving timeout and exit-code semantics. It materializes the case workspace, runs `before_each`, `before_step`/`after_step` around each step invocation and `after_each` at the end — including when the case fails — sequenced by the harness. Case jobs require isolated filesystems and checkouts to avoid collisions between workspaces and run directories. Results are mapped in-process from the runner's results channel to `run_result.json` / `stdout.log`, and `hook_outputs.yaml` and step evidence are written. The slice is the **complete executed case workspace** — including `.git`, hidden, tracked-modified and new files — plus results files and `subagents/` when events are collected. An `after_each` failure affects the case's final status according to its configured policy, and failed or missing cases propagate to CI: an aggregate job that always runs must not turn the run green.
+`case` runs one case independently and rerunnably through the existing execution path — `execute.py` and the configured runner — preserving timeout and exit-code semantics. It stages just its own case via the existing per-case staging, without deleting the other cases (future work: `workspace.py` today removes the whole run workspace). A shared filesystem is fine if run-level outputs stay separate; repo-mode needs separate checkouts or serial execution. It runs `before_each`, `before_step`/`after_step` around each step, and `after_each` — even when the case fails. Results are mapped in-process from the runner's results channel to `run_result.json` / `stdout.log`, and `hook_outputs.yaml` and step evidence are written. The slice is the **complete executed case workspace** — including `.git`, hidden, tracked-modified and new files — plus results files and `subagents/` when events are collected. An `after_each` failure affects the case's final status per its policy, and failed or missing cases propagate to CI: an aggregate job that always runs must not turn the run green.
 
 ### Aggregation
 
@@ -57,14 +57,13 @@ Run-dir resolution always goes through [#325](https://github.com/fullsend-ai/age
 
 ### Hooks
 
-| Phase | Job |
+| Phase | Where it runs |
 | --- | --- |
-| `before_all` | plan, once |
-| `before_each` / `after_each`, `before_step` / `after_step` | case |
-| `after_all` | aggregate, after assembly, before collect/score |
+| `before_all` / `after_all` | local suite path only; rejected by the plan |
+| `before_each` / `after_each`, `before_step` / `after_step` | case, as supported |
 | `before_scoring` / `before_report` | unchanged in `score.py` / `report.py` |
 
-`after_all`'s continue-on-failure semantics depend on the platform scheduling the aggregate job after failed case jobs. Hooks needing a shared process or workspace across cases (fake API server, port-forward, minted credential) don't port: they become per-case hooks or CI setup steps.
+Hooks needing a shared process or workspace across cases (fake API server, port-forward, minted credential) don't port: they become per-case hooks or CI setup steps.
 
 ### Provenance (runner-neutral)
 
@@ -85,14 +84,14 @@ Version probes run per case and land in that case's `run_result.json`; `aggregat
 
 ### Parity gate
 
-Before deleting Fullsend capture: case-hook-data and step-scoped judges produce identical results from assembled slices vs the in-process path, excluding `before_all` outputs which are not shared; tracked edits and new files outside the output paths are detected after reassembly; partial and missing slices do not lose case records; Fullsend batch scores match the in-process path except judges that depend on the removed `stderr.log`.
+Before deleting Fullsend capture: case-hook-data and step-scoped judges produce identical results from assembled slices vs the in-process path (suite-hook configs excluded); tracked edits and new files outside the output paths are detected after reassembly; partial and missing slices do not lose case records; Fullsend batch scores match the in-process path except judges that depend on the removed `stderr.log`.
 
 ## Sequencing
 
 1. **[#325](https://github.com/fullsend-ai/agent-eval-harness/pull/325) lands first** — everything resolves run dirs through its single resolver.
-2. **Refactor the execution path** so the suite loop and hook placement split across plan/case/aggregate — the case command reuses the existing execution/runner path, runnable and parity-testable on today's path.
+2. **Refactor the execution path** so the case command runs one case through the existing runner path, parity-testable today.
 3. **Assembler / aggregate CLI**, tested on fabricated slices including timed-out, partial, and missing slices.
-4. **Plan / case CLIs**, then maintainer-authored CI workflows, running alongside the capturing runner.
+4. **Plan / case CLIs** (with per-case restaging), then maintainer-authored CI workflows, running alongside the capturing runner.
 5. **Delete the old Fullsend capture/filter/forwarding** once the [parity gate](#parity-gate) passes.
 
 ## Alternatives considered
