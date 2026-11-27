@@ -1,3 +1,10 @@
+## [1.69.1](https://github.com/fullsend-ai/agent-eval-harness/compare/v1.69.0...v1.69.1) (2026-11-27)
+
+
+### Bug Fixes
+
+* **stop-guard:** give each executor its own pidfile ([#338](https://github.com/fullsend-ai/agent-eval-harness/issues/338)) ([e25cfd8](https://github.com/fullsend-ai/agent-eval-harness/commit/e25cfd8d62746cddb63d670795d43752a08b33c9)), closes [#337](https://github.com/fullsend-ai/agent-eval-harness/issues/337)
+
 # [1.69.0](https://github.com/fullsend-ai/agent-eval-harness/compare/v1.68.4...v1.69.0) (2026-11-23)
 
 
