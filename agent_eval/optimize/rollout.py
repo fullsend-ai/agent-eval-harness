@@ -47,7 +47,8 @@ def _child_env() -> dict[str, str]:
     # Deliberately NOT re-pointing AGENT_EVAL_RUNS_DIR at the rollout root.
     # execute.py forwards that variable into the agent under test, where a
     # plugin shipping this repo's own Stop guard would then find the
-    # rollout's live execute.pid and block its own agent from stopping; and
+    # rollout's live execute.<pid>.pid marker and block its own agent from
+    # stopping; and
     # score.py harvests few-shot `examples:` from review.yaml under that
     # root, which rollouts never have. The rollout's directory is passed
     # explicitly instead (--run-dir on score.py and report.py).

@@ -663,3 +663,37 @@ def test_run_id_rule_matches_workspace_and_early_pidfile():
     from agent_eval.run_location import RUN_ID_PATTERN
     for script in ("workspace.py", "execute.py"):
         assert f'r"{RUN_ID_PATTERN.pattern}"' in (SCRIPTS / script).read_text(), script
+
+
+@pytest.mark.parametrize("leftovers", [
+    ("execute.999999.pid", ".execute.lock"),
+    ("execute.999999.pid",),
+    (".execute.lock",),
+])
+def test_preflight_cleans_a_run_dir_holding_only_executor_markers(
+        tmp_path, runs, leftovers):
+    """A run killed between the early marker write and console.log leaves only
+    the per-executor pidfile and/or the run-dir lock; that is still a run
+    directory, not an unmarked one --clean refuses."""
+    project = tmp_path / "proj"
+    project.mkdir()
+    cfg = _config(project, _SKILL_AND_NAME)
+    run = project / "runs" / "plugin:foo" / "r1"
+    run.mkdir(parents=True)
+    for name in leftovers:
+        (run / name).write_text("{}\n")
+    proc = _clean(cfg, run, project)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert not run.exists()
+
+
+def test_preflight_still_refuses_look_alike_executor_files(tmp_path, runs):
+    project = tmp_path / "proj"
+    project.mkdir()
+    cfg = _config(project, _SKILL_AND_NAME)
+    root = project / "runs" / "plugin:foo"
+    root.mkdir(parents=True)
+    (root / "execute.abc.pid").write_text("{}\n")
+    proc = _clean(cfg, root, project)
+    assert proc.returncode != 0
+    assert root.is_dir()

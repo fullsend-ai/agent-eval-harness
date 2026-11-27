@@ -29,26 +29,46 @@ import agent_eval._bootstrap  # noqa: F401 — auto-activate venv
 import argparse
 import atexit
 import copy
+import errno
 import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import time
 from pathlib import Path
+
+try:  # POSIX: ``flock`` owns the run directory (see ``_lock_run_dir``)
+    import fcntl
+except ImportError:  # pragma: no cover - Windows
+    fcntl = None
+try:  # Windows: byte-range lock, the same process-held ownership primitive
+    import msvcrt
+except ImportError:  # POSIX
+    msvcrt = None
 
 # ── Stop-guard pidfile ───────────────────────────────────────────────────
 # Defined and invoked *before* the heavy agent_eval imports below, and before
 # argparse/config load, because the window this closes is a race: the
 # orchestrator can launch us with run_in_background and end its turn
 # immediately, and the Stop guard hook can only block that teardown once
-# execute.pid exists. Every millisecond before the write is a millisecond the
+# its pidfile exists. Every millisecond before the write is a millisecond the
 # guard is blind — and module import is the dominant cost (~25 ms warm, far
 # more on a cold container), so waiting until main() would leave the guard
 # weakest at exactly the moment it is needed most.
 
 _PIDFILE_WRITTEN = False
+_PIDFILE_PATH = None
+# Resolved run directory this executor holds the lock on (``_write_pidfile``).
+_LOCKED_DIR = None
+# Open run-directory lock fds, keyed by the pidfile path published under them.
+_RUN_DIR_LOCKS = {}
+# Lock file taking exclusive ownership of a run directory (see ``_lock_run_dir``).
+_LOCK_NAME = ".execute.lock"
+# A marker is a few dozen bytes of JSON; never read more than this from one.
+_PIDFILE_MAX_BYTES = 4096
 
 
 def _process_create_time(pid):
@@ -89,52 +109,343 @@ def _process_create_time(pid):
     return None
 
 
+def _resolved(path):
+    try:
+        return Path(path).resolve()
+    except (OSError, RuntimeError):
+        return Path(os.path.abspath(path))
+
+
+def _pidfile_name(pid):
+    """Per-executor pidfile name, e.g. ``execute.12345.pid``.
+
+    One file per executor rather than a shared ``execute.pid``: run dirs get
+    reused, and two executors pointed at the same ``--output`` would otherwise
+    overwrite each other's marker — and whichever exited first would delete the
+    marker of the one still running, blinding the Stop guard to it (#337).
+    """
+    return "execute.%d.pid" % pid
+
+
+def _live_peer_executor(output_dir, own_pid, reap=False):
+    """Return ``(pid, pidfile)`` of another live executor using ``output_dir``,
+    or ``None``.
+
+    Looks at this directory only (never a tree walk) for per-executor
+    ``execute.<pid>.pid`` markers and the legacy shared ``execute.pid``. A
+    marker counts when it names a different pid that is still alive and whose
+    creation marker still matches (not a reused pid), and is younger than the
+    Stop guard's 24h abandonment limit. The legacy marker keeps the guard's rule
+    that a ``run_result.json`` at least as new as the marker means it finished.
+    Any unreadable marker is skipped.
+
+    With ``reap=True`` (only valid for a caller that holds the run-directory
+    lock, so no current executor is starting or running here) a per-executor
+    marker that is well formed and named for its pid, but whose process is dead
+    or whose pid has been reused, is deleted: a SIGKILLed executor never reaches
+    ``_release_pidfile``, so its marker would otherwise accumulate in a reused
+    run directory. Anything else (unreadable, mismatched name, legacy
+    ``execute.pid``, a live process) is left alone, so this never removes
+    evidence of a writer that might still be running.
+
+    This is a best-effort view for diagnostics and for executors that predate
+    the run-directory lock; ownership between current executors is decided by
+    ``_lock_run_dir``, not by comparing independently published markers. A
+    marker that cannot be inspected (unreadable, malformed, not a regular file)
+    is skipped on purpose: failing closed on it would let any stray file block
+    a run directory permanently, and the lock is the authority anyway.
+    """
+    # No safe liveness probe here: CPython maps ``os.kill(pid, 0)`` on Windows to
+    # ``TerminateProcess``, so probing a peer would kill it. The Stop guard
+    # disables itself on win32 for the same reason, so there is nothing to
+    # protect and nothing to probe.
+    if sys.platform == "win32":
+        return None
+    try:
+        names = sorted(os.listdir(output_dir))
+    except OSError:
+        return None
+    now = time.time()
+    for name in names:
+        legacy = name == "execute.pid"
+        if not legacy and not (name.startswith("execute.") and name.endswith(".pid")
+                               and name[len("execute."):-len(".pid")].isdigit()):
+            continue
+        path = Path(output_dir) / name
+        try:
+            # O_NONBLOCK so a FIFO planted at a marker name cannot hang startup;
+            # then insist on a regular file and cap the read.
+            fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                         | getattr(os, "O_NONBLOCK", 0))
+            with os.fdopen(fd, "rb") as fh:
+                st = os.fstat(fh.fileno())
+                if not stat.S_ISREG(st.st_mode):
+                    continue
+                info = json.loads(fh.read(_PIDFILE_MAX_BYTES).decode("utf-8"))
+            pid = info["pid"]
+        except (OSError, ValueError, TypeError, KeyError):
+            continue
+        # Same plausibility rule as the guard: os.kill treats pid <= 0 as a
+        # broadcast, and a JSON ``true`` is an int equal to pid 1.
+        if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+            continue
+        if pid == own_pid:
+            continue
+        # A per-executor marker is named for its pid; one that disagrees with
+        # its own contents is not something this script wrote.
+        if not legacy and name != _pidfile_name(pid):
+            continue
+        if now - st.st_mtime > 24 * 3600:
+            continue
+        if legacy:
+            try:
+                if os.path.getmtime(Path(output_dir) / "run_result.json") >= st.st_mtime:
+                    continue
+            except OSError:
+                pass
+        try:
+            os.kill(pid, 0)
+        except PermissionError:
+            pass  # exists, owned by another user
+        except OSError:
+            if reap and not legacy:
+                _reap_marker(path)
+            continue
+        recorded = info.get("create_time")
+        current = _process_create_time(pid)
+        if current is not None:
+            # Where a creation marker is obtainable, every marker this script
+            # writes carries one; a marker without it (or with a different one)
+            # cannot vouch that this is the process that wrote it.
+            if recorded is None or str(recorded) != str(current):
+                if reap and not legacy and recorded is not None:
+                    _reap_marker(path)  # pid reused by an unrelated process
+                continue
+        return pid, path
+    return None
+
+
+def _reap_marker(path):
+    """Best-effort removal of a stale peer marker."""
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+def _reject_busy_run_dir(output_dir, pid=None):
+    """Exit instead of sharing ``output_dir`` with another running executor.
+
+    Executors in one run dir also share ``run_result.json`` and every collected
+    artifact, so they would overwrite each other's results. The first executor
+    keeps the directory and its Stop-guard marker; this one touches nothing.
+    ``pid`` is the owner when known (the lock holder's pid is not recorded).
+    """
+    print(
+        "ERROR: run directory %s is already in use by a running executor%s. "
+        "Two executors must not share a run directory because their "
+        "results and artifacts would overwrite each other. Choose a different "
+        "--output (or --run-id), or wait for the first executor to finish."
+        % (output_dir, " (pid %d)" % pid if pid is not None else ""),
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+
+def _refuse_unowned_run_dir(output_dir, why):
+    """Exit because exclusive ownership of ``output_dir`` cannot be established.
+
+    Fail closed: an executor that cannot prove it is the only one in the run
+    directory could overwrite (or be overwritten by) another's results and
+    would be invisible to the Stop guard.
+    """
+    print(
+        "ERROR: cannot take exclusive ownership of run directory %s (%s). "
+        "Refusing to run: without it a second executor could share the "
+        "directory and overwrite results. Check that the directory is "
+        "writable and on a filesystem that supports file locking, that "
+        "%s there is a regular file, or choose a different --output."
+        % (output_dir, why, _LOCK_NAME),
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+
+def _try_lock_nb(fd):
+    """Nonblocking exclusive lock on ``fd``: ``True`` if taken, ``False`` if
+    another process holds it. Raises ``OSError`` when locking is unsupported."""
+    if fcntl is not None:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return False
+        return True
+    if msvcrt is not None:  # pragma: no cover - Windows
+        try:
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        except OSError as exc:
+            if exc.errno in (errno.EACCES, errno.EDEADLK):
+                return False
+            raise
+        return True
+    raise OSError("no file-locking primitive on this platform")
+
+
+def _lock_run_dir(output_dir):
+    """Take exclusive ownership of ``output_dir``; return the lock fd.
+
+    A nonblocking process-held lock (``flock``; ``msvcrt.locking`` on Windows)
+    on ``<output_dir>/.execute.lock``, held for the life of the process (the
+    kernel drops it on any exit, including SIGKILL, so a crashed executor never
+    leaves the directory locked). Unlike inferring an owner from independently
+    published markers, acquisition is atomic: of two executors starting at once,
+    exactly one gets the lock, however their marker writes interleave.
+
+    Fails closed: calls ``_reject_busy_run_dir`` when another executor holds the
+    lock, and ``_refuse_unowned_run_dir`` when no lock can be taken at all (the
+    lock file cannot be opened or is not a regular file, no locking primitive
+    exists, or the filesystem refuses the lock). The fd is not inheritable, so
+    subprocesses the executor spawns never hold the lock. The lock file is left
+    in place on release: unlinking it would let a late opener lock a different
+    inode.
+    """
+    path = Path(output_dir) / _LOCK_NAME
+    try:
+        # O_NONBLOCK so a FIFO planted at the lock name cannot hang startup.
+        fd = os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+                     | getattr(os, "O_NONBLOCK", 0), 0o600)
+    except OSError as exc:
+        _refuse_unowned_run_dir(output_dir, "cannot open lock file: %s" % exc)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            os.close(fd)
+            _refuse_unowned_run_dir(output_dir, "lock file is not a regular file")
+        acquired = _try_lock_nb(fd)
+    except OSError as exc:
+        os.close(fd)
+        _refuse_unowned_run_dir(output_dir, "cannot lock: %s" % exc)
+    if not acquired:
+        os.close(fd)
+        peer = _live_peer_executor(output_dir, os.getpid())
+        _reject_busy_run_dir(output_dir, peer[0] if peer else None)
+    return fd
+
+
 def _write_pidfile(output_dir):
-    """Write ``<output_dir>/execute.pid`` so the Stop guard hook can tell this
-    executor is still alive.
+    """Write ``<output_dir>/execute.<pid>.pid`` so the Stop guard hook can tell
+    this executor is still alive — unless another live executor already owns
+    ``output_dir``, in which case this one exits (``_reject_busy_run_dir``)
+    without writing anything, leaving the first executor's marker untouched.
 
     The hook blocks the orchestrator from ending its turn (which would tear down
     the session and kill this process before ``run_result.json`` is written)
-    while an ``execute.pid`` names a live process with no result beside it. The
-    file records the pid plus a process-creation marker so a reused pid can't be
-    mistaken for this run, and is removed at exit.
+    while a pidfile names a live process. The file records the pid plus a
+    process-creation marker so a reused pid can't be mistaken for this run, and
+    is removed when this executor exits (``_release_pidfile``, registered with
+    ``atexit``), i.e. only after reconciliation, strict-mode rewrites and
+    ``after_all`` hooks have finished.
+
+    Fails closed: an executor that cannot take the run-directory lock, or cannot
+    publish its marker (leaving it invisible to the Stop guard), exits instead
+    of running unprotected. The lock is held from acquisition to process exit
+    and never given up on this path except immediately before that exit.
 
     Idempotent: only the first call writes, so the early call below and the
     fallback in ``main()`` never double-register the cleanup.
     """
-    global _PIDFILE_WRITTEN
+    global _PIDFILE_WRITTEN, _PIDFILE_PATH, _LOCKED_DIR
     if _PIDFILE_WRITTEN:
+        # The directory locked earlier must be the one this call is for: a
+        # duplicated --output/--run-dir (or any other disagreement between the
+        # early scrape and the parsed argument) would otherwise lock one
+        # directory and write results into another.
+        if _resolved(output_dir) != _LOCKED_DIR:
+            _refuse_unowned_run_dir(
+                output_dir,
+                "this executor already owns %s, not this directory" % _LOCKED_DIR)
         return
     pid = os.getpid()
-    pidfile = Path(output_dir) / "execute.pid"
+    # Ownership is decided by the lock, taken before anything is published. The
+    # marker scan still runs for executors that predate the lock.
+    lock_fd = _lock_run_dir(output_dir)
+    # We hold the lock, so any marker here whose process is gone is stale.
+    peer = _live_peer_executor(output_dir, pid, reap=True)
+    if peer is not None:
+        os.close(lock_fd)
+        _reject_busy_run_dir(output_dir, peer[0])
+    pidfile = Path(output_dir) / _pidfile_name(pid)
+    # Publish atomically: write a temp file (a name no probe or guard glob
+    # matches), then ``os.replace`` it into place, so a concurrent probe never
+    # sees a partially written marker.
+    tmp = Path(output_dir) / (".%s.tmp" % _pidfile_name(pid))
     try:
-        # O_NOFOLLOW: the guard reads this path with no-follow semantics, so the
-        # writer must match. Otherwise a symlink pre-planted at execute.pid by
-        # anyone with write access to the runs tree would be followed, letting
+        # O_NOFOLLOW + O_EXCL: the guard reads the pidfile with no-follow
+        # semantics, so the writer must match. Otherwise a symlink pre-planted
+        # by anyone with write access to the runs tree would be followed, letting
         # this process truncate an arbitrary file it can write (CWE-59).
-        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
-        fd = os.open(pidfile, flags, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump({"pid": pid, "create_time": _process_create_time(pid)}, fh)
-    except OSError:
-        return  # non-fatal: guard just won't see this run
-    _PIDFILE_WRITTEN = True
-
-    def _remove():
-        # Only reap our own pidfile. Run dirs get reused, so a straggler from a
-        # previous attempt dying late must not delete the live pidfile of the
-        # run that replaced it — that would blind the guard to an active run.
         try:
-            with open(pidfile, encoding="utf-8") as fh:
-                if json.load(fh).get("pid") != pid:
-                    return
-        except (OSError, ValueError):
-            return
-        try:
-            os.remove(pidfile)
+            os.remove(tmp)  # leftover from a crashed predecessor with this pid
         except OSError:
             pass
-    atexit.register(_remove)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(tmp, flags, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump({"pid": pid, "create_time": _process_create_time(pid)}, fh)
+        os.replace(tmp, pidfile)
+    except OSError as exc:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        print(
+            "ERROR: cannot publish the Stop-guard marker %s: %s. Refusing to "
+            "run unprotected: the Stop guard could not see this executor and "
+            "its results would have no ownership guard." % (pidfile, exc),
+            file=sys.stderr,
+        )
+        # Dropped only now, as the process exits, so no other executor can be
+        # admitted and then run alongside one that carried on.
+        os.close(lock_fd)
+        sys.exit(1)
+    _RUN_DIR_LOCKS[pidfile] = lock_fd
+    _PIDFILE_WRITTEN = True
+    _PIDFILE_PATH = pidfile
+    _LOCKED_DIR = _resolved(output_dir)
+    atexit.register(_release_pidfile)
+
+
+def _release_pidfile():
+    """Remove this executor's pidfile and drop its run-directory lock, if it
+    wrote them. Safe to call twice.
+
+    Registered with ``atexit`` and deliberately *not* called when
+    ``run_result.json`` is first written: provider reconciliation, strict-mode
+    rewrites of that file, batch input copies and ``after_all`` hooks all run
+    after it, and dropping the marker earlier would let a second executor into
+    the run dir while this one can still write results and artifacts. The guard
+    cannot infer completion from the result's mtime either: a run dir is reused
+    across attempts, so a ``run_result.json`` left by an earlier executor says
+    nothing about this one.
+
+    The name embeds our own pid, so the file is ours to delete: no other live
+    process can hold that name, and a concurrent executor's marker is untouched.
+    """
+    global _PIDFILE_PATH
+    pidfile, _PIDFILE_PATH = _PIDFILE_PATH, None
+    if pidfile is None:
+        return
+    try:
+        os.remove(pidfile)
+    except OSError:
+        pass
+    # Release the lock last, so the directory is never unowned while the marker
+    # is still visible.
+    lock_fd = _RUN_DIR_LOCKS.pop(pidfile, None)
+    if lock_fd is not None:
+        try:
+            os.close(lock_fd)
+        except OSError:
+            pass
 
 
 def _early_pidfile(argv):
@@ -148,14 +459,15 @@ def _early_pidfile(argv):
     scrape, and ``main()`` calls ``_write_pidfile`` once the run directory is
     resolved, so the guard degrades to a slightly later write, never to none.
     """
+    # The last occurrence wins, as it does for argparse, so the directory locked
+    # here is the one main() goes on to write results into. (main() re-checks
+    # via _write_pidfile, which refuses a mismatch.)
     out = None
     for i, token in enumerate(argv):
         if token in ("--run-dir", "--output") and i + 1 < len(argv):
             out = argv[i + 1]
-            break
-        if token.startswith(("--run-dir=", "--output=")):
+        elif token.startswith(("--run-dir=", "--output=")):
             out = token.split("=", 1)[1]
-            break
     if not out:
         return
     try:
@@ -481,16 +793,19 @@ def main():
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # Fallback for the Stop-guard pidfile: already written by _early_pidfile()
+    # before the imports at the top of this module when --run-dir/--output was
+    # passed (SKILL.md does). Otherwise (config-resolved run directory, or an
+    # --output form the scrape didn't recognise) this is the first write,
+    # after the imports and config load.
+    # Runs before anything else writes into output_dir: if another live
+    # executor owns the directory this exits without touching it.
+    _write_pidfile(output_dir)
+
     # Mirror all console output to <output_dir>/console.log so callers never
     # need to redirect stdout with '>' (which blanks the background-command
     # viewer). The real stdout/stderr streams still receive everything.
     _setup_console_log(output_dir)
-
-    # Fallback for the Stop-guard pidfile: already written by _early_pidfile()
-    # before the imports at the top of this module when --run-dir/--output was
-    # passed (SKILL.md does). Otherwise (config-resolved run directory) this is
-    # the first write, after the imports and config load.
-    _write_pidfile(output_dir)
 
     # Resolve skill args: CLI override > config > empty
     # Treat empty/whitespace-only strings as unset (normalize before fallback)

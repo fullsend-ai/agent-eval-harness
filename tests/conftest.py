@@ -1,6 +1,7 @@
 """Shared fixtures and factory functions for stream-json event testing."""
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -18,6 +19,32 @@ sys.path.append(str(_repo_root / "skills" / "eval-dataset" / "scripts"))
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def _reset_execute_run_dir_ownership():
+    """Give every test a fresh executor identity in ``execute.py``.
+
+    A real ``execute.py`` process owns exactly one run directory for its whole
+    life: it takes ``.execute.lock`` and publishes ``execute.<pid>.pid``, and it
+    refuses any other directory afterwards. Tests that call ``execute.main()``
+    in-process (the whole pytest run is one process) would otherwise inherit the
+    previous test's ownership and be refused their own run directory.
+    """
+    yield
+    execute = sys.modules.get("execute")
+    if execute is None:
+        return
+    execute._release_pidfile()
+    for fd in list(execute._RUN_DIR_LOCKS.values()):
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+    execute._RUN_DIR_LOCKS.clear()
+    execute._PIDFILE_WRITTEN = False
+    execute._PIDFILE_PATH = None
+    execute._LOCKED_DIR = None
+
 
 @pytest.fixture
 def repo_root():

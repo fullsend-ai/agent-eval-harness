@@ -25,6 +25,7 @@ Usage:
 import agent_eval._bootstrap  # noqa: F401 — auto-activate venv
 
 import argparse
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -50,8 +51,12 @@ OWNED_STATE_FILES = frozenset({
 # What a run directory directly contains. An explicit --run-dir is only cleaned
 # when it carries one, so a runs root or an eval-name directory (which hold only
 # run subdirectories) is never removed by mistake.
+#
+# execute.py leaves ``execute.<pid>.pid`` (one per executor) and ``.execute.lock``
+# in the directory before anything else, so a run killed that early still counts.
 RUN_MARKERS = ["run_result.json", "summary.yaml", "collection.json",
-               "console.log", "execute.pid"]
+               "console.log", "execute.pid", "execute.<pid>.pid", ".execute.lock"]
+_PER_EXECUTOR_PIDFILE = re.compile(r"execute\.[0-9]+\.pid")
 
 
 def _is_dangerous_path(path: Path) -> bool:
@@ -66,8 +71,16 @@ def _is_dangerous_path(path: Path) -> bool:
 
 def _has_run_marker(path: Path) -> bool:
     """True when *path* is itself a run directory (not a parent of run directories)."""
-    return (any((path / m).is_file() for m in RUN_MARKERS)
+    try:
+        names = [p for p in path.iterdir() if _is_run_marker_name(p.name)]
+    except OSError:
+        names = []
+    return (any(p.is_file() for p in names)
             or (path / "cases").is_dir())
+
+
+def _is_run_marker_name(name: str) -> bool:
+    return name in RUN_MARKERS or bool(_PER_EXECUTOR_PIDFILE.fullmatch(name))
 
 
 def _find_files(directory: Path) -> list[Path]:
