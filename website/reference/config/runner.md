@@ -373,6 +373,60 @@ load time on `execution.prompt` configs and on an agent judge's `agent.runner`
   [--model <model>] [--effort <effort>] --output-dir <workspace>/.fullsend-runs <extra_args>
 ```
 
+In case mode the harness first runs `<binary> prepare <agent> --fullsend-dir <abs
+fullsend_dir>` **once, before the cases** — but only when at least two
+selected cases actually run concurrently (`--parallelism` /
+`execution.parallelism` greater than 1 and more than one selected case): a
+single case or a sequential run has no concurrent pull to race, so prepare is
+skipped there. Batch mode has a single invocation and does not prepare either.
+The preparation uses the same resolved binary,
+agent, directory and the environment the cases start from (`execution.env`,
+`runner.env` and `before_all` hook `env` outputs), so fullsend resolves and
+warms the image from that starting environment, once instead of once per
+concurrent case.
+
+**Per-case hook env is not part of the prepared context.** `before_each`
+hooks run after prepare, so environment values they set or change — in
+particular ones affecting the sandbox image resolution (e.g.
+`FULLSEND_SANDBOX_IMAGE`) or the registry authentication the pull needs —
+reach the cases but not the preparation. Put such shared values in
+`runner.env` / `execution.env` or in a `before_all` hook instead.
+
+`runner.extra_args` is **not** passed to prepare — the harness does not guess
+which of them are image-relevant, and fullsend auto-detects the forge from the
+CI environment (a GitHub Actions workflow needs no flag). When
+`extra_args` are present the harness prints a `WARNING`: options that change
+the image — an explicit `--forge` on another platform, an `--event-file` or
+`--env-file` — may make prepare resolve a different sandbox image than the
+runs.
+
+The harness runs `prepare` with `--json` and reads the result object on the
+last line of its stdout. A `fullsend` that does not provide the `prepare`
+subcommand (probed with `prepare --help`) is not a failure: a `WARNING` says
+the cases will pull the sandbox image concurrently, and the run goes on
+(fullsend-ai/fullsend `012eb5d6` or later ships `prepare`). Preflight failures
+with `error.kind` `sandbox-preflight` or `sandbox-cleanup` are also only a
+`WARNING` (kind, message, hint, and for `sandbox-cleanup` the sandbox left
+behind): the preflight makes a single sandbox attempt, while every case's own
+`fullsend run` retries it. Any other preparation failure — another
+`error.kind` (`configuration`, `openshell-unavailable`, `gateway-unavailable`,
+`image-unresolvable`, `registry-auth`, `disk-space`, `canceled`), the harness
+timeout, a launch error, or a non-zero exit without that JSON — fails the run
+before any case starts, with the `error.kind`, message and hint leading the
+error when fullsend gave them. What fullsend printed on stdout and stderr is captured and
+included in the failure error, redacted and bounded: terminal control
+sequences are stripped, and the values of the credential-named variables of
+fullsend's environment and of the Actions `::add-mask::` declarations in the
+output are masked — GitHub's `::stop-commands::` can disable `add-mask`, so
+the harness masks them itself. The preflight runs through the same capture
+and process-group teardown as a run, bounded at 1800 s independently of
+`execution.timeout`, so a hung preparation cannot eat the job.
+
+**Scope.** Uses the `prepare` of a `fullsend` that provides it (see fullsend's
+`prepare` documentation); an older one runs unprepared. Multi-step pipelines (`execution.steps`) are **not**
+prepared: their steps may override the runner per step, so the top-level
+runner's image is not necessarily what runs.
+
 The process environment carries `FULLSEND_TASK="/<skill> <args>"`,
 `AGENT_EVAL_SUBAGENT_MODEL` (only when a subagent model is set; the agent definition
 must reference it, or the runner warns), and every `execution.env`, `runner.env` and

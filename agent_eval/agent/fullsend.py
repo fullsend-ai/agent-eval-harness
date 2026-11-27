@@ -115,7 +115,13 @@ PROVENANCE_KEYS = (
     "fullsend_agent", "fullsend_version", "openshell_version", "sandbox_image",
     "sandbox_image_source", "sandbox_arch", "agent_harness_commit",
 )
+
+
 _PROBE_TIMEOUT_S = 15
+_MAX_PREPARE_OUTPUT_CHARS = 4000
+# Bound for `fullsend prepare`, independent of execution.timeout (a case
+# may allow four hours): a hung preflight must not eat the job.
+_PREPARE_TIMEOUT_S = 1800
 _MAX_CONSOLE_SCAN_CHARS = 2_000_000
 _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 # fullsend's console line naming the sandbox image it resolved, e.g.
@@ -345,6 +351,87 @@ _CONTROL_RE = re.compile(
 _DETAIL_INDENT = " " * 4
 
 
+class FullsendPrepareError(RuntimeError):
+    """``fullsend prepare`` failed (or could not run) before any case."""
+
+
+# ``error.kind`` values of ``fullsend prepare --json`` that name a problem of
+# the one-attempt preflight sandbox itself. Every case's own ``fullsend run``
+# retries sandbox creation, so these must not abort the eval. Any other kind
+# (configuration, openshell-unavailable, gateway-unavailable,
+# image-unresolvable, registry-auth, disk-space, canceled — or one a newer
+# fullsend adds) fails the run before any case starts.
+_PREPARE_TOLERATED_KINDS = frozenset({"sandbox-preflight", "sandbox-cleanup"})
+
+
+def _parse_prepare_json(stdout: str):
+    """``(info, rest)``: the JSON object on the last non-empty line of
+    ``fullsend prepare --json`` stdout and the stdout without that line;
+    ``(None, stdout)`` when that line is not a JSON object."""
+    lines = (stdout or "").splitlines()
+    for index in range(len(lines) - 1, -1, -1):
+        if not lines[index].strip():
+            continue
+        try:
+            info = json.loads(lines[index])
+        except ValueError:
+            break
+        if isinstance(info, dict):
+            return info, "\n".join(lines[:index])
+        break
+    return None, stdout or ""
+
+
+def _prepare_json_field(info: dict, *path) -> str:
+    """A string field of the prepare JSON (``""`` when absent or not a string)."""
+    value = info
+    for key in path:
+        value = value.get(key) if isinstance(value, dict) else None
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _prepare_error_summary(info: dict, secrets, *, sandbox: bool = False) -> str:
+    """The kind, message and hint of a prepare JSON ``error`` (plus the
+    sandbox a failed cleanup left behind) as printable, redacted text."""
+    parts = [_prepare_json_field(info, "error", "kind"),
+             _prepare_json_field(info, "error", "message"),
+             _prepare_json_field(info, "error", "hint")]
+    if sandbox:
+        left = _prepare_json_field(info, "preflight", "sandbox")
+        if left:
+            parts.append(f"sandbox left behind: {left}")
+    return "; ".join(
+        _present(_CONTROL_RE.sub("", part).strip(), secrets)
+        for part in parts if part)
+
+
+def _prepare_secrets(stdout: str, stderr: str, env: dict) -> tuple:
+    """The values to mask in preparation diagnostics, longest first."""
+    return tuple(sorted(
+        set(_secret_values(env))
+        | set(actions_mask_values_across_streams(stdout or "", stderr or "")),
+        key=lambda value: (-len(value), value)))
+
+
+def _prepare_console_note(stdout: str, stderr: str, env: dict) -> str:
+    """Redact captured preparation output before including it in an error.
+
+    An outer workflow ``::stop-commands::`` can prevent GitHub from registering
+    Fullsend's masks, so collect valid declarations locally. The collector still
+    honours stop/resume blocks inside Fullsend's output: declarations inside
+    those blocks are not masks, matching GitHub. Also mask credential-named
+    environment values and bound the result.
+    """
+    secrets = _prepare_secrets(stdout, stderr, env)
+    console = "\n".join(
+        _present(_CONTROL_RE.sub("", line).rstrip(), secrets)
+        for line in (stdout or "").splitlines() + (stderr or "").splitlines()
+        if line.strip())
+    if not console:
+        return ""
+    return ":\n" + console[-_MAX_PREPARE_OUTPUT_CHARS:]
+
+
 class FullsendRunner(EvalRunner):
     """Runs a skill by invoking ``fullsend run <agent>`` on the workspace."""
 
@@ -551,6 +638,125 @@ class FullsendRunner(EvalRunner):
             # steps, which still need the harness hooks, env and directory
             # grants.
             _restore_settings(workspace, original_settings)
+
+    def prepare(self, extra_env: Optional[dict] = None,
+                timeout_s: Optional[float] = None) -> None:
+        """Run ``fullsend prepare <agent>`` once, before the cases (#348).
+
+        The same resolved binary, agent, ``--fullsend-dir`` and environment
+        the cases start from — the image can depend on ``execution.env`` /
+        ``runner.env`` (``FULLSEND_SANDBOX_IMAGE``) and ``before_all`` hook
+        ``env`` outputs — so fullsend resolves the image from that starting
+        environment and pulls it once instead of once per concurrent case.
+        ``before_each`` hook env is *not* part of it (prepare has already
+        run by the time per-case hooks execute): environment values that
+        affect the image resolution or the registry authentication the pull
+        needs belong in ``runner.env`` / ``execution.env`` or a
+        ``before_all`` hook, not per case. ``runner.extra_args`` is not
+        passed to prepare (the harness does not guess which of them are
+        image-relevant), so an option that changes the image may make the
+        runs resolve a different one; fullsend auto-detects the forge from
+        the CI environment, so a GitHub Actions workflow needs no flag, and
+        a warning says when extra_args are present.
+
+        Everything else is :meth:`_run`, the run path's own machinery: the
+        same console capture (live, credential-masked forwarding under the
+        log prefix), the same process-group teardown on timeout or
+        interrupt, and a bounded wait independent of ``execution.timeout``
+        (:data:`_PREPARE_TIMEOUT_S`), so a hung preflight cannot eat the
+        job.
+
+        A fullsend without a ``prepare`` subcommand (probed with
+        ``prepare --help``) is not a failure: a WARNING is printed and the
+        cases run unprepared. ``prepare --json`` is run, and a failure whose
+        ``error.kind`` is ``sandbox-preflight`` or ``sandbox-cleanup`` (the
+        preflight makes one sandbox attempt where every case's run retries)
+        is a WARNING too. Any other failure (another ``error.kind``, a
+        non-zero exit without that JSON, timeout, launch error) raises
+        :class:`FullsendPrepareError`; the caller fails the run before any
+        case starts rather than letting every case hit the same broken
+        environment.
+        """
+        env = os.environ.copy()
+        env.update(self._env_entries("", extra_env))
+        # Popped from env, not just the entries: a FULLSEND_TASK inherited
+        # from the caller names some other run's task, and prepare runs no
+        # agent. (Each case's own task overwrites it on the run path.)
+        env.pop("FULLSEND_TASK", None)
+        env.pop(_SENTINEL, None)
+        ensure_harness_root(env)
+        if not self._has_prepare(env):
+            # A fullsend that predates the subcommand is not a failed
+            # preparation: the cases still run, each pulling the image itself.
+            with _print_lock:
+                print(f"  WARNING: {self._binary} has no 'prepare' "
+                      "subcommand, so the sandbox image is not prepared "
+                      "before the cases and they will pull it "
+                      "concurrently; fullsend-ai/fullsend 012eb5d6 or later "
+                      "ships 'prepare'", flush=True)
+            return
+        if self._extra_args:
+            # Values are not echoed: an extra_arg can carry anything.
+            with _print_lock:
+                print("  WARNING: fullsend prepare does not receive "
+                      "runner.extra_args; when they change the image "
+                      "(an explicit --forge on another platform, an "
+                      "--event-file or --env-file), prepare may resolve a "
+                      "different sandbox image than the runs", flush=True)
+        cmd = [self._binary, "prepare", self._agent,
+               "--fullsend-dir", self._fullsend_dir, "--json"]
+        # cwd is immaterial: prepare takes only absolute paths, and _run
+        # supplies the run's capture, masking and process-group teardown
+        # unchanged.
+        returncode, console_out, console_err, _duration, note = self._run(
+            cmd, Path.cwd(), env,
+            _PREPARE_TIMEOUT_S if timeout_s is None else timeout_s)
+        if returncode == 0:
+            return
+        # --json puts one object on the last stdout line, on failure too.
+        # The harness timeout and a launch error (return code -1, a note)
+        # carry none and fail as before.
+        info, rest = (_parse_prepare_json(console_out)
+                      if returncode > 0 else (None, console_out))
+        secrets = _prepare_secrets(console_out, console_err, env)
+        kind = _prepare_json_field(info, "error", "kind") if info else ""
+        if kind in _PREPARE_TOLERATED_KINDS:
+            # The preflight makes one sandbox attempt; every case's run
+            # retries it, so a transient failure must not abort the eval.
+            summary = _prepare_error_summary(
+                info, secrets, sandbox=(kind == "sandbox-cleanup"))
+            with _print_lock:
+                print(f"  WARNING: fullsend prepare failed ({summary}); "
+                      "continuing, each case's run retries sandbox creation",
+                      flush=True)
+            return
+        # The captured console — not only the live stream, which drops
+        # arbitrary error lines and may not even be on (no log prefix) —
+        # reaches the error, redacted and bounded by
+        # _prepare_console_note (GitHub's ::stop-commands:: can disable
+        # add-mask, so the harness masks for itself).
+        head = (_prepare_error_summary(info, secrets)
+                if info and kind else "")
+        raise FullsendPrepareError(
+            (f"{head}\n" if head else "")
+            + "fullsend prepare failed"
+            + (f"\n{note}" if note else "")
+            + _prepare_console_note(rest, console_err, env))
+
+    def _has_prepare(self, env: dict) -> bool:
+        """Whether the binary has a ``prepare`` subcommand. Cobra answers
+        ``--help`` before any PreRun hook, so ``prepare --help`` exits 0
+        exactly when it exists. A probe that cannot run (launch error,
+        timeout) says nothing about the binary's age: assume it has one and
+        let the real call report the problem."""
+        try:
+            proc = subprocess.run(
+                [self._binary, "prepare", "--help"], capture_output=True,
+                stdin=subprocess.DEVNULL, timeout=_PROBE_TIMEOUT_S, env=env,
+                check=False)
+        except (OSError, subprocess.TimeoutExpired):
+            return True
+        return proc.returncode == 0
 
     def _launch(self, target, args, workspace, output_dir, model, timeout_s,
                 extra_env) -> RunResult:

@@ -2038,6 +2038,28 @@ def _execute_per_case(args, config, runner, runner_cls,
                 workspace,
                 trusted_path=hook_output_path(log_dir, "before_all"))
 
+        # A runner that exposes prepare() (fullsend) gets it run once, before
+        # any case, after the suite-level hook outputs, with the same binary
+        # and the environment the cases start from (execution/runner env plus
+        # before_all hook env — before_each env is not part of it, prepare
+        # has already run by then) — but only when at least two selected
+        # cases actually run concurrently: concurrent cold pulls of the
+        # sandbox image are a possible contributor to runner disk exhaustion
+        # (#348), and a single case or a sequential run has no concurrent
+        # pull to race. A preparation failure fails the run before a case
+        # starts, so it is never silently bypassed. Multi-step pipelines
+        # are not prepared: their steps may override the runner per step,
+        # so the top-level runner's image is not necessarily what runs.
+        prepare = getattr(runner, "prepare", None)
+        concurrent_cases = len(case_order) > 1 and effective_parallelism > 1
+        if concurrent_cases and not config.execution.steps and callable(prepare):
+            try:
+                prepare(extra_env=global_hook_outputs.get("env") or None)
+            except Exception as exc:
+                print(f"ERROR: {runner.name} preparation failed before any "
+                      f"case ran: {exc}", file=sys.stderr)
+                sys.exit(1)
+
         if effective_parallelism > 1:
             from concurrent.futures import ThreadPoolExecutor, as_completed
 

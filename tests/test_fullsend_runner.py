@@ -27,7 +27,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from agent_eval.agent import RUNNERS
 from agent_eval.agent import fullsend as fullsend_mod
 from agent_eval.agent.base import EvalRunner
-from agent_eval.agent.fullsend import FullsendRunner, materialize_symlinks
+from agent_eval.agent.fullsend import (
+    FullsendPrepareError, FullsendRunner, materialize_symlinks,
+)
 from agent_eval.config import EvalConfig
 
 SCRIPTS = Path(__file__).parent.parent / "skills" / "eval-run" / "scripts"
@@ -45,6 +47,68 @@ FAKE_FULLSEND = textwrap.dedent('''\
         sys.exit(1)
     if argv == ["--version"]:
         print("fullsend version 0.49.0")
+        sys.exit(0)
+
+    # `prepare --help`, the harness's capability probe: exits 0 exactly when
+    # the subcommand exists (cobra answers --help before any PreRun hook).
+    if argv == ["prepare", "--help"]:
+        if os.environ.get("FAKE_FULLSEND_NO_PREPARE"):
+            print('Error: unknown command "prepare" for "fullsend"',
+                  file=sys.stderr)
+            sys.exit(1)
+        print("Usage: fullsend prepare <agent>")
+        sys.exit(0)
+
+    # Every invocation (prepare or run) appends to the calls log when asked.
+    calls = os.environ.get("FAKE_FULLSEND_CALLS")
+    if calls:
+        with open(calls, "a") as fh:
+            fh.write(json.dumps({
+                "argv": argv,
+                "cwd": os.getcwd(),
+                "env_task": os.environ.get("FULLSEND_TASK"),
+                "env": {k: v for k, v in os.environ.items()
+                        if k in ("EVAL_FLAG", "FULLSEND_SANDBOX_IMAGE",
+                                 "GITHUB_ACTIONS", "BEFORE_ALL_VAR")},
+            }) + "\\n")
+
+    if argv and argv[0] == "prepare":
+        # fullsend prepare: resolves and warms the sandbox image; it takes no
+        # target repo or output dir. The call was recorded above.
+        if os.environ.get("FAKE_FULLSEND_PREPARE_HANG"):
+            # An in-flight image pull: a child of the leader, plus the
+            # leader hanging, so a timeout must stop the whole group.
+            import subprocess
+            child = subprocess.Popen(
+                [sys.executable, "-c", "import time; time.sleep(60)"])
+            Path(os.environ["FAKE_FULLSEND_CHILD_PID"]).write_text(
+                str(child.pid))
+            time.sleep(60)
+        if os.environ.get("FAKE_FULLSEND_PREPARE_JSON"):
+            # prepare --json: progress on stderr, one JSON object on the last
+            # stdout line (also on failure), exit non-zero on failure.
+            print("progress: resolving image", file=sys.stderr)
+            payload = json.loads(os.environ["FAKE_FULLSEND_PREPARE_JSON"])
+            print("not json noise")
+            print(json.dumps(payload))
+            sys.exit(0 if payload.get("ok") else 1)
+        if os.environ.get("FAKE_FULLSEND_PREPARE_FAIL"):
+            # Like the real CLI on failure: names the cause, may echo a
+            # credential from its environment, declare an Actions mask value
+            # on one pipe that also appears on the other, and print
+            # arbitrary diagnostics the live console filter would drop.
+            print("::add-mask::" + os.environ.get("FAKE_FULLSEND_MASK", ""))
+            print("config: token=" + os.environ.get("PREPARE_SECRET_TOKEN", ""),
+                  file=sys.stderr)
+            print("progress " + os.environ.get("FAKE_FULLSEND_MASK", ""),
+                  file=sys.stderr)
+            print("Error: prepare failed: kind image-unresolvable (fake)",
+                  file=sys.stderr)
+            if os.environ.get("FAKE_FULLSEND_PREPARE_ERR_TEXT"):
+                print(os.environ["FAKE_FULLSEND_PREPARE_ERR_TEXT"],
+                      file=sys.stderr)
+            sys.exit(1)
+        print("✓ image ready (fake)")
         sys.exit(0)
 
     def flag(name):
@@ -205,7 +269,11 @@ def fake_fullsend(fake_bin, tmp_path, monkeypatch):
                 "FAKE_FULLSEND_ITERATIONS",
                 "FAKE_FULLSEND_NO_IMAGE", "FAKE_FULLSEND_IMAGE",
                 "FAKE_FULLSEND_CONSOLE", "FAKE_FULLSEND_CONSOLE_ERR",
-                "FAKE_FULLSEND_RESULT_TEXT", "FAKE_FULLSEND_SECRET"):
+                "FAKE_FULLSEND_RESULT_TEXT", "FAKE_FULLSEND_SECRET",
+                "FAKE_FULLSEND_CALLS", "FAKE_FULLSEND_PREPARE_FAIL",
+                "FAKE_FULLSEND_PREPARE_HANG", "FAKE_FULLSEND_CHILD_PID",
+                "FAKE_FULLSEND_PREPARE_ERR_TEXT", "FAKE_FULLSEND_MASK",
+                "FAKE_FULLSEND_NO_PREPARE", "FAKE_FULLSEND_PREPARE_JSON"):
         monkeypatch.delenv(var, raising=False)
     return record
 
@@ -1673,6 +1741,401 @@ def test_execute_py_case_end_to_end_masks_actions_values(tmp_path, fake_bin):
         text = transcript.read_text()
         assert secret not in text
         assert "text\": \"***\"" in text
+
+
+# ── fullsend prepare (issue #348) ─────────────────────────────────────
+
+def _fullsend_case_project(tmp_path):
+    """Two-case fullsend eval: workspace.py + execute.py run end to end."""
+    project = tmp_path / "project"
+    for case_id in ("case-001", "case-002"):
+        (project / "cases" / case_id).mkdir(parents=True)
+        (project / "cases" / case_id / "input.yaml").write_text(
+            yaml.dump({"prompt": f"idea from {case_id}"}))
+    (project / ".claude" / "skills" / "rfe.speedrun").mkdir(parents=True)
+    (project / ".claude" / "skills" / "rfe.speedrun" / "SKILL.md").write_text("# s")
+    (project / ".fullsend").mkdir()
+    (project / ".fullsend" / "config.yaml").write_text("agents: []\n")
+    (project / "eval.yaml").write_text(yaml.dump({
+        "name": "fullsend-case-prepare",
+        "execution": {"mode": "case", "skill": "rfe.speedrun",
+                      "arguments": "{{ input.prompt }}",
+                      "env": {"EVAL_FLAG": "on"}},
+        "runner": {"type": "fullsend", "agent": "rfe-creator-eval"},
+        "models": {"skill": "opus"},
+        "dataset": {"path": "cases", "schema": "Each case has a prompt"},
+    }))
+    return project
+
+
+def _prepare_env(fake_bin, tmp_path, **extra):
+    record = tmp_path / "record.json"
+    calls = tmp_path / "calls.jsonl"
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("_AGENT_EVAL_BOOTSTRAP_DONE", "FAKE_FULLSEND_EXIT",
+                        "FAKE_FULLSEND_SLEEP", "FAKE_FULLSEND_PREPARE_FAIL",
+                        "FAKE_FULLSEND_PREPARE_HANG",
+                        "FAKE_FULLSEND_CHILD_PID", "FAKE_FULLSEND_PREPARE_ERR_TEXT",
+                        "FAKE_FULLSEND_MASK", "FAKE_FULLSEND_NO_PREPARE",
+                        "FAKE_FULLSEND_PREPARE_JSON")}
+    env.update({
+        "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}",
+        "AGENT_EVAL_RUNS_DIR": str(tmp_path / "runs"),
+        "FAKE_FULLSEND_RECORD": str(record),
+        "FAKE_FULLSEND_CALLS": str(calls),
+    })
+    env.update(extra)
+    return env, record, calls
+
+
+def _run_execute(project, env, run_id="r1", parallelism=None):
+    ws_result = _run_script("workspace.py", ["--config", "eval.yaml",
+                                             "--run-id", run_id],
+                            cwd=project, env=env)
+    assert ws_result.returncode == 0, ws_result.stderr
+    workspace = next(Path(line.split(":", 1)[1].strip())
+                     for line in ws_result.stdout.splitlines()
+                     if line.startswith("WORKSPACE:"))
+    output_dir = Path(env["AGENT_EVAL_RUNS_DIR"]) / "fullsend-case-prepare" / run_id
+    output_dir.mkdir(parents=True)
+    exec_args = [
+        "--workspace", str(workspace), "--model", "opus",
+        "--output", str(output_dir), "--config", str(project / "eval.yaml"),
+        "--run-id", run_id,
+    ]
+    if parallelism:
+        exec_args += ["--parallelism", str(parallelism)]
+    exec_result = _run_script("execute.py", exec_args, cwd=project, env=env)
+    return exec_result, output_dir, workspace
+
+
+def _read_calls(calls):
+    return [json.loads(line) for line in calls.read_text().splitlines()]
+
+
+def test_prepare_runs_once_before_every_case(tmp_path, fake_bin):
+    """Case mode prepares the fullsend environment exactly once, before any
+    case, when at least two selected cases run concurrently — with the same
+    binary, dir and starting env the runs use (#348)."""
+    project = _fullsend_case_project(tmp_path)
+    env, record, calls = _prepare_env(fake_bin, tmp_path,
+                                      FAKE_FULLSEND_ARTIFACTS="1")
+    exec_result, output_dir, workspace = _run_execute(project, env,
+                                                      parallelism=2)
+    assert exec_result.returncode == 0, exec_result.stderr
+
+    entries = _read_calls(calls)
+    prepares = [e for e in entries if e["argv"][0] == "prepare"]
+    runs = [e for e in entries if e["argv"][0] == "run"]
+    assert len(prepares) == 1
+    assert len(runs) == 2
+    assert entries[0]["argv"][0] == "prepare"  # before every case
+    argv = prepares[0]["argv"]
+    assert argv[1] == "rfe-creator-eval"
+    assert argv[2:] == ["--fullsend-dir", str((project / ".fullsend").resolve()),
+                        "--json"]
+    # Same environment as run: execution.env reaches prepare; no task is set
+    # (prepare runs no agent), while each run carries its FULLSEND_TASK.
+    assert prepares[0]["env"]["EVAL_FLAG"] == "on"
+    assert prepares[0]["env_task"] is None
+    assert runs[0]["env_task"].startswith("/rfe.speedrun")
+    for case_id in ("case-001", "case-002"):
+        assert (output_dir / "cases" / case_id / "run_result.json").is_file()
+
+
+def test_prepare_skipped_for_a_single_selected_case(tmp_path, fake_bin):
+    """One selected case has no concurrent cold-pull race, however high the
+    requested parallelism: prepare is skipped and the case just runs
+    (#348)."""
+    project = _fullsend_case_project(tmp_path)
+    import shutil
+    shutil.rmtree(project / "cases" / "case-002")
+    env, record, calls = _prepare_env(fake_bin, tmp_path,
+                                      FAKE_FULLSEND_ARTIFACTS="1")
+    exec_result, output_dir, workspace = _run_execute(project, env,
+                                                      parallelism=15)
+    assert exec_result.returncode == 0, exec_result.stderr
+    entries = _read_calls(calls)
+    assert [e["argv"][0] for e in entries] == ["run"]  # no prepare
+    assert (output_dir / "cases" / "case-001" / "run_result.json").is_file()
+
+
+def test_prepare_skipped_for_sequential_cases(tmp_path, fake_bin):
+    """A sequential run (parallelism 1) has no concurrent cold-pull race
+    either: prepare is skipped and every case just runs (#348)."""
+    project = _fullsend_case_project(tmp_path)
+    env, record, calls = _prepare_env(fake_bin, tmp_path,
+                                      FAKE_FULLSEND_ARTIFACTS="1")
+    exec_result, output_dir, workspace = _run_execute(project, env)
+    assert exec_result.returncode == 0, exec_result.stderr
+    entries = _read_calls(calls)
+    assert [e["argv"][0] for e in entries] == ["run", "run"]  # no prepare
+    for case_id in ("case-001", "case-002"):
+        assert (output_dir / "cases" / case_id / "run_result.json").is_file()
+
+
+def test_before_all_env_reaches_prepare_and_cases(tmp_path, fake_bin):
+    """A before_all hook's env output reaches the fullsend prepare (which
+    runs after the suite-level hook outputs) and every case run (#348)."""
+    project = _fullsend_case_project(tmp_path)
+    cfg = yaml.safe_load((project / "eval.yaml").read_text())
+    cfg["hooks"] = {"before_all": [{
+        "command": ("cat > \"$AGENT_EVAL_HOOK_OUTPUT\" <<'HOOKEOF'\n"
+                    "env:\n"
+                    "  BEFORE_ALL_VAR: from_before_all\n"
+                    "HOOKEOF\n"),
+        "description": "Suite env output",
+    }]}
+    (project / "eval.yaml").write_text(yaml.dump(cfg))
+    env, record, calls = _prepare_env(fake_bin, tmp_path,
+                                      FAKE_FULLSEND_ARTIFACTS="1")
+    exec_result, output_dir, workspace = _run_execute(project, env, parallelism=2)
+    assert exec_result.returncode == 0, exec_result.stderr
+    entries = _read_calls(calls)
+    prepares = [e for e in entries if e["argv"][0] == "prepare"]
+    runs = [e for e in entries if e["argv"][0] == "run"]
+    assert len(prepares) == 1
+    assert len(runs) == 2
+    # The suite hook's env reached the preparation and every case.
+    assert prepares[0]["env"]["BEFORE_ALL_VAR"] == "from_before_all"
+    assert all(r["env"]["BEFORE_ALL_VAR"] == "from_before_all" for r in runs)
+
+
+def test_prepare_does_not_inherit_fullsend_task(tmp_path, fake_bin):
+    """A FULLSEND_TASK inherited by the harness process (some other run's
+    task) must not reach the prepare child — prepare runs no agent — while
+    each case still gets its own task (#348)."""
+    project = _fullsend_case_project(tmp_path)
+    env, record, calls = _prepare_env(fake_bin, tmp_path,
+                                      FAKE_FULLSEND_ARTIFACTS="1",
+                                      FULLSEND_TASK="/stale.skill other-run")
+    exec_result, output_dir, workspace = _run_execute(project, env, parallelism=2)
+    assert exec_result.returncode == 0, exec_result.stderr
+    entries = _read_calls(calls)
+    prepares = [e for e in entries if e["argv"][0] == "prepare"]
+    runs = [e for e in entries if e["argv"][0] == "run"]
+    assert len(prepares) == 1
+    assert len(runs) == 2
+    # The inherited task never reached the prepare child...
+    assert prepares[0]["env_task"] is None
+    # ...and every case ran its own task, not the inherited one.
+    for run in runs:
+        assert run["env_task"].startswith("/rfe.speedrun")
+
+
+def test_prepare_failure_fails_the_run_before_any_case(tmp_path, fake_bin):
+    """A failed preparation is fatal, visible and redacted: fullsend's
+    captured output — including arbitrary lines the live filter would drop —
+    reaches the error, while a credential it echoed and an Actions mask
+    value declared on stdout but echoed on stderr never do (GitHub's
+    ::stop-commands:: can disable add-mask, so the harness masks for
+    itself). No case ever runs; the suite hooks keep their lifecycle."""
+    project = _fullsend_case_project(tmp_path)
+    cfg = yaml.safe_load((project / "eval.yaml").read_text())
+    cfg["execution"]["env"]["PREPARE_SECRET_TOKEN"] = "opaque-token-abcdef"
+    cfg["hooks"] = {
+        "before_all": [{"command": "touch $AGENT_EVAL_WORKSPACE/before_all.marker",
+                        "description": "suite setup"}],
+        "after_all": [{"command": "touch $AGENT_EVAL_WORKSPACE/after_all.marker",
+                       "description": "suite teardown", "on_failure": "continue"}],
+    }
+    (project / "eval.yaml").write_text(yaml.dump(cfg))
+    env, record, calls = _prepare_env(fake_bin, tmp_path,
+                                      FAKE_FULLSEND_PREPARE_FAIL="1",
+                                      FAKE_FULLSEND_MASK="masked-value-123456",
+                                      FAKE_FULLSEND_PREPARE_ERR_TEXT=
+                                      "widget assembly failed unexpectedly")
+    exec_result, output_dir, workspace = _run_execute(project, env, parallelism=2)
+    assert exec_result.returncode == 1
+    assert "preparation failed before any case ran" in exec_result.stderr
+    # Actionable text survives: the alert-shaped cause and an arbitrary line
+    # the live filter drops (it is not in the streamed stdout).
+    assert "image-unresolvable" in exec_result.stderr
+    assert "widget assembly failed unexpectedly" in exec_result.stderr
+    assert "widget assembly failed unexpectedly" not in exec_result.stdout
+    # The secret and the mask value appear in neither stream of the output.
+    assert "opaque-token-abcdef" not in exec_result.stdout
+    assert "opaque-token-abcdef" not in exec_result.stderr
+    assert "masked-value-123456" not in exec_result.stdout
+    assert "masked-value-123456" not in exec_result.stderr
+    assert "***" in exec_result.stderr
+    assert [e["argv"][0] for e in _read_calls(calls)] == ["prepare"]
+    assert not record.exists()  # no case reached the agent
+    assert not (output_dir / "run_result.json").exists()
+    # before_all ran before prepare and after_all still ran after the failure.
+    assert (workspace / "before_all.marker").is_file()
+    assert (workspace / "after_all.marker").is_file()
+
+
+def test_prepare_failure_redacts_without_log_prefix(
+        tmp_path, fake_fullsend, monkeypatch):
+    """Without a log prefix nothing is streamed live at all; the captured
+    console still reaches the error, filtered lines included, with the
+    echoed credential and the cross-stream mask value masked (#348)."""
+    monkeypatch.setenv("FAKE_FULLSEND_PREPARE_FAIL", "1")
+    monkeypatch.setenv("FAKE_FULLSEND_PREPARE_ERR_TEXT",
+                       "widget assembly failed unexpectedly")
+    monkeypatch.setenv("FAKE_FULLSEND_MASK", "masked-value-123456")
+    monkeypatch.setenv("PREPARE_SECRET_TOKEN", "opaque-token-abcdef")
+    runner = _runner(tmp_path)  # no log_prefix: no live forwarding
+    with pytest.raises(FullsendPrepareError) as excinfo:
+        runner.prepare()
+    message = str(excinfo.value)
+    assert "fullsend prepare failed" in message
+    assert "image-unresolvable" in message
+    assert "widget assembly failed unexpectedly" in message
+    assert "opaque-token-abcdef" not in message
+    assert "masked-value-123456" not in message
+    assert "***" in message
+
+
+def test_prepare_autodetects_forge_and_keeps_run_extra_args(tmp_path, fake_bin):
+    """A GitHub Actions workflow: with ``--forge github`` in
+    extra_args under ``GITHUB_ACTIONS=true``, prepare relies on fullsend's
+    forge auto-detection (no flag handed to it) while the cases keep their
+    original args, and the warning says extra_args do not reach prepare
+    (#348)."""
+    project = _fullsend_case_project(tmp_path)
+    cfg = yaml.safe_load((project / "eval.yaml").read_text())
+    cfg["runner"]["extra_args"] = ["--forge", "github"]
+    (project / "eval.yaml").write_text(yaml.dump(cfg))
+    env, record, calls = _prepare_env(fake_bin, tmp_path,
+                                      FAKE_FULLSEND_ARTIFACTS="1",
+                                      GITHUB_ACTIONS="true")
+    exec_result, output_dir, workspace = _run_execute(project, env, parallelism=2)
+    assert exec_result.returncode == 0, exec_result.stderr
+
+    entries = _read_calls(calls)
+    prepares = [e for e in entries if e["argv"][0] == "prepare"]
+    runs = [e for e in entries if e["argv"][0] == "run"]
+    assert len(prepares) == 1
+    assert len(runs) == 2
+    # prepare gets no extra_args: fullsend auto-detects the forge from the
+    # CI environment (GITHUB_ACTIONS reached it — same env as run).
+    assert prepares[0]["argv"] == [
+        "prepare", "rfe-creator-eval",
+        "--fullsend-dir", str((project / ".fullsend").resolve()), "--json"]
+    assert prepares[0]["env"]["GITHUB_ACTIONS"] == "true"
+    # The cases keep their original args verbatim.
+    for run in runs:
+        assert run["argv"][-2:] == ["--forge", "github"]
+    # The warning says prepare does not receive extra_args; it names no
+    # values of them (the Running: lines echo the run command, as always).
+    warning = next(line for line in exec_result.stdout.splitlines()
+                   if "does not receive runner.extra_args" in line)
+    assert "github" not in warning
+
+
+def test_multi_step_run_does_not_prepare_the_top_level_runner(tmp_path,
+                                                              fake_bin):
+    """A multi-step pipeline is not prepared, even when the top-level runner
+    is fullsend: its steps may override the runner per step, so the
+    top-level runner's image is not necessarily what runs."""
+    project = tmp_path / "project"
+    (project / "cases" / "case-001").mkdir(parents=True)
+    (project / "cases" / "case-001" / "input.yaml").write_text(
+        yaml.dump({"prompt": "hello"}))
+    (project / ".fullsend").mkdir()
+    (project / ".fullsend" / "config.yaml").write_text("agents: []\n")
+    (project / "eval.yaml").write_text(yaml.dump({
+        "name": "fullsend-multistep",
+        "execution": {"steps": [{
+            "id": "s1", "prompt": "{{ input.prompt }}",
+            "runner": {"type": "cli", "command": ["bash", "-c", "echo hi"]}}]},
+        "runner": {"type": "fullsend", "agent": "rfe-creator-eval"},
+        "models": {"skill": "opus"},
+        "dataset": {"path": "cases", "schema": "Each case has a prompt"},
+    }))
+    calls = tmp_path / "calls.jsonl"
+    runs_dir = tmp_path / "runs"
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("_AGENT_EVAL_BOOTSTRAP_DONE", "FAKE_FULLSEND_EXIT",
+                        "FAKE_FULLSEND_SLEEP")}
+    env.update({
+        "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}",
+        "AGENT_EVAL_RUNS_DIR": str(runs_dir),
+        "FAKE_FULLSEND_CALLS": str(calls),
+    })
+    ws_result = _run_script("workspace.py", ["--config", "eval.yaml",
+                                             "--run-id", "r1"],
+                            cwd=project, env=env)
+    assert ws_result.returncode == 0, ws_result.stderr
+    workspace = next(Path(line.split(":", 1)[1].strip())
+                     for line in ws_result.stdout.splitlines()
+                     if line.startswith("WORKSPACE:"))
+    output_dir = runs_dir / "fullsend-multistep" / "r1"
+    output_dir.mkdir(parents=True)
+    exec_result = _run_script("execute.py", [
+        "--workspace", str(workspace), "--model", "opus",
+        "--output", str(output_dir), "--config", str(project / "eval.yaml"),
+        "--run-id", "r1",
+    ], cwd=project, env=env)
+    assert exec_result.returncode == 0, exec_result.stderr
+    # The fake fullsend was on PATH and the top-level runner is fullsend,
+    # but no prepare (and no run) ever invoked it.
+    assert not calls.exists()
+    assert (output_dir / "cases" / "case-001" / "run_result.json").is_file()
+
+
+def test_prepare_timeout_stops_the_process_group(tmp_path, fake_fullsend,
+                                                 monkeypatch):
+    """A prepare timeout terminates fullsend's whole process group: the
+    child of an in-flight pull dies with the leader, not after it."""
+    child_pid = tmp_path / "child.pid"
+    monkeypatch.setenv("FAKE_FULLSEND_PREPARE_HANG", "1")
+    monkeypatch.setenv("FAKE_FULLSEND_CHILD_PID", str(child_pid))
+    runner = _runner(tmp_path, term_grace_s=2)
+    with pytest.raises(FullsendPrepareError, match="Timed out"):
+        runner.prepare(timeout_s=1)
+    pid = int(child_pid.read_text())
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.05)
+    else:
+        pytest.fail(f"prepare left child pid {pid} alive after the timeout")
+
+
+def test_non_fullsend_runner_never_prepares(tmp_path, fake_bin):
+    """A cli-runner case-mode run never invokes fullsend prepare."""
+    project = tmp_path / "cli-project"
+    (project / "cases" / "case-001").mkdir(parents=True)
+    (project / "cases" / "case-001" / "input.yaml").write_text(
+        yaml.dump({"prompt": "hello"}))
+    (project / "eval.yaml").write_text(yaml.dump({
+        "name": "cli-case-prepare",
+        "execution": {"skill": "test-echo", "mode": "case",
+                      "arguments": "{prompt}"},
+        "runner": {"type": "cli", "command": ["bash", "-c", "echo hi"]},
+        "models": {"skill": "test-model"},
+        "dataset": {"path": "cases", "schema": "Each case has a prompt"},
+    }))
+    calls = tmp_path / "calls.jsonl"
+    runs_dir = tmp_path / "runs"
+    env = {**os.environ,
+           "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}",
+           "AGENT_EVAL_RUNS_DIR": str(runs_dir),
+           "FAKE_FULLSEND_CALLS": str(calls)}
+    ws_result = _run_script("workspace.py", ["--config", "eval.yaml",
+                                             "--run-id", "r1"],
+                            cwd=project, env=env)
+    assert ws_result.returncode == 0, ws_result.stderr
+    workspace = next(Path(line.split(":", 1)[1].strip())
+                     for line in ws_result.stdout.splitlines()
+                     if line.startswith("WORKSPACE:"))
+    output_dir = runs_dir / "test-echo" / "r1"
+    output_dir.mkdir(parents=True)
+    exec_result = _run_script("execute.py", [
+        "--workspace", str(workspace), "--skill", "test-echo",
+        "--model", "test-model", "--output", str(output_dir),
+        "--config", str(project / "eval.yaml"), "--run-id", "r1",
+    ], cwd=project, env=env)
+    assert exec_result.returncode == 0, exec_result.stderr
+    # The fake fullsend was on PATH the whole time and was never called.
+    assert not calls.exists()
 
 
 # ── Run provenance ───────────────────────────────────────────────────
@@ -4147,3 +4610,113 @@ class TestFullsendConsoleStreaming:
             console.join(5)
             console.detach()
             proc.wait(timeout=5)
+
+
+# ── fullsend prepare: old binaries and --json failures (#348) ─────────
+
+def _prepare_json(**fields):
+    return json.dumps(fields)
+
+
+def test_prepare_skips_with_warning_when_binary_has_no_prepare(
+        tmp_path, fake_fullsend, monkeypatch, capsys):
+    """A fullsend that predates ``prepare`` is not a preparation failure: a
+    WARNING names the binary and the fullsend that ships it, the real
+    ``prepare`` is never invoked and nothing is raised."""
+    calls = tmp_path / "calls.jsonl"
+    monkeypatch.setenv("FAKE_FULLSEND_CALLS", str(calls))
+    monkeypatch.setenv("FAKE_FULLSEND_NO_PREPARE", "1")
+    _runner(tmp_path).prepare()
+    out = capsys.readouterr().out
+    assert "WARNING" in out
+    assert "no 'prepare' subcommand" in out
+    assert "012eb5d6" in out
+    assert not calls.exists()  # the real prepare never ran
+
+
+def test_prepare_runs_json_when_binary_has_prepare(
+        tmp_path, fake_fullsend, monkeypatch):
+    calls = tmp_path / "calls.jsonl"
+    monkeypatch.setenv("FAKE_FULLSEND_CALLS", str(calls))
+    _runner(tmp_path).prepare()
+    (entry,) = _read_calls(calls)
+    assert entry["argv"][0] == "prepare"
+    assert entry["argv"][-1] == "--json"
+
+
+def test_prepare_probe_launch_error_falls_through_to_the_real_call(tmp_path):
+    """A probe that cannot launch says nothing about the binary's age: the
+    real call's launch error is the failure."""
+    runner = _runner(tmp_path, binary=str(tmp_path / "does-not-exist"))
+    with pytest.raises(FullsendPrepareError) as excinfo:
+        runner.prepare()
+    assert "No such file or directory" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("kind", ["sandbox-preflight", "sandbox-cleanup"])
+def test_prepare_sandbox_failure_is_a_warning(
+        tmp_path, fake_fullsend, monkeypatch, capsys, kind):
+    """A single-attempt sandbox preflight failure must not abort the eval:
+    each case's run retries sandbox creation."""
+    monkeypatch.setenv("FAKE_FULLSEND_PREPARE_JSON", _prepare_json(
+        ok=False,
+        error={"kind": kind, "message": "sandbox create timed out",
+               "hint": "raise sandbox_timeout_seconds"},
+        preflight={"sandbox": "left-behind-sbx", "cleanup": "failed"}))
+    _runner(tmp_path).prepare()  # does not raise
+    out = capsys.readouterr().out
+    assert "WARNING" in out
+    assert kind in out
+    assert "sandbox create timed out" in out
+    assert "raise sandbox_timeout_seconds" in out
+    assert ("left-behind-sbx" in out) == (kind == "sandbox-cleanup")
+
+
+@pytest.mark.parametrize("kind", [
+    "configuration", "openshell-unavailable", "gateway-unavailable",
+    "image-unresolvable", "registry-auth", "disk-space", "canceled",
+    "some-future-kind"])
+def test_prepare_other_json_failure_kinds_raise(
+        tmp_path, fake_fullsend, monkeypatch, kind):
+    monkeypatch.setenv("FAKE_FULLSEND_PREPARE_JSON", _prepare_json(
+        ok=False, error={"kind": kind, "message": "it broke",
+                         "hint": "do the thing"}))
+    with pytest.raises(FullsendPrepareError) as excinfo:
+        _runner(tmp_path).prepare()
+    message = str(excinfo.value)
+    # The kind, message and hint lead; the console note follows, without the
+    # raw JSON line repeated.
+    assert message.startswith(f"{kind}; it broke; do the thing\n")
+    assert "fullsend prepare failed" in message
+    assert "progress: resolving image" in message
+    assert '"ok"' not in message
+
+
+def test_prepare_json_failure_fields_are_redacted(
+        tmp_path, fake_fullsend, monkeypatch):
+    monkeypatch.setenv("PREPARE_SECRET_TOKEN", "opaque-token-abcdef")
+    monkeypatch.setenv("FAKE_FULLSEND_PREPARE_JSON", _prepare_json(
+        ok=False, error={"kind": "registry-auth",
+                         "message": "denied for opaque-token-abcdef",
+                         "hint": ""}))
+    with pytest.raises(FullsendPrepareError) as excinfo:
+        _runner(tmp_path).prepare()
+    assert "opaque-token-abcdef" not in str(excinfo.value)
+    assert "registry-auth; denied for ***" in str(excinfo.value)
+
+
+def test_prepare_json_success_is_ignored_on_exit_zero(
+        tmp_path, fake_fullsend, monkeypatch):
+    monkeypatch.setenv("FAKE_FULLSEND_PREPARE_JSON", _prepare_json(ok=True))
+    _runner(tmp_path).prepare()
+
+
+def test_prepare_nonzero_without_json_still_raises(
+        tmp_path, fake_fullsend, monkeypatch):
+    """The non-JSON failure path (stdout without an error object) raises as
+    before, with the console in the message."""
+    monkeypatch.setenv("FAKE_FULLSEND_PREPARE_FAIL", "1")
+    with pytest.raises(FullsendPrepareError) as excinfo:
+        _runner(tmp_path).prepare()
+    assert "image-unresolvable" in str(excinfo.value)
+    assert str(excinfo.value).startswith("fullsend prepare failed")
