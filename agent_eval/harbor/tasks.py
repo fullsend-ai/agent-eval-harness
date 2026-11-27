@@ -46,7 +46,11 @@ import yaml
 from agent_eval.config import EvalConfig, load_raw, resolve_arguments
 from agent_eval.judges import BuiltinJudgeRegistry
 from agent_eval.tools.interception import generate_interception
-from agent_eval.workspace_provisioning import materialize_shared_files
+from agent_eval.workspace_provisioning import (
+    STAGING_VERSION,
+    dataset_protected_paths,
+    materialize_shared_files,
+)
 
 _TEMPLATES = Path(__file__).resolve().parent / "templates"
 
@@ -283,6 +287,9 @@ def _render_multistep_task_toml(*, task_name, task_desc, eval_name, case_id,
         # Which config file(s) produced the bundle (root first); the reuse check
         # refuses a package built from a different chain.
         "config_chain = [" + ", ".join(_toml_string(c) for c in (config_chain or [])) + "]",
+        # Which dataset filtering staged the package; the reuse check refuses
+        # a package without it (staged before the dataset was kept out).
+        f"dataset_filter = {STAGING_VERSION}",
         "",
         "[environment]",
         f'docker_image = {_toml_string(image)}',
@@ -301,6 +308,27 @@ def _render_multistep_task_toml(*, task_name, task_desc, eval_name, case_id,
             f"timeout_sec = {verifier_timeout}",
         ]
     return "\n".join(lines) + "\n"
+
+
+def _reset_task_dir(task_dir: Path, cases_root: Path) -> None:
+    """Delete a case's previous task package so regeneration starts clean.
+
+    Refused when the package directory is a dataset case directory itself (the
+    tasks directory is the dataset) or holds the dataset: removing it would
+    delete cases.
+    """
+    if not task_dir.exists() and not task_dir.is_symlink():
+        return
+    real, root = task_dir.resolve(), cases_root.resolve()
+    if real == root or real.parent == root or root.is_relative_to(real):
+        raise ValueError(
+            f"Harbor task package {task_dir} is, or holds, a dataset case "
+            f"directory under {cases_root}; choose a tasks directory outside "
+            "the dataset")
+    if task_dir.is_symlink() or task_dir.is_file():
+        task_dir.unlink()
+    else:
+        shutil.rmtree(task_dir)
 
 
 def _write_multi_step_case_package(config, config_path, bundled_cfg, case_dir,
@@ -404,7 +432,8 @@ def _write_multi_step_case_package(config, config_path, bundled_cfg, case_dir,
         shutil.copy2(answers, env_dir / "answers.yaml")
     # Shared {dest, source} workspace.files, resolved from the local checkout
     # and copied in so the file travels inside the task package.
-    materialize_shared_files(env_dir, config)
+    materialize_shared_files(
+        env_dir, config, protected_paths=dataset_protected_paths(config))
     _generate_tool_interception(env_dir, config, config_path, workdir)
     return task_dir
 
@@ -469,6 +498,10 @@ def generate_tasks(
         if input_file:
             input_data = yaml.safe_load(input_file.read_text()) or {}
 
+        # Regeneration replaces a case's package outright: whatever an earlier
+        # run staged in it (an answer key included) must not survive.
+        _reset_task_dir(out_dir / case_id, cases_root)
+
         # Multi-step pipeline → schema 1.4 [[steps]] package.
         if config.execution.steps:
             task_dir = _write_multi_step_case_package(
@@ -508,6 +541,7 @@ def generate_tasks(
             # Which config file(s) produced the bundle (root first).
             "CONFIG_CHAIN": "[" + ", ".join(
                 _toml_string(c) for c in (getattr(config, "config_chain", None) or [])) + "]",
+            "DATASET_FILTER": str(STAGING_VERSION),
             "IMAGE": _toml_string(image),
             "WORKDIR": _toml_string(workdir),
             "VERIFIER_TIMEOUT": verifier_timeout,
@@ -544,7 +578,8 @@ def generate_tasks(
             shutil.copy2(answers, env_dir / "answers.yaml")
         # Shared {dest, source} workspace.files, resolved from the local
         # checkout and copied in so the file travels inside the task package.
-        materialize_shared_files(env_dir, config)
+        materialize_shared_files(
+            env_dir, config, protected_paths=dataset_protected_paths(config))
 
         # Batch mode: create a 1-item batch.yaml so the same --input batch.yaml
         # argument works per-case in Harbor as it does in local batch runs.

@@ -78,6 +78,11 @@ from agent_eval.actions_mask import (
     redact_actions_masks_in_data,
 )
 from agent_eval.config import resolve_env_value, workspace_source_roots
+from agent_eval.workspace_provisioning import (
+    dataset_protected_paths,
+    is_protected,
+    staged_workspace_error,
+)
 from .base import EvalRunner, RunResult, terminate_process_group
 from .stream_capture import (
     count_subagent_turns, extract_usage, message_ids_for_run,
@@ -374,6 +379,7 @@ class FullsendRunner(EvalRunner):
             term_grace_s=getattr(runner, "term_grace_s", None),
             log_prefix=log_prefix,
             allowed_roots=workspace_source_roots(config),
+            protected_paths=dataset_protected_paths(config),
         )
 
     def __init__(
@@ -390,6 +396,7 @@ class FullsendRunner(EvalRunner):
         log_prefix: Optional[str] = None,
         allowed_roots: Optional[list] = None,
         unrestricted_symlink_copy: bool = False,
+        protected_paths: Optional[list] = None,
         **_kwargs,
     ):
         if not agent or not isinstance(agent, str):
@@ -415,6 +422,9 @@ class FullsendRunner(EvalRunner):
         self._allowed_roots = (
             None if unrestricted_symlink_copy
             else [Path(r).resolve() for r in (allowed_roots or [])])
+        # Paths that never reach the sandbox, whatever links lead to them: the
+        # dataset (annotations.yaml, reference answers) is evaluation material.
+        self._protected_paths = [Path(p).resolve() for p in (protected_paths or [])]
 
     @property
     def name(self) -> str:
@@ -525,6 +535,16 @@ class FullsendRunner(EvalRunner):
                         "run and no artifacts could be collected; remove it"))
 
         workspace = workspace.resolve()
+        # The dataset is kept out of a workspace when it is staged, for every
+        # runner (a ``--agent fullsend`` override and a pipeline step receive
+        # the same workspace). A workspace without that record predates the
+        # filtering or was not staged by workspace.py: the upload would carry
+        # whatever it holds, so it is refused and has to be staged again.
+        stale = staged_workspace_error(workspace)
+        if stale:
+            return RunResult(
+                exit_code=-1, stdout="", duration_s=0.0,
+                stderr=f"fullsend runner: {stale}")
         original_settings = None
         try:
             try:
@@ -539,7 +559,7 @@ class FullsendRunner(EvalRunner):
                 # a relative link in an isolated workspace) are always allowed.
                 roots = (None if self._allowed_roots is None
                          else [*self._allowed_roots, workspace])
-                materialize_symlinks(workspace, roots)
+                materialize_symlinks(workspace, roots, self._protected_paths)
                 output_dir = _run_base(workspace)
             except (OSError, ValueError, shutil.Error) as e:
                 return RunResult(
@@ -1943,7 +1963,8 @@ def _runs_workspace_hook(command: str, hook_dirs: list) -> bool:
     return False
 
 
-def materialize_symlinks(workspace: Path, allowed_roots: Optional[list] = None) -> None:
+def materialize_symlinks(workspace: Path, allowed_roots: Optional[list] = None,
+                         protected: Optional[list] = None) -> None:
     """Replace every symlink at the workspace top level and under ``.claude/``
     with a real copy.
 
@@ -1955,7 +1976,9 @@ def materialize_symlinks(workspace: Path, allowed_roots: Optional[list] = None) 
     root is dropped instead of copied, so host files never reach the sandbox.
     Only the workspace is modified — link targets are read, never written. Each
     copy is built under a temporary name and swapped in for the link last, so
-    a failed copy leaves the link in place.
+    a failed copy leaves the link in place. ``protected`` paths (the dataset)
+    are never copied: a link to one is dropped, and a protected directory
+    inside a linked tree is left out of the copy.
     """
     # The workspace's own settings file is sanitised before this runs, so a
     # top-level link to it may be copied; a link to any other settings file, or
@@ -1963,11 +1986,11 @@ def materialize_symlinks(workspace: Path, allowed_roots: Optional[list] = None) 
     canonical = _resolve_link(workspace / ".claude" / "settings.json")
     settings_ids = _settings_identities(workspace, allowed_roots)
     for entry in sorted(workspace.iterdir()):
-        _materialize_link(entry, allowed_roots, canonical, settings_ids)
+        _materialize_link(entry, allowed_roots, canonical, settings_ids, protected)
     claude_dir = workspace / ".claude"
     if claude_dir.is_dir():
         for entry in sorted(claude_dir.iterdir()):
-            _materialize_link(entry, allowed_roots, canonical, settings_ids)
+            _materialize_link(entry, allowed_roots, canonical, settings_ids, protected)
 
 
 def _resolve_link(path: Path) -> Optional[Path]:
@@ -2038,7 +2061,8 @@ def _within_roots(path: Path, allowed_roots: Optional[list]) -> bool:
 
 def _materialize_link(path: Path, allowed_roots: Optional[list] = None,
                       canonical_settings: Optional[Path] = None,
-                      settings_ids: frozenset = frozenset()) -> None:
+                      settings_ids: frozenset = frozenset(),
+                      protected: Optional[list] = None) -> None:
     if not path.is_symlink():
         return
     if _is_settings_destination(path):
@@ -2051,6 +2075,10 @@ def _materialize_link(path: Path, allowed_roots: Optional[list] = None,
         return
     if not _within_roots(target, allowed_roots):
         _warn_outside_roots(path)
+        path.unlink()
+        return
+    if is_protected(target, protected or ()):
+        _warn_protected(path)
         path.unlink()
         return
     # A link to its own directory or an ancestor of it (``alias -> .``) would
@@ -2084,7 +2112,7 @@ def _materialize_link(path: Path, allowed_roots: Optional[list] = None,
         staged = scratch / path.name
         if target.is_dir():
             _copy_tree(target, staged, allowed_roots, (target,), scratch.resolve(),
-                       settings_ids)
+                       settings_ids, protected)
         else:
             shutil.copy2(target, staged)
         path.unlink()
@@ -2095,7 +2123,8 @@ def _materialize_link(path: Path, allowed_roots: Optional[list] = None,
 
 def _copy_tree(src: Path, dest: Path, allowed_roots, active: tuple,
                staging: Optional[Path] = None,
-               settings_ids: frozenset = frozenset()) -> None:
+               settings_ids: frozenset = frozenset(),
+               protected: Optional[list] = None) -> None:
     """Copy ``src`` into ``dest`` as real files, following symlinks.
 
     Each nested link resolves relative to its own parent. Dangling links,
@@ -2108,7 +2137,8 @@ def _copy_tree(src: Path, dest: Path, allowed_roots, active: tuple,
     ``.claude`` directory included), regular or linked and however the tree
     was reached. Entries are also judged by what they resolve to: a resolved
     ``.claude/settings*.json`` file is skipped, and a resolved directory
-    named ``.claude`` is not copied at all."""
+    named ``.claude`` is not copied at all. An entry that resolves to, or into,
+    a ``protected`` path (the dataset) is skipped, link or not."""
     dest.mkdir(parents=True, exist_ok=True)
     for entry in sorted(src.iterdir()):
         if entry.name == ".git":
@@ -2124,6 +2154,9 @@ def _copy_tree(src: Path, dest: Path, allowed_roots, active: tuple,
             if not _within_roots(real, allowed_roots):
                 _warn_outside_roots(entry)
                 continue
+        if protected and is_protected(_resolve_link(real) or real, protected):
+            _warn_protected(entry)
+            continue
         # Decide by source identity too, whether or not the entry is a link:
         # a resolved ``.claude/settings*.json`` file is never copied, and a
         # resolved ``.claude`` directory is a settings container that is not
@@ -2145,7 +2178,7 @@ def _copy_tree(src: Path, dest: Path, allowed_roots, active: tuple,
                 continue
             if real not in active:
                 _copy_tree(real, dest / entry.name, allowed_roots, active + (real,),
-                           staging, settings_ids)
+                           staging, settings_ids, protected)
         elif real.is_file():
             shutil.copy2(real, dest / entry.name)
 
@@ -2155,6 +2188,13 @@ def _warn_outside_roots(path: Path) -> None:
         print(f"  WARNING: not copying symlink {path.name!r} into the fullsend "
               f"workspace: its target is outside the project and plugin "
               f"directories", flush=True)
+
+
+def _warn_protected(path: Path) -> None:
+    with _print_lock:
+        print(f"  WARNING: not copying {path.name!r} into the fullsend "
+              f"workspace: it is, or links to, the eval dataset (answer keys)",
+              flush=True)
 
 
 _SETTINGS_FILE_NAMES = frozenset({"settings.json", "settings.local.json"})

@@ -15,9 +15,10 @@ Only Linux containers are supported. The image is taken from
 """
 
 import asyncio
+import json
 import re
 import shlex
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from harbor.environments.base import BaseEnvironment, ExecResult
 from harbor.environments.capabilities import (
@@ -139,6 +140,52 @@ def _environment_args(environment: dict[str, str]) -> list[str]:
                 "Podman expands value-free names ending in '*' as a "
                 "host-environment prefix glob")
         args += ["-e", key]
+    return args
+
+
+PROJECT_HIDE_ENV = "AGENT_EVAL_PODMAN_PROJECT_HIDE"
+PROJECT_UNSAFE_ENV = "AGENT_EVAL_PODMAN_PROJECT_UNSAFE_ALLOW"
+
+
+def _project_hide_args(project_mount: str) -> list[str]:
+    """``--mount`` args masking the dataset under the project mount.
+
+    ``AGENT_EVAL_PODMAN_PROJECT_HIDE`` is the isolation metadata ``harbor.run``
+    computes for the run: a JSON list of paths relative to the project
+    directory (``[]`` when the dataset is not inside it). Each path is overlaid
+    with an empty tmpfs, created ``notmpcopyup`` so the runtime does not copy
+    the masked directory's content into it.
+
+    A project mount without that metadata is refused: a direct
+    ``harbor run`` would otherwise mount the whole project, dataset included.
+    ``AGENT_EVAL_PODMAN_PROJECT_UNSAFE_ALLOW=1`` is the explicit opt-in for a
+    project directory that holds no answer keys.
+    """
+    raw = os.environ.get(PROJECT_HIDE_ENV)
+    if raw is None or not raw.strip():
+        if os.environ.get(PROJECT_UNSAFE_ENV) == "1":
+            return []
+        raise ValueError(
+            f"Refusing to mount AGENT_EVAL_PODMAN_PROJECT_DIR: {PROJECT_HIDE_ENV} "
+            "is not set, so the eval dataset (answer keys) cannot be masked. "
+            "Run through `harbor/run.py` (/eval-run --runner harbor), or set "
+            f"{PROJECT_UNSAFE_ENV}=1 if the directory holds no dataset.")
+    try:
+        rels = json.loads(raw)
+    except ValueError as exc:
+        raise ValueError(f"{PROJECT_HIDE_ENV} is not valid JSON: {exc}") from exc
+    if not isinstance(rels, list) or not all(isinstance(r, str) for r in rels):
+        raise ValueError(f"{PROJECT_HIDE_ENV} must be a JSON list of paths")
+    args: list[str] = []
+    for rel in rels:
+        path = PurePosixPath(rel)
+        if path.is_absolute() or ".." in path.parts or path.parts in ((), (".",)):
+            raise ValueError(f"Refusing to mask invalid project path {rel!r}")
+        target = PurePosixPath(project_mount, *path.parts)
+        if "," in str(target):
+            raise ValueError(f"Cannot mask project path containing a comma: {rel!r}")
+        args += ["--mount",
+                 f"type=tmpfs,destination={target},ro=true,notmpcopyup"]
     return args
 
 
@@ -298,6 +345,10 @@ class PodmanEnvironment(BaseEnvironment):
             project_mount = os.environ.get("AGENT_EVAL_PODMAN_PROJECT_MOUNT", "/opt/project")
             run_args += ["-v", f"{Path(project_dir).resolve()}:{project_mount}:ro"]
             forwarded["AGENT_EVAL_PROJECT_DIR"] = project_mount
+            # The eval dataset (annotations, reference answers) inside the
+            # project dir is masked with an empty tmpfs so the agent under test
+            # cannot read it, through Bash or otherwise.
+            run_args += _project_hide_args(project_mount)
 
         merged_env = {**forwarded, **(self._persistent_env or {})}
         run_args += _environment_args(merged_env)

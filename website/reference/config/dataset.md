@@ -20,7 +20,7 @@ dataset:
 
 | Field | Type | Default | Purpose |
 | --- | --- | --- | --- |
-| `path` | string | `""` | Directory holding the case sub-directories. Relative to the `eval.yaml` file, or absolute. |
+| `path` | string | `""` | Directory holding the case sub-directories. Relative to the `eval.yaml` file, or absolute. Empty means the config directory (cases next to `eval.yaml`); answer-key protection then covers each subdirectory there that holds case files (`input.*`, `answers.yaml`, `annotations.yaml`), the same ones discovery finds. |
 | `schema` | string | `""` | Natural-language description of a case's structure. Documentation for the LLM agents and judges — not a parsed spec. |
 | `workspace.files` | list of strings or `{dest, source}` maps | `[]` | Whitelist of files/dirs copied into the agent workspace: per-case paths (strings) and/or shared project/plugin resources (`{dest, source}`). **Ignored in batch mode.** |
 
@@ -115,6 +115,8 @@ Behavior (`workspace_files._copy_input_files` + `workspace_provisioning.material
 | `{dest, source}` — source outside project/plugin roots, missing, or dangling | Skipped with a warning (never pulls a host file in — CWE-59). |
 | `{dest, source}` — `dest` colliding with a reserved name (`input.yaml`, `answers.yaml`, `annotations.yaml`, `batch.yaml`, `.claude`, …), or empty/`.`/`/`, absolute, or parent-traversing | Skipped with a warning. |
 | `{dest, source}` — `dest` resolving inside the `source` directory | Skipped with a warning (would recurse). |
+| `{dest, source}` — `source` inside the dataset directory (`dataset.path`; with it empty, a case directory next to `eval.yaml`) | Skipped with a warning, in every case workspace and Harbor task package: the dataset holds the answer keys. |
+| `{dest, source}` — directory `source` that contains the dataset | Copied without it, and without the `.git` directory next to or above it (the repository's history would return the answer keys through `git show`). Only the dataset's own path is filtered: a copy of an answer key made by hand elsewhere in the project is not looked for. |
 | Not listed | Left behind (never reaches the workspace). |
 
 String paths are relative to each case directory; a trailing `/` is stripped, and `..`

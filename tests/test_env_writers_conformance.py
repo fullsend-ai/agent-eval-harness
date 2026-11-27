@@ -35,6 +35,8 @@ def _config(tmp_path, *, execution_env=None, judge=None):
 def test_overlay_carrier_and_package_agree(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", FAKE_KEY)
     monkeypatch.setenv("DATA_DIR_VALUE", "/data")
+    # workspace.py main() exports this into os.environ; an earlier in-process call must not leak in
+    monkeypatch.delenv("EVAL_RUN_HEADER", raising=False)
     plan = make_plan()
     config = _config(tmp_path, execution_env={"DATA_DIR": "$DATA_DIR_VALUE", "STATIC": "1",
                                               "EVAL_RUN_HEADER": "$EVAL_RUN_HEADER"})
