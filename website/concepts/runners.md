@@ -417,8 +417,10 @@ image resolution or the registry authentication belong in `runner.env` /
 passed to prepare (fullsend auto-detects the
 forge from the CI environment); when `extra_args` are present a `WARNING`
 notes that they may make prepare resolve a different image than the runs. A
-preparation failure fails the run before any case starts (a `fullsend` without
-the `prepare` subcommand fails the same way — never silently bypassed), with
+`fullsend` without the `prepare` subcommand runs unprepared with a `WARNING`,
+and so does a `sandbox-preflight` / `sandbox-cleanup` failure of
+`prepare --json` (every case's run retries sandbox creation). Any other
+preparation failure fails the run before any case starts, with
 fullsend's captured output included in the error, redacted and bounded
 (credential-named environment values and Actions `::add-mask::` values
 masked), and is bounded at 1800 s independently of

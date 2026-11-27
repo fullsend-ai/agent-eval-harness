@@ -49,6 +49,16 @@ FAKE_FULLSEND = textwrap.dedent('''\
         print("fullsend version 0.49.0")
         sys.exit(0)
 
+    # `prepare --help`, the harness's capability probe: exits 0 exactly when
+    # the subcommand exists (cobra answers --help before any PreRun hook).
+    if argv == ["prepare", "--help"]:
+        if os.environ.get("FAKE_FULLSEND_NO_PREPARE"):
+            print('Error: unknown command "prepare" for "fullsend"',
+                  file=sys.stderr)
+            sys.exit(1)
+        print("Usage: fullsend prepare <agent>")
+        sys.exit(0)
+
     # Every invocation (prepare or run) appends to the calls log when asked.
     calls = os.environ.get("FAKE_FULLSEND_CALLS")
     if calls:
@@ -74,6 +84,14 @@ FAKE_FULLSEND = textwrap.dedent('''\
             Path(os.environ["FAKE_FULLSEND_CHILD_PID"]).write_text(
                 str(child.pid))
             time.sleep(60)
+        if os.environ.get("FAKE_FULLSEND_PREPARE_JSON"):
+            # prepare --json: progress on stderr, one JSON object on the last
+            # stdout line (also on failure), exit non-zero on failure.
+            print("progress: resolving image", file=sys.stderr)
+            payload = json.loads(os.environ["FAKE_FULLSEND_PREPARE_JSON"])
+            print("not json noise")
+            print(json.dumps(payload))
+            sys.exit(0 if payload.get("ok") else 1)
         if os.environ.get("FAKE_FULLSEND_PREPARE_FAIL"):
             # Like the real CLI on failure: names the cause, may echo a
             # credential from its environment, declare an Actions mask value
@@ -254,7 +272,8 @@ def fake_fullsend(fake_bin, tmp_path, monkeypatch):
                 "FAKE_FULLSEND_RESULT_TEXT", "FAKE_FULLSEND_SECRET",
                 "FAKE_FULLSEND_CALLS", "FAKE_FULLSEND_PREPARE_FAIL",
                 "FAKE_FULLSEND_PREPARE_HANG", "FAKE_FULLSEND_CHILD_PID",
-                "FAKE_FULLSEND_PREPARE_ERR_TEXT", "FAKE_FULLSEND_MASK"):
+                "FAKE_FULLSEND_PREPARE_ERR_TEXT", "FAKE_FULLSEND_MASK",
+                "FAKE_FULLSEND_NO_PREPARE", "FAKE_FULLSEND_PREPARE_JSON"):
         monkeypatch.delenv(var, raising=False)
     return record
 
@@ -1757,7 +1776,8 @@ def _prepare_env(fake_bin, tmp_path, **extra):
                         "FAKE_FULLSEND_SLEEP", "FAKE_FULLSEND_PREPARE_FAIL",
                         "FAKE_FULLSEND_PREPARE_HANG",
                         "FAKE_FULLSEND_CHILD_PID", "FAKE_FULLSEND_PREPARE_ERR_TEXT",
-                        "FAKE_FULLSEND_MASK")}
+                        "FAKE_FULLSEND_MASK", "FAKE_FULLSEND_NO_PREPARE",
+                        "FAKE_FULLSEND_PREPARE_JSON")}
     env.update({
         "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}",
         "AGENT_EVAL_RUNS_DIR": str(tmp_path / "runs"),
@@ -1812,7 +1832,8 @@ def test_prepare_runs_once_before_every_case(tmp_path, fake_bin):
     assert entries[0]["argv"][0] == "prepare"  # before every case
     argv = prepares[0]["argv"]
     assert argv[1] == "rfe-creator-eval"
-    assert argv[2:] == ["--fullsend-dir", str((project / ".fullsend").resolve())]
+    assert argv[2:] == ["--fullsend-dir", str((project / ".fullsend").resolve()),
+                        "--json"]
     # Same environment as run: execution.env reaches prepare; no task is set
     # (prepare runs no agent), while each run carries its FULLSEND_TASK.
     assert prepares[0]["env"]["EVAL_FLAG"] == "on"
@@ -1993,7 +2014,7 @@ def test_prepare_autodetects_forge_and_keeps_run_extra_args(tmp_path, fake_bin):
     # CI environment (GITHUB_ACTIONS reached it — same env as run).
     assert prepares[0]["argv"] == [
         "prepare", "rfe-creator-eval",
-        "--fullsend-dir", str((project / ".fullsend").resolve())]
+        "--fullsend-dir", str((project / ".fullsend").resolve()), "--json"]
     assert prepares[0]["env"]["GITHUB_ACTIONS"] == "true"
     # The cases keep their original args verbatim.
     for run in runs:
@@ -4589,3 +4610,113 @@ class TestFullsendConsoleStreaming:
             console.join(5)
             console.detach()
             proc.wait(timeout=5)
+
+
+# ── fullsend prepare: old binaries and --json failures (#348) ─────────
+
+def _prepare_json(**fields):
+    return json.dumps(fields)
+
+
+def test_prepare_skips_with_warning_when_binary_has_no_prepare(
+        tmp_path, fake_fullsend, monkeypatch, capsys):
+    """A fullsend that predates ``prepare`` is not a preparation failure: a
+    WARNING names the binary and the fullsend that ships it, the real
+    ``prepare`` is never invoked and nothing is raised."""
+    calls = tmp_path / "calls.jsonl"
+    monkeypatch.setenv("FAKE_FULLSEND_CALLS", str(calls))
+    monkeypatch.setenv("FAKE_FULLSEND_NO_PREPARE", "1")
+    _runner(tmp_path).prepare()
+    out = capsys.readouterr().out
+    assert "WARNING" in out
+    assert "no 'prepare' subcommand" in out
+    assert "012eb5d6" in out
+    assert not calls.exists()  # the real prepare never ran
+
+
+def test_prepare_runs_json_when_binary_has_prepare(
+        tmp_path, fake_fullsend, monkeypatch):
+    calls = tmp_path / "calls.jsonl"
+    monkeypatch.setenv("FAKE_FULLSEND_CALLS", str(calls))
+    _runner(tmp_path).prepare()
+    (entry,) = _read_calls(calls)
+    assert entry["argv"][0] == "prepare"
+    assert entry["argv"][-1] == "--json"
+
+
+def test_prepare_probe_launch_error_falls_through_to_the_real_call(tmp_path):
+    """A probe that cannot launch says nothing about the binary's age: the
+    real call's launch error is the failure."""
+    runner = _runner(tmp_path, binary=str(tmp_path / "does-not-exist"))
+    with pytest.raises(FullsendPrepareError) as excinfo:
+        runner.prepare()
+    assert "No such file or directory" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("kind", ["sandbox-preflight", "sandbox-cleanup"])
+def test_prepare_sandbox_failure_is_a_warning(
+        tmp_path, fake_fullsend, monkeypatch, capsys, kind):
+    """A single-attempt sandbox preflight failure must not abort the eval:
+    each case's run retries sandbox creation."""
+    monkeypatch.setenv("FAKE_FULLSEND_PREPARE_JSON", _prepare_json(
+        ok=False,
+        error={"kind": kind, "message": "sandbox create timed out",
+               "hint": "raise sandbox_timeout_seconds"},
+        preflight={"sandbox": "left-behind-sbx", "cleanup": "failed"}))
+    _runner(tmp_path).prepare()  # does not raise
+    out = capsys.readouterr().out
+    assert "WARNING" in out
+    assert kind in out
+    assert "sandbox create timed out" in out
+    assert "raise sandbox_timeout_seconds" in out
+    assert ("left-behind-sbx" in out) == (kind == "sandbox-cleanup")
+
+
+@pytest.mark.parametrize("kind", [
+    "configuration", "openshell-unavailable", "gateway-unavailable",
+    "image-unresolvable", "registry-auth", "disk-space", "canceled",
+    "some-future-kind"])
+def test_prepare_other_json_failure_kinds_raise(
+        tmp_path, fake_fullsend, monkeypatch, kind):
+    monkeypatch.setenv("FAKE_FULLSEND_PREPARE_JSON", _prepare_json(
+        ok=False, error={"kind": kind, "message": "it broke",
+                         "hint": "do the thing"}))
+    with pytest.raises(FullsendPrepareError) as excinfo:
+        _runner(tmp_path).prepare()
+    message = str(excinfo.value)
+    # The kind, message and hint lead; the console note follows, without the
+    # raw JSON line repeated.
+    assert message.startswith(f"{kind}; it broke; do the thing\n")
+    assert "fullsend prepare failed" in message
+    assert "progress: resolving image" in message
+    assert '"ok"' not in message
+
+
+def test_prepare_json_failure_fields_are_redacted(
+        tmp_path, fake_fullsend, monkeypatch):
+    monkeypatch.setenv("PREPARE_SECRET_TOKEN", "opaque-token-abcdef")
+    monkeypatch.setenv("FAKE_FULLSEND_PREPARE_JSON", _prepare_json(
+        ok=False, error={"kind": "registry-auth",
+                         "message": "denied for opaque-token-abcdef",
+                         "hint": ""}))
+    with pytest.raises(FullsendPrepareError) as excinfo:
+        _runner(tmp_path).prepare()
+    assert "opaque-token-abcdef" not in str(excinfo.value)
+    assert "registry-auth; denied for ***" in str(excinfo.value)
+
+
+def test_prepare_json_success_is_ignored_on_exit_zero(
+        tmp_path, fake_fullsend, monkeypatch):
+    monkeypatch.setenv("FAKE_FULLSEND_PREPARE_JSON", _prepare_json(ok=True))
+    _runner(tmp_path).prepare()
+
+
+def test_prepare_nonzero_without_json_still_raises(
+        tmp_path, fake_fullsend, monkeypatch):
+    """The non-JSON failure path (stdout without an error object) raises as
+    before, with the console in the message."""
+    monkeypatch.setenv("FAKE_FULLSEND_PREPARE_FAIL", "1")
+    with pytest.raises(FullsendPrepareError) as excinfo:
+        _runner(tmp_path).prepare()
+    assert "image-unresolvable" in str(excinfo.value)
+    assert str(excinfo.value).startswith("fullsend prepare failed")

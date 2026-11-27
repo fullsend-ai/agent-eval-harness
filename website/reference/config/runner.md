@@ -400,9 +400,20 @@ the image — an explicit `--forge` on another platform, an `--event-file` or
 `--env-file` — may make prepare resolve a different sandbox image than the
 runs.
 
-A preparation failure — including a `fullsend` too old to provide the
-`prepare` subcommand — fails the run before any case starts; it is never
-silently skipped. What fullsend printed on stdout and stderr is captured and
+The harness runs `prepare` with `--json` and reads the result object on the
+last line of its stdout. A `fullsend` that does not provide the `prepare`
+subcommand (probed with `prepare --help`) is not a failure: a `WARNING` says
+the cases will pull the sandbox image concurrently, and the run goes on
+(fullsend-ai/fullsend `012eb5d6` or later ships `prepare`). Preflight failures
+with `error.kind` `sandbox-preflight` or `sandbox-cleanup` are also only a
+`WARNING` (kind, message, hint, and for `sandbox-cleanup` the sandbox left
+behind): the preflight makes a single sandbox attempt, while every case's own
+`fullsend run` retries it. Any other preparation failure — another
+`error.kind` (`configuration`, `openshell-unavailable`, `gateway-unavailable`,
+`image-unresolvable`, `registry-auth`, `disk-space`, `canceled`), the harness
+timeout, a launch error, or a non-zero exit without that JSON — fails the run
+before any case starts, with the `error.kind`, message and hint leading the
+error when fullsend gave them. What fullsend printed on stdout and stderr is captured and
 included in the failure error, redacted and bounded: terminal control
 sequences are stripped, and the values of the credential-named variables of
 fullsend's environment and of the Actions `::add-mask::` declarations in the
@@ -411,8 +422,8 @@ the harness masks them itself. The preflight runs through the same capture
 and process-group teardown as a run, bounded at 1800 s independently of
 `execution.timeout`, so a hung preparation cannot eat the job.
 
-**Scope.** Requires a `fullsend` that provides `prepare` (see fullsend's
-`prepare` documentation). Multi-step pipelines (`execution.steps`) are **not**
+**Scope.** Uses the `prepare` of a `fullsend` that provides it (see fullsend's
+`prepare` documentation); an older one runs unprepared. Multi-step pipelines (`execution.steps`) are **not**
 prepared: their steps may override the runner per step, so the top-level
 runner's image is not necessarily what runs.
 
